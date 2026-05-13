@@ -14,6 +14,7 @@ from online_retarget.data.bones_seed import actor_skeletons, summarize_metadata
 from online_retarget.data.quality_merge import merge_quality_stats
 from online_retarget.data.supervised_builder import SupervisedBuildConfig, build_supervised_jsonl
 from online_retarget.data.thresholds import write_threshold_proposals
+from online_retarget.data.windowed_builder import WindowedBuildConfig, build_windowed_jsonl
 from online_retarget.evaluation import EvaluationConfig, evaluate_jsonl
 
 
@@ -102,6 +103,21 @@ def main() -> None:
     supervised.add_argument("--history-frames", type=int, default=8)
     supervised.add_argument("--target-frame-offset", type=int, default=0)
 
+    windowed = subparsers.add_parser(
+        "build-windowed-jsonl",
+        help="Build fixed 30-body source-position windows and G1-joint JSONL samples",
+    )
+    windowed.add_argument("--data-root", type=Path, default=Paths.from_env().data_root)
+    windowed.add_argument("--index-csv", type=Path, required=True)
+    windowed.add_argument("--output-root", type=Path, default=Paths.from_env().output_root)
+    windowed.add_argument("--split", default="train")
+    windowed.add_argument("--curation-action", action="append", default=[])
+    windowed.add_argument("--action-column", default="merged_quality_action")
+    windowed.add_argument("--limit", type=int, default=16)
+    windowed.add_argument("--history-frames", type=int, default=8)
+    windowed.add_argument("--target-frame-offset", type=int, default=0)
+    windowed.add_argument("--position-scale", type=float, default=0.01)
+
     merge_quality = subparsers.add_parser(
         "merge-quality",
         help="Merge split index, source stats, and G1 stats into a curated index",
@@ -137,6 +153,8 @@ def main() -> None:
         _propose_thresholds(args)
     elif args.command == "build-supervised-jsonl":
         _build_supervised_jsonl(args)
+    elif args.command == "build-windowed-jsonl":
+        _build_windowed_jsonl(args)
     elif args.command == "merge-quality":
         _merge_quality(args)
     elif args.command == "offline-eval":
@@ -232,6 +250,24 @@ def _build_supervised_jsonl(args: argparse.Namespace) -> None:
             limit=args.limit,
             history_frames=args.history_frames,
             target_frame_offset=args.target_frame_offset,
+        ),
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _build_windowed_jsonl(args: argparse.Namespace) -> None:
+    result = build_windowed_jsonl(
+        data_root=args.data_root,
+        index_csv=args.index_csv,
+        output_root=args.output_root,
+        config=WindowedBuildConfig(
+            split=args.split,
+            actions=tuple(args.curation_action) or ("keep", "downweight"),
+            action_column=args.action_column,
+            limit=args.limit,
+            history_frames=args.history_frames,
+            target_frame_offset=args.target_frame_offset,
+            position_scale=args.position_scale,
         ),
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))

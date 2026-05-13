@@ -16,29 +16,36 @@ Verdict: not complete. The repo now has runnable scaffolds, real BONES-SEED smok
 | Keep source data read-only | `.gitignore`, commands write under `runs/`, data root `/home/user/data/motion_data` only read | Satisfied for current work. |
 | Separate different actors/skeletons | real split report: 522 actors, train/val/test actor split 417/52/53 | Satisfied at metadata split level. |
 | Implement M2Q quality filtering | source/G1 scanners, threshold proposal, `merge-quality`, `worst_clips.csv`, train quality gate | Partial. Smoke quality pipeline exists; full scans, FK/contact, penetration/self-collision, and category thresholds remain pending. |
-| Implement M3 schema/obs contract | `src/online_retarget/data/schema.py`, `tests/test_schema.py` | Scaffold implemented. Actual final 30-body tensor extraction is pending. |
+| Implement M3 schema/obs contract | `src/online_retarget/data/schema.py`, `src/online_retarget/data/windowed_builder.py`, `tests/test_schema.py`, `tests/test_windowed_builder.py`, real 30-body smoke artifact | Smoke path implemented. Formal-scale extraction, normalization policy, robot-state wiring, and online preprocessing are pending. |
 | Implement M4 independent eval | `src/online_retarget/evaluation.py`, CLI `offline-eval`, `tests/test_evaluation.py` | Scaffold implemented. Real model predictions and simulator/contact metrics are pending. |
-| Implement M5 supervised baseline | `scripts/train.py`, `src/online_retarget/data/supervised_builder.py`, supervised JSONL artifacts | Partial. PyTorch optimizer loop exists, but current Python lacks torch and final 30-body dataset/WandB/auto-eval are pending. |
-| Enforce quality before formal training | `scripts/train.py` quality gate, `tests/test_train_entry.py`, dry-run output | Implemented for current training entry. Formal non-dry-run refuses missing quality policy metadata. |
+| Implement M5 supervised baseline | `scripts/train.py`, `src/online_retarget/data/supervised_builder.py`, `src/online_retarget/data/windowed_builder.py`, supervised JSONL artifacts | Partial. PyTorch optimizer loop exists, but current Python lacks torch and formal-scale 30-body dataset/WandB/auto-eval are pending. |
+| Enforce quality before formal training | `scripts/train.py` quality gate, sample-builder gate, `tests/test_train_entry.py`, dry-run output, raw-debug negative check | Implemented for current training entry. Formal non-dry-run refuses missing quality metadata and raw debug sample artifacts. |
 | DDP support | `scripts/train.py` reads `RANK`/`WORLD_SIZE` and reports them | Minimal scaffold only. Real distributed training not verified. |
 | WandB traceability | `docs/experiment_tracking.md`, config project name | Not implemented in training code yet. |
 | Implement M6 latency gate | `scripts/benchmark_latency.py --dry-run` scaffold | Scaffold only. Real torch/CUDA/4090 benchmark pending. |
 | Implement M7 Isaac Lab eval | `scripts/eval_isaac.py --dry-run` scaffold | Scaffold only. Real Isaac Lab/G1 replay task pending. |
 | Write live logs | `docs/logs/implementation-log.md` | Satisfied for current implementation history. Keep updating during future work. |
 | Make process/status readable | `docs/milestones.md`, `docs/status/m1_m7_status.md`, this audit | Satisfied as a living tracking surface, not final completion. |
-| Verify current work | `PYTHONPATH=src:. python3 -m unittest discover -s tests` -> 28 tests OK; `py_compile` -> OK; `git diff --check` -> OK; dry-run training -> OK | Current scaffold verified. Not evidence of full M1-M7 completion. |
+| Verify current work | `PYTHONPATH=src:. python3 -m unittest discover -s tests` -> 33 tests OK; targeted `py_compile` -> OK; dry-run training -> OK with `samples_builder_is_formal=true`; raw-debug artifact formal training check fails as intended | Current scaffold verified. Not evidence of full M1-M7 completion. |
 
 ## Latest Verification Evidence
 
 ```bash
 PYTHONPATH=src:. python3 -m unittest discover -s tests
-# Ran 28 tests in 0.025s, OK
+# Ran 33 tests in 0.033s, OK
 
 PYTHONPATH=src:. python3 scripts/train.py --config configs/baseline_mlp.yaml --dry-run --limit 1
 # quality_gate shows policy_id=smoke_source_g1_limit100, quality_report_exists=true,
-# uses_curated_index=true, uses_merged_action=true
+# uses_curated_index=true, uses_merged_action=true, samples_builder=bvh_fk_30body_window,
+# samples_builder_is_formal=true, and train_refs=112765.
 
-PYTHONPATH=src python3 -m py_compile src/online_retarget/data/quality_merge.py scripts/train.py scripts/inspect_bones_seed.py src/online_retarget/cli.py
+PYTHONPATH=src:. python3 scripts/train.py --config configs/baseline_mlp.yaml \
+  --samples-jsonl runs/supervised/train_merged-quality-action_h8_limit8/samples.jsonl \
+  --max-steps 1
+# Fails as intended before torch import because raw_bvh_channel_debug is not a formal
+# bvh_fk_30body_window sample artifact.
+
+PYTHONPATH=src python3 -m py_compile scripts/train.py src/online_retarget/data/windowed_builder.py src/online_retarget/data/__init__.py src/online_retarget/cli.py
 # OK
 
 git diff --check
@@ -50,5 +57,5 @@ git diff --check
 - Current base Python lacks torch/numpy, so real training and latency benchmarking cannot run in this environment.
 - Isaac Lab/G1 replay or tracking task binding is not implemented.
 - M2Q quality scanning is still smoke-scale for source/G1 stats and lacks FK/contact/penetration/self-collision signals.
-- Final M3/M5 training samples still use raw BVH channels for data-path debugging, not the final 30-body observation contract.
+- M3/M5 now have a 30-body smoke sample builder, but formal-scale extraction, normalization, and robot-state wiring remain incomplete.
 - WandB logging, checkpoint artifact registration, and automatic post-train offline eval are pending.

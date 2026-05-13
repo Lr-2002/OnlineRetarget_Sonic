@@ -35,6 +35,11 @@ from .supervised_builder import (
     build_supervised_jsonl,
 )
 from .thresholds import ThresholdProposal, propose_thresholds_from_jsonl, write_threshold_proposals
+from .windowed_builder import (
+    WindowedBuildConfig,
+    WindowedBuildResult,
+    build_windowed_jsonl,
+)
 
 __all__ = [
     "BVHQualityConfig",
@@ -51,6 +56,8 @@ __all__ = [
     "SupervisedBuildConfig",
     "SupervisedBuildResult",
     "ThresholdProposal",
+    "WindowedBuildConfig",
+    "WindowedBuildResult",
     "ActorSkeleton",
     "InventorySummary",
     "QualityDecision",
@@ -63,6 +70,7 @@ __all__ = [
     "actor_skeletons",
     "build_split_index",
     "build_supervised_jsonl",
+    "build_windowed_jsonl",
     "iter_motion_pair_refs",
     "merge_quality_stats",
     "motion_pair_ref_from_index_row",

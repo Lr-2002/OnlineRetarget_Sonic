@@ -124,7 +124,7 @@ Gate:
 
 Stop condition: training/eval code can consume the same sample contract without per-script ad hoc parsing.
 
-Current status: `MotionPairRef`, `ObservationSpec`, `RobotStateSpec`, and `OutputSpec` are implemented and tested. Actual frame window extraction from SOMA/G1 files is still pending.
+Current status: `MotionPairRef`, `ObservationSpec`, `RobotStateSpec`, and `OutputSpec` are implemented and tested. `build-windowed-jsonl` now generates a smoke 30-body BVH-FK position/velocity window artifact matching the 1,547D observation contract. Formal-scale extraction, normalization policy, robot-state wiring, and online preprocessing are still pending.
 
 ## M4 - Offline Evaluation Suite
 
@@ -171,7 +171,7 @@ Gate:
 
 Stop condition: baseline is worse/better by concrete metrics, not subjective visual inspection alone.
 
-Current status: training dry-run validates config, git state, DDP rank/world size, curated index, M2Q quality gate context, observation/output dimensions, and sample refs. A raw-BVH-channel supervised JSONL debug builder exists and has produced real sample artifacts. `scripts/train.py` has a PyTorch optimizer loop for supervised JSONL artifacts and refuses formal training without quality policy metadata. Final 30-body tensor window extraction, WandB logging, automatic offline eval after training, and actual torch-environment training execution are pending.
+Current status: training dry-run validates config, git state, DDP rank/world size, curated index, M2Q quality gate context, observation/output dimensions, and sample refs. Raw-BVH-channel and 30-body BVH-FK supervised JSONL builders exist and have produced real smoke artifacts. `scripts/train.py` has a PyTorch optimizer loop for supervised JSONL artifacts and refuses formal training without quality policy metadata. Formal-scale 30-body dataset generation, WandB logging, automatic offline eval after training, and actual torch-environment training execution are pending.
 
 ## M6 - Model Design Ablations and Latency Gate
 

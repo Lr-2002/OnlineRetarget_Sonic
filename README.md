@@ -90,6 +90,21 @@ PYTHONPATH=src python3 scripts/inspect_bones_seed.py build-supervised-jsonl \
   --history-frames 8
 ```
 
+Build a schema-compatible 30-body window JSONL from the curated index:
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py build-windowed-jsonl \
+  --data-root /home/user/data/motion_data \
+  --index-csv runs/curated/smoke_source_g1_limit100/curated_index.csv \
+  --output-root runs \
+  --split train \
+  --curation-action keep \
+  --curation-action downweight \
+  --action-column merged_quality_action \
+  --limit 4 \
+  --history-frames 8
+```
+
 Merge split index with source/G1 quality stats into a curated index:
 
 ```bash
@@ -130,7 +145,7 @@ Run a formal supervised JSONL training loop in an environment with torch. The co
 ```bash
 PYTHONPATH=src python3 scripts/train.py \
   --config configs/baseline_mlp.yaml \
-  --samples-jsonl runs/supervised/train_merged-quality-action_h8_limit8/samples.jsonl \
+  --samples-jsonl runs/supervised/train_merged-quality-action_30b_h8_limit4/samples.jsonl \
   --max-steps 100 \
   --batch-size 8
 ```

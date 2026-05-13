@@ -62,6 +62,7 @@ class TrainEntryTests(unittest.TestCase):
             (sample_dir / "manifest.json").write_text(
                 json.dumps(
                     {
+                        "builder": "bvh_fk_30body_window",
                         "index_csv": "runs/curated/policy/curated_index.csv",
                         "config": {"action_column": "merged_quality_action"},
                     }
@@ -84,6 +85,72 @@ class TrainEntryTests(unittest.TestCase):
         self.assertTrue(context["uses_curated_index"])
         self.assertTrue(context["uses_merged_action"])
         self.assertTrue(context["quality_report_exists"])
+        self.assertTrue(context["samples_builder_is_formal"])
+        train_entry._validate_quality_gate(context)
+
+    def test_quality_gate_blocks_raw_debug_samples_for_formal_training(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            quality_report = root / "curated_report.json"
+            quality_report.write_text("{}\n", encoding="utf-8")
+            sample_dir = root / "supervised"
+            sample_dir.mkdir()
+            samples = sample_dir / "samples.jsonl"
+            samples.write_text("", encoding="utf-8")
+            (sample_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "builder": "raw_bvh_channel_debug",
+                        "index_csv": "runs/curated/policy/curated_index.csv",
+                        "config": {"action_column": "merged_quality_action"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            context = train_entry._quality_gate_context(
+                {
+                    "data": {
+                        "quality_policy_id": "policy",
+                        "quality_report": str(quality_report),
+                    }
+                },
+                index_csv=None,
+                samples_jsonl=samples,
+            )
+
+        with self.assertRaises(SystemExit) as raised:
+            train_entry._validate_quality_gate(context)
+
+        self.assertIn("formal samples built by bvh_fk_30body_window", str(raised.exception))
+
+    def test_quality_gate_allows_raw_debug_samples_with_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sample_dir = root / "supervised"
+            sample_dir.mkdir()
+            samples = sample_dir / "samples.jsonl"
+            samples.write_text("", encoding="utf-8")
+            (sample_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "builder": "raw_bvh_channel_debug",
+                        "index_csv": "runs/indices/debug/split_index.csv",
+                        "config": {"action_column": "curation_action"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            context = train_entry._quality_gate_context(
+                {},
+                index_csv=None,
+                samples_jsonl=samples,
+                allow_debug_data=True,
+            )
+
         train_entry._validate_quality_gate(context)
 
 

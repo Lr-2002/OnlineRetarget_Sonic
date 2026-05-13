@@ -7,7 +7,7 @@ experiment:
 data:
   root: ${ONLINE_RETARGET_DATA_ROOT}
   index_csv: runs/curated/smoke_source_g1_limit100/curated_index.csv
-  samples_jsonl: runs/supervised/train_merged-quality-action_h8_limit8/samples.jsonl
+  samples_jsonl: runs/supervised/train_merged-quality-action_30b_h8_limit4/samples.jsonl
   action_column: merged_quality_action
   quality_policy_id: smoke_source_g1_limit100
   quality_report: runs/curated/smoke_source_g1_limit100/curated_report.json
