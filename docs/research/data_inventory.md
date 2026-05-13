@@ -156,3 +156,100 @@ PYTHONPATH=src python3 scripts/inspect_bones_seed.py inventory --data-root /home
 ```
 
 This command reads only `metadata/seed_metadata_v003.csv` and prints JSON.
+
+## Reproducible Split Index Command
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py split-index \
+  --data-root /home/user/data/motion_data \
+  --output-root runs \
+  --seed 17 \
+  --train-ratio 0.8 \
+  --val-ratio 0.1 \
+  --policy-name metadata_balanced_v0 \
+  --min-duration-frames 60
+```
+
+Observed result on 2026-05-13:
+
+- Rows: 142,220
+- Actors: 522
+- Actor split train/val/test: 417 / 52 / 53
+- Row split train/val/test: 112,789 / 15,760 / 13,671
+- Curation actions: 71,132 keep, 71,088 downweight
+- Quality flags: 71,088 `mirror_variant`
+
+Current scope: this is metadata-level curation only. Clip-level physical quality flags still need a motion-stat scanner.
+
+## G1 Target Quality Smoke
+
+Command:
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-g1-quality \
+  --data-root /home/user/data/motion_data \
+  --index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
+  --output-root runs \
+  --limit 100 \
+  --fps 30 \
+  --max-joint-velocity 20 \
+  --max-root-speed 8
+```
+
+Observed result on the first 100 indexed G1 CSV targets:
+
+- Actions: 29 keep, 71 quarantine
+- Flags: 71 `joint_velocity_jump`, 28 `root_discontinuity`
+- `max_abs_joint_velocity` p50/p95/max: 70.045590 / 444.556812 / 538.624500
+- `max_root_speed` p50/p95/max: 3.199689 / 35.318570 / 36.870913
+
+Interpretation: the scanner works, but these temporary thresholds are not calibrated. The metric summary should be used to choose per-category or percentile-based thresholds before filtering training data aggressively.
+
+## Source BVH Quality Smoke
+
+Command:
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-source-quality \
+  --data-root /home/user/data/motion_data \
+  --index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
+  --output-root runs \
+  --limit 100 \
+  --max-channel-velocity 3000 \
+  --max-root-speed 500
+```
+
+Observed result on the first 100 indexed SOMA proportional BVH source motions:
+
+- Actions: 59 keep, 40 quarantine, 1 exclude
+- Flags: 40 `source_channel_jump`, 1 `nonfinite_value`, 1 `channel_width_mismatch`
+- `max_abs_channel_velocity` p50/p95/max: 586.721289 / 43245.538600 / 43396.294372
+- `max_root_speed` p50/p95/max: 16.008700 / 170.172050 / 174.569584
+
+Interpretation: source clips also need curation. Some very large channel velocities are likely angular wrap/discontinuity artifacts, while the excluded sample has real nonfinite/channel-width issues in the BVH motion rows. Thresholds are still provisional.
+
+## Threshold Proposal Smoke
+
+Command examples:
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py propose-thresholds \
+  --stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_limit100/g1_quality_stats.jsonl \
+  --output-json runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_limit100/g1_threshold_proposals_p95.json \
+  --metric max_abs_joint_velocity \
+  --metric joint_jump_rate \
+  --metric max_root_speed \
+  --percentile 0.95 \
+  --action quarantine
+```
+
+Current p95 proposals from 100-sample smoke scans:
+
+- G1 `max_abs_joint_velocity`: 444.556812
+- G1 `joint_jump_rate`: 0.158423
+- G1 `max_root_speed`: 35.318570
+- Source BVH `max_abs_channel_velocity`: 43245.538600
+- Source BVH `channel_jump_rate`: 0.000011
+- Source BVH `max_root_speed`: 170.172050
+
+These are not final thresholds. They are traceable proposals to motivate larger scans and per-category calibration.

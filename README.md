@@ -31,6 +31,82 @@ Inventory the local BONES-SEED metadata without modifying data:
 PYTHONPATH=src python3 scripts/inspect_bones_seed.py inventory --data-root /home/user/data/motion_data
 ```
 
+Build an actor-heldout split index and metadata-level curation report under `runs/`:
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py split-index \
+  --data-root /home/user/data/motion_data \
+  --output-root runs \
+  --seed 17 \
+  --train-ratio 0.8 \
+  --val-ratio 0.1 \
+  --policy-name metadata_balanced_v0 \
+  --min-duration-frames 60
+```
+
+Scan G1 target CSV quality stats from a split index:
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-g1-quality \
+  --data-root /home/user/data/motion_data \
+  --index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
+  --output-root runs \
+  --limit 100 \
+  --fps 30 \
+  --max-joint-velocity 20 \
+  --max-root-speed 8
+```
+
+Scan source SOMA BVH quality stats from a split index:
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-source-quality \
+  --data-root /home/user/data/motion_data \
+  --index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
+  --output-root runs \
+  --limit 100 \
+  --max-channel-velocity 3000 \
+  --max-root-speed 500
+```
+
+Evaluate prediction/target JSONL outputs offline:
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py offline-eval \
+  --input-jsonl runs/predictions/example.jsonl \
+  --output-root runs \
+  --run-name baseline_eval
+```
+
+Build a tiny raw-BVH-channel supervised JSONL for data-path debugging:
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py build-supervised-jsonl \
+  --data-root /home/user/data/motion_data \
+  --index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
+  --output-root runs \
+  --split train \
+  --limit 8 \
+  --history-frames 8
+```
+
+Merge split index with source/G1 quality stats into a curated index:
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py merge-quality \
+  --split-index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
+  --source-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_source_limit100/source_bvh_quality_stats.jsonl \
+  --g1-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_limit100/g1_quality_stats.jsonl \
+  --output-root runs \
+  --run-name smoke_source_g1_limit100
+```
+
+The merge writes:
+
+- `runs/curated/<run-name>/curated_index.csv`
+- `runs/curated/<run-name>/curated_report.json`
+- `runs/curated/<run-name>/worst_clips.csv`
+
 Run smoke tests:
 
 ```bash
@@ -41,6 +117,49 @@ Launch a future training run in tmux:
 
 ```bash
 scripts/train_tmux.sh configs/baseline_mlp.yaml
+```
+
+Debug the training contract without starting optimization:
+
+```bash
+PYTHONPATH=src python3 scripts/train.py --config configs/baseline_mlp.yaml --dry-run --limit 1
+```
+
+Run a formal supervised JSONL training loop in an environment with torch. The config must point to a curated index, `merged_quality_action`, a quality policy ID, and an existing quality report:
+
+```bash
+PYTHONPATH=src python3 scripts/train.py \
+  --config configs/baseline_mlp.yaml \
+  --samples-jsonl runs/supervised/train_merged-quality-action_h8_limit8/samples.jsonl \
+  --max-steps 100 \
+  --batch-size 8
+```
+
+For data-path debugging only, bypass the M2Q gate explicitly:
+
+```bash
+PYTHONPATH=src python3 scripts/train.py \
+  --config configs/baseline_mlp.yaml \
+  --samples-jsonl runs/supervised/train_h8_limit8/samples.jsonl \
+  --allow-debug-data \
+  --max-steps 10 \
+  --batch-size 8
+```
+
+Dry-run the latency benchmark contract:
+
+```bash
+python3 scripts/benchmark_latency.py --dry-run --output-json runs/benchmarks/baseline_mlp_dry_run.json
+```
+
+Dry-run the Isaac Lab evaluation contract:
+
+```bash
+python3 scripts/eval_isaac.py \
+  --index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
+  --output-root runs \
+  --run-name dry_run \
+  --dry-run
 ```
 
 ## Key Docs

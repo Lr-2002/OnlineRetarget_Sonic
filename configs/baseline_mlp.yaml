@@ -6,6 +6,12 @@ experiment:
 
 data:
   root: ${ONLINE_RETARGET_DATA_ROOT}
+  index_csv: runs/curated/smoke_source_g1_limit100/curated_index.csv
+  samples_jsonl: runs/supervised/train_merged-quality-action_h8_limit8/samples.jsonl
+  action_column: merged_quality_action
+  quality_policy_id: smoke_source_g1_limit100
+  quality_report: runs/curated/smoke_source_g1_limit100/curated_report.json
+  allow_debug_data: false
   source_format: soma_proportional_bvh
   target_format: g1_csv
   history_frames: 8

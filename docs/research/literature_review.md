@@ -99,6 +99,68 @@ Implication for this repo:
 - Actor-level splits are mandatory to test cross-skeleton generalization.
 - The source skeleton should include morphology features from metadata, not only per-frame motion.
 
+## Data Curation / Filtering References
+
+These works are the closest matches to the user's question about how to filter "good enough" data before or during retargeting.
+
+Detailed implementation mapping now lives in `docs/research/motion_quality_curation.md`. The important planning change is that motion quality is not a side note under data loading; it is a formal M2Q gate between data inventory and formal training.
+
+### NMR / CEPR
+
+Primary links:
+
+- Project page: https://nju3dv-humanoidgroup.github.io/nmr.github.io/
+- arXiv: https://arxiv.org/abs/2603.22201
+
+NMR makes filtering explicit in its CEPR pipeline. The paper description shows three relevant stages: physics-aware human motion curation, humanoid motion curation after kinematic retargeting, and physics-based humanoid motion refinement. The paper text also describes hard-threshold filtering for retargeted clips: reject excessive joint-velocity jumps, reject sequences with geometric self-intersections above a cross-ratio threshold, and prune floating-foot motions above a foot-clearance threshold. It also notes that raw SMPL-style source motion can contain ground penetration or temporal jitter, so source motion is curated before retargeting.
+
+Implication for this repo:
+
+- Use NMR as the strongest direct reference for our M2 quality flags.
+- Separate source-motion curation from target-motion curation.
+- Keep "quality-flagged but useful" motions instead of only binary keep/drop when diversity matters.
+
+### PHUMA
+
+Primary links:
+
+- arXiv: https://arxiv.org/abs/2510.26236
+- Project page: https://davian-robotics.github.io/PHUMA/
+
+PHUMA is a physically grounded humanoid locomotion dataset built from large-scale human video. The abstract explicitly says it addresses floating, penetration, and foot skating through careful data curation and physics-constrained retargeting. It enforces joint limits, ensures ground contact, and removes foot skating. This is the cleanest recent example of treating dataset construction as a physics-quality problem rather than a pure labeling problem.
+
+Implication for this repo:
+
+- Treat joint limits, ground contact, and foot skating as first-class curation gates.
+- Use physics-constrained retargeting as a data-quality upgrade path, not only as a training target.
+
+### ExBody2
+
+Primary links:
+
+- arXiv: https://arxiv.org/abs/2412.13196
+- Project page: https://exbody2.github.io/
+
+ExBody2 describes automatic dataset curation via a feasibility-diversity principle. The available paper snippets show that the method uses a teacher policy to generate intermediate motions, then filters infeasible whole-body motions with a threshold chosen against base-policy tracking performance. The tradeoff matters: too strict a threshold removes useful diversity, while too loose a threshold keeps unstable motions.
+
+Implication for this repo:
+
+- Do not choose a single hard threshold without checking how much motion diversity is lost.
+- Consider a scalar quality score or keep/downweight/quarantine policy instead of only keep/drop.
+
+### A Kung Fu Athlete Bot That Can Do It All Day
+
+Primary links:
+
+- arXiv: https://arxiv.org/abs/2602.13656
+
+This paper is not a retargeting paper per se, but it is useful as a motion-cleaning reference for very dynamic data. The summary describes a video-to-motion correction pipeline that fixes root-height drift, reconstructs airborne phases with a physics-based parabola, and applies Savitzky-Golay smoothing to reduce jitter while keeping key motion peaks. It also uses low-kinetic-energy anchors when sampling episodes.
+
+Implication for this repo:
+
+- Dynamic clips need cleaning rules that preserve peak motion instead of over-smoothing them away.
+- For highly dynamic categories, quality filtering should be category-aware rather than global.
+
 ## Working Design Choices
 
 1. Baseline output is direct G1 joint reference, not latent.
@@ -106,6 +168,8 @@ Implication for this repo:
 3. Evaluation module is independent from training.
 4. Physics-refined targets are a later milestone, likely via Isaac Lab/BeyondMimic-style tracking or NMR-like CEPR.
 5. Diffusion and flow matching are not first-line online models unless distilled into a low-step or direct network that meets the latency budget.
+6. Data filtering should preserve diversity as well as feasibility; a strict binary filter is usually too aggressive for locomotion/dance/interactions.
+7. Formal training must record a quality policy ID and curated index path; debug training can use smoke data only when clearly labeled as debug.
 
 ## Open Questions
 

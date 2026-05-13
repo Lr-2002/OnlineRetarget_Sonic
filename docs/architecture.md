@@ -49,6 +49,15 @@ Initial observation blocks:
 
 The first model should accept a fixed-width flattened window. A more expressive tokenized transformer is only justified after the MLP baseline is measured.
 
+Current schema implementation:
+
+- `MotionPairRef` in `src/online_retarget/data/schema.py` consumes `split_index.csv` rows.
+- `ObservationSpec(history_frames=8, source_body_count=30)` has flattened dim 1,547:
+  - source history positions + velocities: 1,440
+  - morphology: 13
+  - robot state side channel: 94
+- `OutputSpec` defaults to direct 29D G1 joint position delta.
+
 ## Output Design
 
 Default output: 29-dimensional G1 joint target delta or next joint position.
@@ -99,6 +108,13 @@ Initial metrics:
 - `joint_jump_rate`: thresholded velocity discontinuity rate.
 - `joint_limit_violation_rate`: thresholded limit violation rate.
 
+Current eval implementation:
+
+- `src/online_retarget/evaluation.py` evaluates JSONL prediction/target records.
+- CLI: `PYTHONPATH=src python3 scripts/inspect_bones_seed.py offline-eval --input-jsonl <path> --output-root runs --run-name <name>`.
+- Outputs: `eval_summary.json`, `per_sample_metrics.csv`, and `failure_manifest.csv`.
+- Grouping: overall, per actor, per category, per package, and per quality flag.
+
 Future simulator metrics:
 
 - Tracking success rate.
@@ -118,3 +134,15 @@ The online model is not accepted until measured on target hardware. The benchmar
 - parameter count and activation footprint
 
 The default acceptance target is p95 under 1 ms on RTX 4090.
+
+Current benchmark scaffold:
+
+- `scripts/benchmark_latency.py --dry-run` records observation/output dimensions and model hidden dims without importing torch.
+- Non-dry-run requires torch and target hardware, then reports p50/p95/p99/mean/max latency plus parameter count.
+
+## Simulator Gate
+
+Current Isaac Lab scaffold:
+
+- `scripts/eval_isaac.py --dry-run` writes an `isaac_eval_status.json` with expected simulator metrics.
+- Non-dry-run explicitly blocks until Isaac Lab and a G1 replay/tracking task binding are available.
