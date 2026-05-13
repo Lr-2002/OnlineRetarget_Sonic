@@ -13,6 +13,7 @@ import subprocess
 import tarfile
 from typing import Iterable, Mapping, Sequence
 
+from .row_sampling import sampling_run_tag, scan_sampling_report, select_rows_for_scan
 from .windowed_builder import BVHMotion, global_body_position_maps_from_bvh, parse_bvh_motion
 
 
@@ -88,16 +89,16 @@ def scan_source_fk_quality_from_index(
     splits: Sequence[str] = (),
     actions: Sequence[str] = ("keep", "downweight", "quarantine"),
     action_column: str = "curation_action",
+    sample_by: Sequence[str] = (),
 ) -> SourceFKQualityScanResult:
     """Scan source BVH clips for FK/contact geometry quality signals."""
 
     config = config or SourceFKQualityConfig()
     _validate_config(config)
-    rows = list(_iter_index_rows(index_csv, splits=splits, actions=actions, action_column=action_column))
-    if limit is not None:
-        rows = rows[:limit]
+    candidate_rows = list(_iter_index_rows(index_csv, splits=splits, actions=actions, action_column=action_column))
+    rows = select_rows_for_scan(candidate_rows, limit=limit, sample_by=sample_by)
 
-    output_dir = output_root.expanduser() / "quality" / _quality_run_name(index_csv, limit)
+    output_dir = output_root.expanduser() / "quality" / _quality_run_name(index_csv, limit, sample_by)
     output_dir.mkdir(parents=True, exist_ok=True)
     stats_jsonl = output_dir / "source_fk_quality_stats.jsonl"
     report_json = output_dir / "source_fk_quality_report.json"
@@ -131,6 +132,7 @@ def scan_source_fk_quality_from_index(
             "actions": list(actions),
             "action_column": action_column,
         },
+        "sampling": scan_sampling_report(candidate_rows, rows, limit=limit, sample_by=sample_by),
         "scanned_rows": len(scanned),
         "skipped_rows": skipped_rows,
         "action_counts": dict(sorted(action_counts.items())),
@@ -414,9 +416,8 @@ def _validate_config(config: SourceFKQualityConfig) -> None:
         raise ValueError("min_contact_frame_ratio must be within [0, 1]")
 
 
-def _quality_run_name(index_csv: Path, limit: int | None) -> str:
-    limit_tag = "full" if limit is None else f"limit{limit}"
-    return f"{index_csv.parent.name}_source_fk_{limit_tag}"
+def _quality_run_name(index_csv: Path, limit: int | None, sample_by: Sequence[str] = ()) -> str:
+    return f"{index_csv.parent.name}_source_fk_{sampling_run_tag(limit, sample_by)}"
 
 
 def _metric_summary(rows: Sequence[Mapping[str, object]]) -> dict[str, dict[str, float]]:

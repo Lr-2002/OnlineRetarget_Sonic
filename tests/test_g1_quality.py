@@ -52,6 +52,7 @@ class G1QualityTests(unittest.TestCase):
 
             report = json.loads(result.report_json.read_text(encoding="utf-8"))
             self.assertEqual(report["model"]["mode"], "csv_root_joint")
+            self.assertEqual(report["sampling"]["mode"], "first_n")
             rows = [
                 json.loads(line)
                 for line in result.stats_jsonl.read_text(encoding="utf-8").splitlines()
@@ -61,6 +62,42 @@ class G1QualityTests(unittest.TestCase):
             self.assertEqual(rows[0]["category"], "Baseline")
             self.assertEqual(rows[0]["is_mirror"], "False")
             self.assertEqual(rows[0]["actor_gender"], "M")
+
+    def test_scan_g1_quality_stratified_sample_by_category(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "data"
+            output = Path(tmp) / "runs"
+            root.mkdir()
+            _write_g1_tar(root / "g1.tar")
+            index_csv = Path(tmp) / "split_index.csv"
+            _write_index(index_csv)
+
+            result = scan_g1_quality_from_index(
+                data_root=root,
+                index_csv=index_csv,
+                output_root=output,
+                config=G1QualityConfig(
+                    fps=30.0,
+                    max_joint_velocity=1000.0,
+                    max_root_speed=1000.0,
+                    root_position_scale=1.0,
+                    joint_angle_scale=1.0,
+                    root_rotation_scale=1.0,
+                ),
+                limit=2,
+                sample_by=("category",),
+            )
+
+            rows = [
+                json.loads(line)
+                for line in result.stats_jsonl.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            report = json.loads(result.report_json.read_text(encoding="utf-8"))
+            self.assertEqual(result.scanned_rows, 2)
+            self.assertEqual([row["category"] for row in rows], ["Baseline", "Jump"])
+            self.assertEqual(report["sampling"]["mode"], "stratified_round_robin")
+            self.assertEqual(report["sampling"]["sample_by"], ["category"])
 
     def test_summarize_g1_rows_with_mjcf_contact_and_limits(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -169,7 +206,7 @@ def _write_index(path: Path) -> None:
             "move_name": "jump",
             "filename": "jump",
             "package": "Locomotion",
-            "category": "Baseline",
+            "category": "Jump",
             "is_mirror": "False",
             "actor_gender": "F",
             "move_g1_path": "g1/csv/240101/jump.csv",

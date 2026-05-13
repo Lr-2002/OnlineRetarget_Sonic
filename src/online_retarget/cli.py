@@ -63,6 +63,12 @@ def main() -> None:
     quality.add_argument("--full", action="store_true", help="Scan all matching rows")
     quality.add_argument("--split", action="append", default=[])
     quality.add_argument("--curation-action", action="append", default=[])
+    quality.add_argument(
+        "--sample-by",
+        action="append",
+        default=[],
+        help="When --limit is active, stratify scan rows by this index field.",
+    )
     quality.add_argument("--fps", type=float, default=30.0)
     quality.add_argument("--max-joint-velocity", type=float, default=20.0)
     quality.add_argument("--max-root-speed", type=float, default=8.0)
@@ -93,6 +99,12 @@ def main() -> None:
     source_quality.add_argument("--full", action="store_true", help="Scan all matching rows")
     source_quality.add_argument("--split", action="append", default=[])
     source_quality.add_argument("--curation-action", action="append", default=[])
+    source_quality.add_argument(
+        "--sample-by",
+        action="append",
+        default=[],
+        help="When --limit is active, stratify scan rows by this index field.",
+    )
     source_quality.add_argument("--max-channel-velocity", type=float, default=3000.0)
     source_quality.add_argument("--max-root-speed", type=float, default=500.0)
     source_quality.add_argument("--expected-frame-time", type=float)
@@ -110,6 +122,12 @@ def main() -> None:
     source_fk_quality.add_argument("--split", action="append", default=[])
     source_fk_quality.add_argument("--curation-action", action="append", default=[])
     source_fk_quality.add_argument("--action-column", default="curation_action")
+    source_fk_quality.add_argument(
+        "--sample-by",
+        action="append",
+        default=[],
+        help="When --limit is active, stratify scan rows by this index field.",
+    )
     source_fk_quality.add_argument("--fps", type=float, default=30.0)
     source_fk_quality.add_argument("--position-scale", type=float, default=0.01)
     source_fk_quality.add_argument("--frame-stride", type=int, default=1)
@@ -277,6 +295,7 @@ def _scan_g1_quality(args: argparse.Namespace) -> None:
         limit=limit,
         splits=tuple(args.split),
         actions=tuple(args.curation_action) or ("keep", "downweight", "quarantine"),
+        sample_by=tuple(args.sample_by),
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 
@@ -296,6 +315,7 @@ def _scan_source_quality(args: argparse.Namespace) -> None:
         limit=limit,
         splits=tuple(args.split),
         actions=tuple(args.curation_action) or ("keep", "downweight", "quarantine"),
+        sample_by=tuple(args.sample_by),
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 
@@ -323,6 +343,7 @@ def _scan_source_fk_quality(args: argparse.Namespace) -> None:
         splits=tuple(args.split),
         actions=tuple(args.curation_action) or ("keep", "downweight", "quarantine"),
         action_column=args.action_column,
+        sample_by=tuple(args.sample_by),
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 

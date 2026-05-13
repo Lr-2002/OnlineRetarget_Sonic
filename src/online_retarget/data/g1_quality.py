@@ -15,6 +15,7 @@ from typing import Iterable, Mapping, Sequence
 import xml.etree.ElementTree as ET
 
 from .bones_seed import G1_JOINT_COLUMNS
+from .row_sampling import sampling_run_tag, scan_sampling_report, select_rows_for_scan
 
 
 ROOT_TRANSLATE_COLUMNS = ("root_translateX", "root_translateY", "root_translateZ")
@@ -105,6 +106,7 @@ def scan_g1_quality_from_index(
     limit: int | None = 100,
     splits: Sequence[str] = (),
     actions: Sequence[str] = ("keep", "downweight", "quarantine"),
+    sample_by: Sequence[str] = (),
 ) -> G1QualityScanResult:
     """Scan G1 CSV targets referenced by a split index."""
 
@@ -112,11 +114,10 @@ def scan_g1_quality_from_index(
     _validate_config(config)
     model = load_g1_kinematic_model(config.model_xml, config.foot_bodies) if config.model_xml else None
 
-    rows = list(_iter_index_rows(index_csv, splits=splits, actions=actions))
-    if limit is not None:
-        rows = rows[:limit]
+    candidate_rows = list(_iter_index_rows(index_csv, splits=splits, actions=actions))
+    rows = select_rows_for_scan(candidate_rows, limit=limit, sample_by=sample_by)
 
-    output_dir = output_root.expanduser() / "quality" / _quality_run_name(index_csv, limit)
+    output_dir = output_root.expanduser() / "quality" / _quality_run_name(index_csv, limit, sample_by)
     output_dir.mkdir(parents=True, exist_ok=True)
     stats_jsonl = output_dir / "g1_quality_stats.jsonl"
     report_json = output_dir / "g1_quality_report.json"
@@ -147,6 +148,7 @@ def scan_g1_quality_from_index(
         "model": _model_report(model),
         "limit": limit,
         "filters": {"splits": list(splits), "actions": list(actions)},
+        "sampling": scan_sampling_report(candidate_rows, rows, limit=limit, sample_by=sample_by),
         "scanned_rows": len(scanned),
         "skipped_rows": skipped_rows,
         "action_counts": dict(sorted(action_counts.items())),
@@ -429,9 +431,8 @@ def load_g1_kinematic_model(
     )
 
 
-def _quality_run_name(index_csv: Path, limit: int | None) -> str:
-    limit_tag = "full" if limit is None else f"limit{limit}"
-    return f"{index_csv.parent.name}_{limit_tag}"
+def _quality_run_name(index_csv: Path, limit: int | None, sample_by: Sequence[str] = ()) -> str:
+    return f"{index_csv.parent.name}_{sampling_run_tag(limit, sample_by)}"
 
 
 def _joint_limit_stats(

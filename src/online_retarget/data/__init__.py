@@ -20,6 +20,7 @@ from .curation import (
 )
 from .g1_quality import G1QualityConfig, G1QualityScanResult, scan_g1_quality_from_index
 from .quality_merge import QualityMergeResult, merge_quality_stats
+from .row_sampling import scan_sampling_report, select_rows_for_scan
 from .schema import (
     MORPHOLOGY_NUMERIC_COLUMNS,
     MotionPairRef,
@@ -84,7 +85,9 @@ __all__ = [
     "propose_thresholds_from_jsonl",
     "scan_bvh_quality_from_index",
     "scan_g1_quality_from_index",
+    "scan_sampling_report",
     "scan_source_fk_quality_from_index",
+    "select_rows_for_scan",
     "summarize_metadata",
     "write_threshold_proposals",
 ]

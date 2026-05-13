@@ -13,6 +13,8 @@ import subprocess
 import tarfile
 from typing import Iterable, Mapping, Sequence
 
+from .row_sampling import sampling_run_tag, scan_sampling_report, select_rows_for_scan
+
 
 @dataclass(frozen=True)
 class BVHQualityConfig:
@@ -53,15 +55,15 @@ def scan_bvh_quality_from_index(
     limit: int | None = 100,
     splits: Sequence[str] = (),
     actions: Sequence[str] = ("keep", "downweight", "quarantine"),
+    sample_by: Sequence[str] = (),
 ) -> BVHQualityScanResult:
     """Scan source BVH clips referenced by a split index."""
 
     config = config or BVHQualityConfig()
-    rows = list(_iter_index_rows(index_csv, splits=splits, actions=actions))
-    if limit is not None:
-        rows = rows[:limit]
+    candidate_rows = list(_iter_index_rows(index_csv, splits=splits, actions=actions))
+    rows = select_rows_for_scan(candidate_rows, limit=limit, sample_by=sample_by)
 
-    output_dir = output_root.expanduser() / "quality" / _quality_run_name(index_csv, limit)
+    output_dir = output_root.expanduser() / "quality" / _quality_run_name(index_csv, limit, sample_by)
     output_dir.mkdir(parents=True, exist_ok=True)
     stats_jsonl = output_dir / "source_bvh_quality_stats.jsonl"
     report_json = output_dir / "source_bvh_quality_report.json"
@@ -91,6 +93,7 @@ def scan_bvh_quality_from_index(
         "config": config.to_dict(),
         "limit": limit,
         "filters": {"splits": list(splits), "actions": list(actions)},
+        "sampling": scan_sampling_report(candidate_rows, rows, limit=limit, sample_by=sample_by),
         "scanned_rows": len(scanned),
         "skipped_rows": skipped_rows,
         "action_counts": dict(sorted(action_counts.items())),
@@ -399,9 +402,8 @@ def _rate_above(values: Sequence[float], threshold: float) -> float:
     return sum(value > threshold for value in values) / len(values)
 
 
-def _quality_run_name(index_csv: Path, limit: int | None) -> str:
-    limit_tag = "full" if limit is None else f"limit{limit}"
-    return f"{index_csv.parent.name}_source_{limit_tag}"
+def _quality_run_name(index_csv: Path, limit: int | None, sample_by: Sequence[str] = ()) -> str:
+    return f"{index_csv.parent.name}_source_{sampling_run_tag(limit, sample_by)}"
 
 
 def _metric_summary(rows: Sequence[Mapping[str, object]]) -> dict[str, dict[str, float]]:

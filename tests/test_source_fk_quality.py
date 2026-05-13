@@ -136,6 +136,7 @@ class SourceFKQualityTests(unittest.TestCase):
                 for line in result.stats_jsonl.read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
+            report = json.loads(result.report_json.read_text(encoding="utf-8"))
 
         self.assertEqual(result.scanned_rows, 3)
         self.assertEqual(result.action_counts["keep"], 1)
@@ -146,6 +147,40 @@ class SourceFKQualityTests(unittest.TestCase):
         self.assertEqual(rows[0]["ground_source"], "fixed")
         self.assertEqual(rows[0]["is_mirror"], "False")
         self.assertEqual(rows[0]["actor_gender"], "M")
+        self.assertEqual(report["sampling"]["mode"], "first_n")
+
+    def test_scan_source_fk_quality_stratified_sample_by_category(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "data"
+            output = Path(tmp) / "runs"
+            root.mkdir()
+            _write_source_tar(root / "soma_proportional.tar")
+            index_csv = Path(tmp) / "split_index.csv"
+            _write_index(index_csv)
+
+            result = scan_source_fk_quality_from_index(
+                data_root=root,
+                index_csv=index_csv,
+                output_root=output,
+                config=SourceFKQualityConfig(
+                    fps=1.0,
+                    position_scale=1.0,
+                    ground_height=0.0,
+                    max_contact_slide_speed=1000.0,
+                ),
+                limit=2,
+                sample_by=("category",),
+            )
+            rows = [
+                json.loads(line)
+                for line in result.stats_jsonl.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            report = json.loads(result.report_json.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.scanned_rows, 2)
+        self.assertEqual([row["category"] for row in rows], ["Baseline", "Jump"])
+        self.assertEqual(report["sampling"]["mode"], "stratified_round_robin")
 
 
 def _write_index(path: Path) -> None:
@@ -183,7 +218,7 @@ def _write_index(path: Path) -> None:
             "move_name": "slide",
             "filename": "slide",
             "package": "Locomotion",
-            "category": "Baseline",
+            "category": "Jump",
             "is_mirror": "False",
             "actor_gender": "F",
             "move_soma_proportional_path": "soma_proportional/bvh/slide.bvh",
