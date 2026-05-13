@@ -39,7 +39,7 @@ DEFAULT_BODY_BODIES = (
 
 @dataclass(frozen=True)
 class SourceFKQualityConfig:
-    fps: float = 30.0
+    fps: float | None = None
     position_scale: float = 0.01
     frame_stride: int = 1
     max_frames: int | None = None
@@ -250,7 +250,7 @@ def summarize_source_fk_motion(
     body_clearances = [height - ground_height for height in valid_body_heights]
     contact_flags = [clearance <= config.contact_height_threshold for clearance in foot_clearances]
     contact_frame_ratio = sum(contact_flags) / len(contact_flags) if contact_flags else 0.0
-    effective_fps = config.fps / config.frame_stride
+    effective_fps = _effective_fps(motion, config)
     contact_slide_speeds = _contact_slide_speeds(
         frames,
         present_feet,
@@ -392,7 +392,7 @@ def _sample_motion(motion: BVHMotion, config: SourceFKQualityConfig) -> BVHMotio
 
 
 def _validate_config(config: SourceFKQualityConfig) -> None:
-    if config.fps <= 0:
+    if config.fps is not None and config.fps <= 0:
         raise ValueError("fps must be positive")
     if config.position_scale <= 0:
         raise ValueError("position_scale must be positive")
@@ -414,6 +414,14 @@ def _validate_config(config: SourceFKQualityConfig) -> None:
         raise ValueError("max_penetration_depth must be non-negative")
     if not 0.0 <= config.min_contact_frame_ratio <= 1.0:
         raise ValueError("min_contact_frame_ratio must be within [0, 1]")
+
+
+def _effective_fps(motion: BVHMotion, config: SourceFKQualityConfig) -> float:
+    if config.fps is not None:
+        return config.fps / config.frame_stride
+    if motion.frame_time <= 0:
+        raise ValueError("BVH frame_time must be positive when fps is not configured")
+    return 1.0 / (motion.frame_time * config.frame_stride)
 
 
 def _quality_run_name(index_csv: Path, limit: int | None, sample_by: Sequence[str] = ()) -> str:

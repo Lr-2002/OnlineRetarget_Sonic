@@ -51,6 +51,22 @@ class SourceFKQualityTests(unittest.TestCase):
         self.assertIn("source_foot_slide", row["quality_flags"])
         self.assertGreater(row["max_contact_slide_speed"], 0.5)
 
+    def test_summarize_source_fk_motion_derives_fps_from_bvh_frame_time(self):
+        motion = parse_bvh_motion(_bvh_text(left_foot_x=[0.0, 1.0, 2.0], left_foot_y=[0.0, 0.0, 0.0]))
+
+        row = summarize_source_fk_motion(
+            {"row_index": "1"},
+            motion,
+            SourceFKQualityConfig(
+                position_scale=1.0,
+                ground_height=0.0,
+                max_contact_slide_speed=0.5,
+            ),
+        )
+
+        self.assertEqual(row["quality_action"], "downweight")
+        self.assertAlmostEqual(row["max_contact_slide_speed"], 10.0)
+
     def test_summarize_source_fk_motion_flags_float_and_penetration(self):
         floating = parse_bvh_motion(_bvh_text(left_foot_x=[0.0, 0.0, 0.0], left_foot_y=[0.2, 0.2, 0.2]))
         penetrating = parse_bvh_motion(_bvh_text(left_foot_x=[0.0, 0.0, 0.0], left_foot_y=[-0.1, -0.1, -0.1]))

@@ -179,7 +179,17 @@ Observed result on 2026-05-13:
 - Curation actions: 71,132 keep, 71,088 downweight
 - Quality flags: 71,088 `mirror_variant`
 
-Current scope: this is metadata-level curation only. Clip-level physical quality flags still need a motion-stat scanner.
+Current scope: this is metadata-level curation only. Clip-level physical quality flags are handled by the M2Q scanners and remain provisional until a named policy is promoted.
+
+## Timing Assumption
+
+Representative pair scans found the source BVH `Frame Time` is `0.008333333333333333` for sampled BONES-SEED clips, i.e. about 120 Hz. The paired G1 CSVs have the same frame counts as the source BVHs in the 560-row category/split sample.
+
+Implication:
+
+- G1 quality scans should use 120 Hz unless a specific target source proves otherwise. The scanner default is now 120 Hz.
+- Source FK/contact scans derive FPS from each BVH `Frame Time` by default. Do not pass `--fps 30` for BONES-SEED calibration unless explicitly testing an override.
+- Older 30 Hz smoke artifacts are useful for scanner regression only; velocity, slide, duration, and start/end metrics from those runs are time-scale suspect.
 
 ## G1 Target Quality Smoke
 
@@ -191,7 +201,7 @@ PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-g1-quality \
   --index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
   --output-root runs \
   --limit 100 \
-  --fps 30 \
+  --fps 120 \
   --max-joint-velocity 20 \
   --max-root-speed 8
 ```
@@ -203,7 +213,7 @@ Observed result on the first 100 indexed G1 CSV targets:
 - `max_abs_joint_velocity` p50/p95/max: 70.045590 / 444.556812 / 538.624500
 - `max_root_speed` p50/p95/max: 3.199689 / 35.318570 / 36.870913
 
-Interpretation: the scanner works, but these temporary thresholds are not calibrated. The metric summary should be used to choose per-category or percentile-based thresholds before filtering training data aggressively.
+Interpretation: this old first-100 smoke proves the parser path works, but it was run with a 30 Hz assumption and should not be used to calibrate velocity or contact thresholds. Use the 120 Hz representative artifacts below for current M2Q discussion.
 
 ## Source BVH Quality Smoke
 
@@ -253,3 +263,62 @@ Current p95 proposals from 100-sample smoke scans:
 - Source BVH `max_root_speed`: 170.172050
 
 These are not final thresholds. They are traceable proposals to motivate larger scans and per-category calibration.
+
+## Pair Quality Representative Scan
+
+Command:
+
+```bash
+PYTHONPATH=src:. python3 scripts/inspect_bones_seed.py scan-pair-quality \
+  --data-root /home/user/data/motion_data \
+  --index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
+  --output-root runs \
+  --limit 560 \
+  --sample-by category \
+  --sample-by split \
+  --expected-source-frame-time 0.008333333333333333 \
+  --g1-fps 120 \
+  --max-frame-count-delta 0 \
+  --max-duration-delta-sec 0.001 \
+  --target-provenance kinematic_g1_csv
+```
+
+Observed artifact:
+
+- Report: `runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_pair_limit560_by-category-split/pair_quality_report.json`
+- Stats: `runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_pair_limit560_by-category-split/pair_quality_stats.jsonl`
+- Scanned rows: 560 category/split-stratified rows.
+- Actions: 494 keep, 66 quarantine.
+- Flags: 66 `pair_duration_mismatch`.
+- Frame-count delta: max 0, p95 0.
+- Absolute duration delta: p50 0.000368 s, p95 0.001768 s, max 0.002807 s.
+- Target provenance label: `kinematic_g1_csv`.
+
+Interpretation: source and G1 frame counts match in the representative sample, but strict 1 ms duration tolerance quarantines 66 rows because BVH frame time and exact `1 / 120` are not bit-identical over long clips. This should be treated as a provenance/timing calibration issue, not evidence that the files are missing frames.
+
+## Representative Four-Way Curation Merge
+
+Current strongest M2Q artifact merges source BVH, source FK/contact, G1 FK/contact/self-collision proxy, and pair/provenance stats:
+
+```bash
+PYTHONPATH=src:. python3 scripts/inspect_bones_seed.py merge-quality \
+  --split-index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
+  --source-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_source_limit560_by-category-split/source_bvh_quality_stats.jsonl \
+  --source-fk-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_source_fk_limit560_by-category-split/source_fk_quality_stats.jsonl \
+  --g1-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_limit560_by-category-split/g1_quality_stats.jsonl \
+  --pair-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_pair_limit560_by-category-split/pair_quality_stats.jsonl \
+  --output-root runs \
+  --run-name representative_source_g1_pair_limit560_by_category_split
+```
+
+Observed result:
+
+- Report: `runs/curated/representative_source_g1_pair_limit560_by_category_split/curated_report.json`
+- Curated index: `runs/curated/representative_source_g1_pair_limit560_by_category_split/curated_index.csv`
+- Merged sampled rows: 560 source, 560 source-FK, 560 G1, 560 pair.
+- Full-index actions after sampled-row merge: 70,858 keep, 70,876 downweight, 479 quarantine, 7 exclude.
+- Main flags: 71,088 `mirror_variant`, 485 `g1:g1_foot_slide`, 244 `source_fk:source_foot_slide`, 238 `g1:g1_joint_limit_violation`, 234 `g1:g1_ground_penetration`, 168 `g1:g1_unstable_start_end`, 96 `g1:joint_velocity_jump`, 66 `pair:pair_duration_mismatch`.
+- Diversity-loss summary: 0 lost actor groups out of 522, 0 lost source-skeleton groups out of 522, 0 lost category groups out of 20, and 0 lost split groups out of 3.
+- Manual review manifest: `runs/curated/representative_source_g1_pair_limit560_by_category_split/manual_review/review_manifest.md`, 35 review rows across float, foot-slide, joint-limit, jump, mirror, parser, and penetration families.
+
+This is still a representative calibration artifact, not a promoted formal curation policy.

@@ -16,6 +16,9 @@ from online_retarget.data.g1_quality import (
 
 
 class G1QualityTests(unittest.TestCase):
+    def test_default_fps_matches_bones_seed_pair_rate(self):
+        self.assertEqual(G1QualityConfig().fps, 120.0)
+
     def test_scan_g1_quality_from_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "data"

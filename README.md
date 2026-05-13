@@ -52,10 +52,12 @@ PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-g1-quality \
   --index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
   --output-root runs \
   --limit 100 \
-  --fps 30 \
+  --fps 120 \
   --max-joint-velocity 20 \
   --max-root-speed 8
 ```
+
+BONES-SEED source BVH files observed so far declare `Frame Time: 0.008333`, so paired source/G1 scans should use 120 Hz unless a specific clip proves otherwise. The G1 scanner defaults to 120 Hz.
 
 Scan source SOMA BVH quality stats from a split index:
 
@@ -78,7 +80,6 @@ PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-source-fk-quality \
   --output-root runs \
   --limit 100 \
   --ground-height 0.0 \
-  --fps 30 \
   --frame-stride 2 \
   --max-frames 256 \
   --contact-height-threshold 0.04 \
@@ -86,6 +87,25 @@ PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-source-fk-quality \
   --max-mean-foot-clearance 0.10 \
   --max-penetration-depth 0.03 \
   --min-contact-frame-ratio 0.05
+```
+
+`scan-source-fk-quality` derives contact/slide FPS from each BVH `Frame Time` by default. Use `--fps` only for an explicit override.
+
+Scan source/G1 pair consistency and target provenance:
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-pair-quality \
+  --data-root /home/user/data/motion_data \
+  --index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
+  --output-root runs \
+  --limit 560 \
+  --sample-by category \
+  --sample-by split \
+  --expected-source-frame-time 0.008333333333333333 \
+  --g1-fps 120 \
+  --max-frame-count-delta 0 \
+  --max-duration-delta-sec 0.001 \
+  --target-provenance kinematic_g1_csv
 ```
 
 Evaluate prediction/target JSONL outputs offline:
@@ -130,7 +150,9 @@ Merge split index with source/G1 quality stats into a curated index:
 PYTHONPATH=src python3 scripts/inspect_bones_seed.py merge-quality \
   --split-index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
   --source-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_source_limit100/source_bvh_quality_stats.jsonl \
+  --source-fk-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_source_fk_limit100/source_fk_quality_stats.jsonl \
   --g1-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_limit100/g1_quality_stats.jsonl \
+  --pair-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_pair_limit100/pair_quality_stats.jsonl \
   --output-root runs \
   --run-name smoke_source_g1_limit100
 ```

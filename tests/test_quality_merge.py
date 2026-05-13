@@ -15,6 +15,7 @@ class QualityMergeTests(unittest.TestCase):
             source_stats = root / "source.jsonl"
             source_fk_stats = root / "source_fk.jsonl"
             g1_stats = root / "g1.jsonl"
+            pair_stats = root / "pair.jsonl"
             _write_split_index(split_index)
             source_stats.write_text(
                 json.dumps(
@@ -68,12 +69,29 @@ class QualityMergeTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
+            pair_stats.write_text(
+                json.dumps(
+                    {
+                        "row_index": "2",
+                        "quality_action": "quarantine",
+                        "quality_flags": "pair_frame_count_mismatch",
+                        "source_frame_count": 3,
+                        "g1_frame_count": 5,
+                        "abs_frame_count_delta": 2,
+                        "abs_duration_delta_sec": 0.066667,
+                        "target_provenance": "kinematic_g1_csv",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
             result = merge_quality_stats(
                 split_index_csv=split_index,
                 source_stats_jsonl=source_stats,
                 source_fk_stats_jsonl=source_fk_stats,
                 g1_stats_jsonl=g1_stats,
+                pair_stats_jsonl=pair_stats,
                 output_root=root / "runs",
                 run_name="fixture",
             )
@@ -85,6 +103,7 @@ class QualityMergeTests(unittest.TestCase):
         self.assertEqual(result.merged_source_rows, 1)
         self.assertEqual(result.merged_source_fk_rows, 1)
         self.assertEqual(result.merged_g1_rows, 2)
+        self.assertEqual(result.merged_pair_rows, 1)
         self.assertEqual(rows[0]["merged_quality_action"], "quarantine")
         self.assertEqual(
             rows[0]["merged_quality_flags"],
@@ -93,7 +112,12 @@ class QualityMergeTests(unittest.TestCase):
         self.assertEqual(rows[0]["source_fk_quality_action"], "downweight")
         self.assertEqual(rows[0]["source_fk_quality_flags"], "source_foot_slide")
         self.assertEqual(rows[1]["merged_quality_action"], "exclude")
-        self.assertEqual(rows[1]["merged_quality_flags"], "mirror_variant|g1:missing_g1_csv_member")
+        self.assertEqual(
+            rows[1]["merged_quality_flags"],
+            "mirror_variant|g1:missing_g1_csv_member|pair:pair_frame_count_mismatch",
+        )
+        self.assertEqual(rows[1]["pair_quality_action"], "quarantine")
+        self.assertEqual(rows[1]["pair_quality_flags"], "pair_frame_count_mismatch")
         self.assertEqual(len(worst), 2)
         self.assertEqual(worst[0]["merged_quality_action"], "exclude")
         self.assertEqual(worst[0]["move_soma_proportional_path"], "soma/b.bvh")
@@ -103,10 +127,14 @@ class QualityMergeTests(unittest.TestCase):
         self.assertEqual(worst[0]["g1_joint_limit_violation_rate"], "0.5")
         self.assertEqual(worst[0]["g1_self_collision_proxy_rate"], "0.2")
         self.assertEqual(worst[0]["g1_min_self_collision_distance"], "0.01")
+        self.assertEqual(worst[0]["pair_abs_frame_count_delta"], "2")
+        self.assertEqual(worst[0]["pair_target_provenance"], "kinematic_g1_csv")
         self.assertEqual(worst[1]["source_fk_contact_slide_rate"], "0.15")
         self.assertEqual(worst[1]["source_fk_penetration_depth"], "0.02")
+        self.assertEqual(report["pair_stats_jsonl"], str(pair_stats))
         self.assertEqual(report["source_fk_stats_jsonl"], str(source_fk_stats))
         self.assertEqual(report["merged_source_fk_rows"], 1)
+        self.assertEqual(report["merged_pair_rows"], 1)
         self.assertEqual(report["breakdown"]["split"]["train"]["exclude"], 1)
         self.assertEqual(report["diversity_loss"]["actor_uid"]["total_groups"], 3)
         self.assertEqual(report["diversity_loss"]["actor_uid"]["groups_without_retained"], 2)

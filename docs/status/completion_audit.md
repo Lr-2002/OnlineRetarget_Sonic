@@ -11,11 +11,11 @@ Verdict: not complete. The repo now has runnable scaffolds, real BONES-SEED smok
 | Requirement | Evidence inspected | Status |
 | --- | --- | --- |
 | Implement M1 paper survey | `docs/research/paper_matrix.md`, `docs/research/literature_review.md`, `docs/research/bibliography.bib`, `docs/research/pdf_manifest.md`, `docs/research/papers/` | Partial. Core matrix exists, but deeper PDF reading and reference/citation expansion are still needed. |
-| Include data filtering research | `docs/research/motion_quality_curation.md`, M2Q in `docs/milestones.md` | Partial. Paper-backed quality plan exists; source/G1 FK-contact/self-collision-proxy smoke and representative metrics, upper/lower-tail grouped threshold proposals, stratified scan support, diversity-loss reports, and manual review manifests now exist, but policy promotion and simulator-backed validation are still pending. |
+| Include data filtering research | `docs/research/motion_quality_curation.md`, M2Q in `docs/milestones.md` | Partial. Paper-backed quality plan exists; source/G1 FK-contact/self-collision-proxy metrics, pair/provenance checks, upper/lower-tail grouped threshold proposals, stratified scan support, diversity-loss reports, and manual review manifests now exist, but policy promotion and simulator-backed validation are still pending. |
 | Implement M2 data inventory/split/curation | `src/online_retarget/data/curation.py`, CLI `split-index`, real index under `runs/indices/...`, tests | Partial. Actor-heldout split and metadata curation are implemented; full quality gate remains incomplete. |
 | Keep source data read-only | `.gitignore`, commands write under `runs/`, data root `/home/user/data/motion_data` only read | Satisfied for current work. |
 | Separate different actors/skeletons | real split report: 522 actors, train/val/test actor split 417/52/53 | Satisfied at metadata split level. |
-| Implement M2Q quality filtering | source/G1 scanners, source FK/contact scanner, G1 MJCF FK/contact/self-collision-proxy scanner, grouped upper/lower-tail threshold proposal, stratified scan support, `merge-quality`, `worst_clips.csv`, manual review manifest, train quality gate | Partial. Smoke and representative quality pipeline exists; source BVH, source FK/contact, and G1 FK/contact/self-collision-proxy stats now merge into curated indexes, curated reports include diversity-loss summaries, and worst clips are exportable to JSONL/Markdown review manifests. The 560-row representative merge records keep/downweight/quarantine/exclude = 70,858/70,879/476/7 after merging 560 source, 560 source-FK, and 560 G1 rows. Completed review decisions, formal category thresholds, and simulator-backed labels remain pending. |
+| Implement M2Q quality filtering | source/G1 scanners, source FK/contact scanner, G1 MJCF FK/contact/self-collision-proxy scanner, pair/provenance scanner, grouped upper/lower-tail threshold proposal, stratified scan support, `merge-quality`, `worst_clips.csv`, manual review manifest, train quality gate | Partial. Smoke and representative quality pipeline exists; source BVH, source FK/contact, G1 FK/contact/self-collision-proxy, and pair/provenance stats now merge into curated indexes, curated reports include diversity-loss summaries, and worst clips are exportable to JSONL/Markdown review manifests. The 560-row representative four-way merge records keep/downweight/quarantine/exclude = 70,858/70,876/479/7 after merging 560 source, 560 source-FK, 560 G1, and 560 pair rows. BONES-SEED pair timing is now recorded as 120 Hz with exact source/G1 frame-count agreement in the representative sample. Completed review decisions, formal category thresholds, and simulator-backed labels remain pending. |
 | Implement M3 schema/obs contract | `src/online_retarget/data/schema.py`, `src/online_retarget/data/windowed_builder.py`, `tests/test_schema.py`, `tests/test_windowed_builder.py`, real 30-body smoke artifact | Smoke path implemented. Formal-scale extraction, normalization policy, robot-state wiring, and online preprocessing are pending. |
 | Implement M4 independent eval | `src/online_retarget/evaluation.py`, CLI `offline-eval`, `tests/test_evaluation.py` | Scaffold implemented. Real model predictions and simulator/contact metrics are pending. |
 | Implement M5 supervised baseline | `scripts/train.py`, `src/online_retarget/data/supervised_builder.py`, `src/online_retarget/data/windowed_builder.py`, supervised JSONL artifacts | Partial. PyTorch optimizer loop exists and post-train prediction JSONL/offline-eval/WandB metadata hooks are coded, but current Python lacks torch and formal-scale 30-body training is pending. |
@@ -26,7 +26,7 @@ Verdict: not complete. The repo now has runnable scaffolds, real BONES-SEED smok
 | Implement M7 Isaac Lab eval | `scripts/eval_isaac.py --dry-run` scaffold | Scaffold only. Real Isaac Lab/G1 replay task pending. |
 | Write live logs | `docs/logs/implementation-log.md` | Satisfied for current implementation history. Keep updating during future work. |
 | Make process/status readable | `docs/milestones.md`, `docs/status/m1_m7_status.md`, this audit | Satisfied as a living tracking surface, not final completion. |
-| Verify current work | `PYTHONPATH=src:. python3 -m unittest discover -s tests` -> 57 tests OK; targeted `py_compile` -> OK; dry-run training -> OK with `samples_builder_is_formal=true`; `git diff --check` -> OK; source FK/contact and G1 MJCF FK/contact/self-collision-proxy smoke scans -> OK; representative 560-row scans and upper/lower-tail grouped threshold artifacts generated; three-way `merge-quality` refreshed curated smoke and representative artifacts; manual review manifests generated; raw-debug artifact formal training check fails as intended | Current scaffold verified. Not evidence of full M1-M7 completion. |
+| Verify current work | `PYTHONPATH=src:. python3 -m unittest discover -s tests` -> 57 tests OK; targeted `py_compile` -> OK; dry-run training -> OK with `samples_builder_is_formal=true`; `git diff --check` -> OK; source FK/contact and G1 MJCF FK/contact/self-collision-proxy smoke scans -> OK; representative 560-row scans and upper/lower-tail grouped threshold artifacts generated; four-way `merge-quality` refreshed curated representative artifacts with pair/provenance stats; manual review manifests generated; raw-debug artifact formal training check fails as intended | Current scaffold verified. Not evidence of full M1-M7 completion. |
 
 ## Latest Verification Evidence
 
@@ -40,7 +40,6 @@ PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-source-fk-quality \
   --output-root runs \
   --limit 100 \
   --ground-height 0.0 \
-  --fps 30 \
   --frame-stride 2 \
   --max-frames 256
 # Source FK/contact smoke wrote source_fk_quality_report.json with
@@ -59,26 +58,41 @@ PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-g1-quality \
 # g1_foot_slide=70, g1_ground_penetration=41, g1_joint_limit_violation=18,
 # g1_self_collision_proxy=1.
 
-PYTHONPATH=src python3 scripts/inspect_bones_seed.py merge-quality \
-  --split-index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
-  --source-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_source_limit100/source_bvh_quality_stats.jsonl \
-  --source-fk-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_source_fk_limit100/source_fk_quality_stats.jsonl \
-  --g1-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_limit100/g1_quality_stats.jsonl \
+PYTHONPATH=src:. python3 scripts/inspect_bones_seed.py scan-pair-quality \
+  --data-root /home/user/data/motion_data \
+  --index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
   --output-root runs \
-  --run-name smoke_source_g1_limit100
-# Three-way curated smoke wrote curated_report.json with
-# keep/downweight/quarantine/exclude = 71088/71048/83/1 and
-# merged_source_rows=100, merged_source_fk_rows=100, merged_g1_rows=100.
-# diversity_loss shows 0 lost actor/source-skeleton groups in this smoke policy.
+  --limit 560 \
+  --sample-by category \
+  --sample-by split \
+  --expected-source-frame-time 0.008333333333333333 \
+  --g1-fps 120 \
+  --max-frame-count-delta 0 \
+  --max-duration-delta-sec 0.001 \
+  --target-provenance kinematic_g1_csv
+# Pair quality wrote pair_quality_report.json with keep/quarantine = 494/66,
+# max frame-count delta 0, and p95 absolute duration delta 0.001768 s.
+
+PYTHONPATH=src:. python3 scripts/inspect_bones_seed.py merge-quality \
+  --split-index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
+  --source-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_source_limit560_by-category-split/source_bvh_quality_stats.jsonl \
+  --source-fk-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_source_fk_limit560_by-category-split/source_fk_quality_stats.jsonl \
+  --g1-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_limit560_by-category-split/g1_quality_stats.jsonl \
+  --pair-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_pair_limit560_by-category-split/pair_quality_stats.jsonl \
+  --output-root runs \
+  --run-name representative_source_g1_pair_limit560_by_category_split
+# Four-way representative curated report wrote keep/downweight/quarantine/exclude =
+# 70858/70876/479/7 with merged_source_rows=560, merged_source_fk_rows=560,
+# merged_g1_rows=560, merged_pair_rows=560, and 0 lost actor/source-skeleton/category/split groups.
 
 PYTHONPATH=src python3 scripts/inspect_bones_seed.py build-review-manifest \
-  --worst-clips-csv runs/curated/smoke_source_g1_limit100/worst_clips.csv \
-  --output-root runs/curated/smoke_source_g1_limit100 \
+  --worst-clips-csv runs/curated/representative_source_g1_pair_limit560_by_category_split/worst_clips.csv \
+  --output-root runs/curated/representative_source_g1_pair_limit560_by_category_split \
   --run-name manual_review \
   --max-per-family 5
-# Manual review smoke wrote review_manifest.jsonl and review_manifest.md with
-# 32 review items across parser, mirror, jump, foot-slide, penetration, float,
-# joint-limit, and self-collision families.
+# Manual review representative artifact wrote review_manifest.jsonl and
+# review_manifest.md with 35 review items across parser, mirror, jump,
+# foot-slide, penetration, float, and joint-limit families.
 
 PYTHONPATH=src python3 scripts/inspect_bones_seed.py propose-thresholds \
   --stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_limit560_by-category-split/g1_quality_stats.jsonl \

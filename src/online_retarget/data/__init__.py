@@ -19,6 +19,7 @@ from .curation import (
     build_split_index,
 )
 from .g1_quality import G1QualityConfig, G1QualityScanResult, scan_g1_quality_from_index
+from .pair_quality import PairQualityConfig, PairQualityScanResult, scan_pair_quality_from_index
 from .quality_merge import QualityMergeResult, merge_quality_stats
 from .review_manifest import ReviewManifestResult, build_review_manifest
 from .row_sampling import scan_sampling_report, select_rows_for_scan
@@ -59,6 +60,8 @@ __all__ = [
     "MotionPairRef",
     "ObservationSpec",
     "OutputSpec",
+    "PairQualityConfig",
+    "PairQualityScanResult",
     "RobotStateSpec",
     "SourceFKQualityConfig",
     "SourceFKQualityScanResult",
@@ -88,6 +91,7 @@ __all__ = [
     "propose_thresholds_from_jsonl",
     "scan_bvh_quality_from_index",
     "scan_g1_quality_from_index",
+    "scan_pair_quality_from_index",
     "scan_sampling_report",
     "scan_source_fk_quality_from_index",
     "select_rows_for_scan",

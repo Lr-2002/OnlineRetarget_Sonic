@@ -25,6 +25,7 @@ class QualityMergeResult:
     merged_source_rows: int
     merged_source_fk_rows: int
     merged_g1_rows: int
+    merged_pair_rows: int
     action_counts: dict[str, int]
     flag_counts: dict[str, int]
     git_sha: str
@@ -45,6 +46,7 @@ def merge_quality_stats(
     source_stats_jsonl: Path | None = None,
     source_fk_stats_jsonl: Path | None = None,
     g1_stats_jsonl: Path | None = None,
+    pair_stats_jsonl: Path | None = None,
     run_name: str = "merged_quality",
 ) -> QualityMergeResult:
     """Merge quality scan JSONL files into a curated index CSV."""
@@ -52,6 +54,7 @@ def merge_quality_stats(
     source_stats = _read_stats_by_row(source_stats_jsonl) if source_stats_jsonl else {}
     source_fk_stats = _read_stats_by_row(source_fk_stats_jsonl) if source_fk_stats_jsonl else {}
     g1_stats = _read_stats_by_row(g1_stats_jsonl) if g1_stats_jsonl else {}
+    pair_stats = _read_stats_by_row(pair_stats_jsonl) if pair_stats_jsonl else {}
     output_dir = output_root.expanduser() / "curated" / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
     curated_index_csv = output_dir / "curated_index.csv"
@@ -67,11 +70,15 @@ def merge_quality_stats(
                     source_stats.get(row["row_index"]),
                     source_fk_stats.get(row["row_index"]),
                     g1_stats.get(row["row_index"]),
+                    pair_stats.get(row["row_index"]),
                 )
             )
 
     _write_csv(curated_index_csv, merged_rows)
-    _write_csv(worst_clips_csv, _worst_clip_rows(merged_rows, source_stats, source_fk_stats, g1_stats))
+    _write_csv(
+        worst_clips_csv,
+        _worst_clip_rows(merged_rows, source_stats, source_fk_stats, g1_stats, pair_stats),
+    )
     action_counts = Counter(row["merged_quality_action"] for row in merged_rows)
     flag_counts = Counter()
     for row in merged_rows:
@@ -83,12 +90,14 @@ def merge_quality_stats(
         "source_stats_jsonl": str(source_stats_jsonl) if source_stats_jsonl else "",
         "source_fk_stats_jsonl": str(source_fk_stats_jsonl) if source_fk_stats_jsonl else "",
         "g1_stats_jsonl": str(g1_stats_jsonl) if g1_stats_jsonl else "",
+        "pair_stats_jsonl": str(pair_stats_jsonl) if pair_stats_jsonl else "",
         "curated_index_csv": str(curated_index_csv),
         "worst_clips_csv": str(worst_clips_csv),
         "row_count": len(merged_rows),
         "merged_source_rows": len(source_stats),
         "merged_source_fk_rows": len(source_fk_stats),
         "merged_g1_rows": len(g1_stats),
+        "merged_pair_rows": len(pair_stats),
         "action_counts": dict(sorted(action_counts.items())),
         "flag_counts": dict(sorted(flag_counts.items())),
         "breakdown": _breakdown(merged_rows),
@@ -106,6 +115,7 @@ def merge_quality_stats(
         merged_source_rows=len(source_stats),
         merged_source_fk_rows=len(source_fk_stats),
         merged_g1_rows=len(g1_stats),
+        merged_pair_rows=len(pair_stats),
         action_counts=dict(sorted(action_counts.items())),
         flag_counts=dict(sorted(flag_counts.items())),
         git_sha=report["git_sha"],
@@ -118,18 +128,22 @@ def _merge_row(
     source_stats: Mapping[str, object] | None,
     source_fk_stats: Mapping[str, object] | None,
     g1_stats: Mapping[str, object] | None,
+    pair_stats: Mapping[str, object] | None,
 ) -> dict[str, str]:
     source_action = str(source_stats.get("quality_action", "")) if source_stats else ""
     source_fk_action = str(source_fk_stats.get("quality_action", "")) if source_fk_stats else ""
     g1_action = str(g1_stats.get("quality_action", "")) if g1_stats else ""
+    pair_action = str(pair_stats.get("quality_action", "")) if pair_stats else ""
     source_flags = str(source_stats.get("quality_flags", "")) if source_stats else ""
     source_fk_flags = str(source_fk_stats.get("quality_flags", "")) if source_fk_stats else ""
     g1_flags = str(g1_stats.get("quality_flags", "")) if g1_stats else ""
+    pair_flags = str(pair_stats.get("quality_flags", "")) if pair_stats else ""
     actions = [
         row.get("curation_action", "keep"),
         source_action or "keep",
         source_fk_action or "keep",
         g1_action or "keep",
+        pair_action or "keep",
     ]
     merged_action = max(actions, key=lambda action: ACTION_ORDER.get(action, 0))
     flags = []
@@ -137,6 +151,7 @@ def _merge_row(
     flags.extend(f"source:{flag}" for flag in _split_flags(source_flags))
     flags.extend(f"source_fk:{flag}" for flag in _split_flags(source_fk_flags))
     flags.extend(f"g1:{flag}" for flag in _split_flags(g1_flags))
+    flags.extend(f"pair:{flag}" for flag in _split_flags(pair_flags))
     merged = dict(row)
     merged.update(
         {
@@ -146,6 +161,8 @@ def _merge_row(
             "source_fk_quality_flags": source_fk_flags,
             "g1_quality_action": g1_action,
             "g1_quality_flags": g1_flags,
+            "pair_quality_action": pair_action,
+            "pair_quality_flags": pair_flags,
             "merged_quality_action": merged_action,
             "merged_quality_flags": "|".join(dict.fromkeys(flags)),
         }
@@ -239,6 +256,7 @@ def _worst_clip_rows(
     source_stats: Mapping[str, Mapping[str, object]],
     source_fk_stats: Mapping[str, Mapping[str, object]],
     g1_stats: Mapping[str, Mapping[str, object]],
+    pair_stats: Mapping[str, Mapping[str, object]],
     limit: int = 100,
 ) -> list[dict[str, str]]:
     candidates = []
@@ -250,6 +268,7 @@ def _worst_clip_rows(
         source = source_stats.get(row_index, {})
         source_fk = source_fk_stats.get(row_index, {})
         g1 = g1_stats.get(row_index, {})
+        pair = pair_stats.get(row_index, {})
         candidates.append(
             {
                 "row_index": row_index,
@@ -283,6 +302,11 @@ def _worst_clip_rows(
                 "g1_self_collision_proxy_rate": _stat(g1, "self_collision_proxy_rate"),
                 "g1_min_self_collision_distance": _stat(g1, "min_self_collision_distance"),
                 "g1_mean_min_self_collision_distance": _stat(g1, "mean_min_self_collision_distance"),
+                "pair_source_frame_count": _stat(pair, "source_frame_count"),
+                "pair_g1_frame_count": _stat(pair, "g1_frame_count"),
+                "pair_abs_frame_count_delta": _stat(pair, "abs_frame_count_delta"),
+                "pair_abs_duration_delta_sec": _stat(pair, "abs_duration_delta_sec"),
+                "pair_target_provenance": _stat(pair, "target_provenance"),
             }
         )
     candidates.sort(key=_worst_sort_key, reverse=True)
@@ -298,6 +322,8 @@ def _worst_sort_key(row: Mapping[str, str]) -> tuple[float, ...]:
         _float(row.get("source_fk_contact_slide_rate", "")),
         _float(row.get("g1_joint_limit_violation_rate", "")),
         _float(row.get("g1_self_collision_proxy_rate", "")),
+        _float(row.get("pair_abs_frame_count_delta", "")),
+        _float(row.get("pair_abs_duration_delta_sec", "")),
         _float(row.get("g1_joint_jump_rate", "")),
         _float(row.get("source_channel_jump_rate", "")),
         _float(row.get("g1_max_abs_joint_velocity", "")),

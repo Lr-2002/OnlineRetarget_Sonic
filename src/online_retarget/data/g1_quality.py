@@ -35,7 +35,7 @@ DEFAULT_SELF_COLLISION_IGNORE_BODIES = (
 
 @dataclass(frozen=True)
 class G1QualityConfig:
-    fps: float = 30.0
+    fps: float = 120.0
     max_joint_velocity: float = 20.0
     max_root_speed: float = 8.0
     root_position_scale: float = 0.01

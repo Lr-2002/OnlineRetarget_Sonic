@@ -11,6 +11,7 @@ from online_retarget.data.bvh_quality import BVHQualityConfig, scan_bvh_quality_
 from online_retarget.data.curation import QualityPolicy, SplitConfig, build_split_index
 from online_retarget.data.g1_quality import G1QualityConfig, scan_g1_quality_from_index
 from online_retarget.data.bones_seed import actor_skeletons, summarize_metadata
+from online_retarget.data.pair_quality import PairQualityConfig, scan_pair_quality_from_index
 from online_retarget.data.quality_merge import merge_quality_stats
 from online_retarget.data.review_manifest import build_review_manifest
 from online_retarget.data.source_fk_quality import (
@@ -70,7 +71,7 @@ def main() -> None:
         default=[],
         help="When --limit is active, stratify scan rows by this index field.",
     )
-    quality.add_argument("--fps", type=float, default=30.0)
+    quality.add_argument("--fps", type=float, default=120.0)
     quality.add_argument("--max-joint-velocity", type=float, default=20.0)
     quality.add_argument("--max-root-speed", type=float, default=8.0)
     quality.add_argument("--root-position-scale", type=float, default=0.01)
@@ -132,7 +133,11 @@ def main() -> None:
         default=[],
         help="When --limit is active, stratify scan rows by this index field.",
     )
-    source_fk_quality.add_argument("--fps", type=float, default=30.0)
+    source_fk_quality.add_argument(
+        "--fps",
+        type=float,
+        help="Override source BVH FPS for contact/slide speeds. Defaults to BVH Frame Time.",
+    )
     source_fk_quality.add_argument("--position-scale", type=float, default=0.01)
     source_fk_quality.add_argument("--frame-stride", type=int, default=1)
     source_fk_quality.add_argument("--max-frames", type=int)
@@ -143,6 +148,30 @@ def main() -> None:
     source_fk_quality.add_argument("--max-mean-foot-clearance", type=float, default=0.10)
     source_fk_quality.add_argument("--max-penetration-depth", type=float, default=0.03)
     source_fk_quality.add_argument("--min-contact-frame-ratio", type=float, default=0.05)
+
+    pair_quality = subparsers.add_parser(
+        "scan-pair-quality",
+        help="Scan source/G1 pair consistency and provenance from a split index",
+    )
+    pair_quality.add_argument("--data-root", type=Path, default=Paths.from_env().data_root)
+    pair_quality.add_argument("--index-csv", type=Path, required=True)
+    pair_quality.add_argument("--output-root", type=Path, default=Paths.from_env().output_root)
+    pair_quality.add_argument("--limit", type=int, default=100)
+    pair_quality.add_argument("--full", action="store_true", help="Scan all matching rows")
+    pair_quality.add_argument("--split", action="append", default=[])
+    pair_quality.add_argument("--curation-action", action="append", default=[])
+    pair_quality.add_argument(
+        "--sample-by",
+        action="append",
+        default=[],
+        help="When --limit is active, stratify scan rows by this index field.",
+    )
+    pair_quality.add_argument("--expected-source-frame-time", type=float)
+    pair_quality.add_argument("--g1-fps", type=float, default=120.0)
+    pair_quality.add_argument("--frame-time-tolerance", type=float, default=1e-4)
+    pair_quality.add_argument("--max-frame-count-delta", type=int, default=0)
+    pair_quality.add_argument("--max-duration-delta-sec", type=float, default=1e-3)
+    pair_quality.add_argument("--target-provenance", default="kinematic_g1_csv")
 
     thresholds = subparsers.add_parser(
         "propose-thresholds",
@@ -214,6 +243,7 @@ def main() -> None:
     merge_quality.add_argument("--source-stats-jsonl", type=Path)
     merge_quality.add_argument("--source-fk-stats-jsonl", type=Path)
     merge_quality.add_argument("--g1-stats-jsonl", type=Path)
+    merge_quality.add_argument("--pair-stats-jsonl", type=Path)
     merge_quality.add_argument("--output-root", type=Path, default=Paths.from_env().output_root)
     merge_quality.add_argument("--run-name", default="merged_quality")
 
@@ -249,6 +279,8 @@ def main() -> None:
         _scan_source_quality(args)
     elif args.command == "scan-source-fk-quality":
         _scan_source_fk_quality(args)
+    elif args.command == "scan-pair-quality":
+        _scan_pair_quality(args)
     elif args.command == "propose-thresholds":
         _propose_thresholds(args)
     elif args.command == "build-supervised-jsonl":
@@ -377,6 +409,28 @@ def _scan_source_fk_quality(args: argparse.Namespace) -> None:
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 
 
+def _scan_pair_quality(args: argparse.Namespace) -> None:
+    limit = None if args.full else args.limit
+    result = scan_pair_quality_from_index(
+        data_root=args.data_root,
+        index_csv=args.index_csv,
+        output_root=args.output_root,
+        config=PairQualityConfig(
+            expected_source_frame_time=args.expected_source_frame_time,
+            g1_fps=args.g1_fps,
+            frame_time_tolerance=args.frame_time_tolerance,
+            max_frame_count_delta=args.max_frame_count_delta,
+            max_duration_delta_sec=args.max_duration_delta_sec,
+            target_provenance=args.target_provenance,
+        ),
+        limit=limit,
+        splits=tuple(args.split),
+        actions=tuple(args.curation_action) or ("keep", "downweight", "quarantine"),
+        sample_by=tuple(args.sample_by),
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
 def _propose_thresholds(args: argparse.Namespace) -> None:
     if not args.metric and not args.lower_metric:
         raise SystemExit("propose-thresholds requires at least one --metric or --lower-metric")
@@ -435,6 +489,7 @@ def _merge_quality(args: argparse.Namespace) -> None:
         source_stats_jsonl=args.source_stats_jsonl,
         source_fk_stats_jsonl=args.source_fk_stats_jsonl,
         g1_stats_jsonl=args.g1_stats_jsonl,
+        pair_stats_jsonl=args.pair_stats_jsonl,
         output_root=args.output_root,
         run_name=args.run_name,
     )
