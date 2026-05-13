@@ -181,18 +181,35 @@ Implication for this repo:
 - Even before Isaac integration, we should track acceleration/jerk and contact-state inconsistency as proxies for dynamic infeasibility.
 - If future data includes force/contact labels, they should become quality signals, not auxiliary metadata.
 
-### A Kung Fu Athlete Bot That Can Do It All Day
+### KungfuBot
 
 Primary links:
 
-- arXiv: https://arxiv.org/abs/2602.13656
+- arXiv: https://arxiv.org/abs/2506.12851
 
-This paper is not a retargeting paper per se, but it is useful as a motion-cleaning reference for very dynamic data. The summary describes a video-to-motion correction pipeline that fixes root-height drift, reconstructs airborne phases with a physics-based parabola, and applies Savitzky-Golay smoothing to reduce jitter while keeping key motion peaks. It also uses low-kinetic-energy anchors when sampling episodes.
+This paper is not a retargeting paper per se, but it is useful as a motion-cleaning reference for very dynamic data. The PDF describes a multi-step motion processing pipeline: video-to-SMPL motion estimation, physics-based filtering, contact-mask extraction, contact-aware correction for minor floating, EMA smoothing for correction-induced jitter, and IK retargeting that respects joint limits.
 
 Implication for this repo:
 
-- Dynamic clips need cleaning rules that preserve peak motion instead of over-smoothing them away.
+- Dynamic clips need cleaning rules that preserve high-energy motion instead of over-smoothing them away.
 - For highly dynamic categories, quality filtering should be category-aware rather than global.
+
+### RoboForge
+
+Primary links:
+
+- arXiv: https://arxiv.org/abs/2603.17927
+
+RoboForge is relevant because it treats motion generation, execution, filtering, and re-training as a closed loop. Its Physical Plausibility Optimization module penalizes foot skating, floating, and ground penetration during simulated execution, then filters refined rollouts before feeding them back into the motion generator.
+
+Implication for this repo:
+
+- M7 should not only evaluate predicted references; it should eventually produce a separately labeled simulator-refined dataset.
+- Physics-refined rollouts must remain a different provenance class from kinematic BONES-SEED G1 CSV targets.
+
+## 2026-05-14 Deep-Read Update
+
+The filtering-specific PDF/OpenAlex pass is recorded in `docs/research/papers/motion_filtering_deep_read.md`. It corrected the KungfuBot arXiv ID to `2506.12851`, added RoboForge, and confirmed that PHUMA reports concrete root jerk, foot-contact, pelvis-height, and support-base filtering metrics. These paper thresholds are not OnlineRetarget defaults; they define signals to scan and then calibrate on BONES-SEED.
 
 ## Working Design Choices
 
