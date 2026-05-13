@@ -1,0 +1,42 @@
+experiment:
+  name: baseline_mlp_direct_g1
+  project: online-retarget
+  seed: 17
+  output_root: ${ONLINE_RETARGET_OUTPUT_ROOT}
+
+data:
+  root: ${ONLINE_RETARGET_DATA_ROOT}
+  source_format: soma_proportional_bvh
+  target_format: g1_csv
+  history_frames: 8
+  future_frames: 1
+  split:
+    group_by: actor_uid
+    train: 0.8
+    val: 0.1
+    test: 0.1
+
+model:
+  family: temporal_mlp
+  hidden_dims: [512, 512, 256]
+  activation: silu
+  dropout: 0.0
+  output: g1_joint_position_delta
+  latency_budget_ms_4090: 1.0
+
+loss:
+  joint_position: 1.0
+  joint_velocity: 0.2
+  body_mpjpe: 1.0
+  smoothness: 0.05
+  joint_limit: 0.2
+  action_similarity: 0.1
+
+train:
+  batch_size: 1024
+  max_steps: 200000
+  learning_rate: 0.0003
+  precision: bf16
+  ddp: true
+  log_every: 100
+  eval_every: 2000

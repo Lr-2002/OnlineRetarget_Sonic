@@ -1,0 +1,16 @@
+name: online-retarget
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pytorch
+  - pytorch-cuda=12.1
+  - pyyaml
+  - tqdm
+  - pip:
+      - wandb
+      - -e .[dev]

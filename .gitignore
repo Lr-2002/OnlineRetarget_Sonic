@@ -1,0 +1,27 @@
+.direnv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Experiment outputs stay local and are tracked through WandB/artifacts.
+runs/
+outputs/
+checkpoints/
+wandb/
+wandb_token
+
+# Large datasets are read-only external inputs, never committed here.
+/data/
+*.tar
+*.npz
+*.pkl
+*.mp4
+*.bvh
+*.usd
+*.csv
+!configs/*.yaml
+!tests/fixtures/*.csv
