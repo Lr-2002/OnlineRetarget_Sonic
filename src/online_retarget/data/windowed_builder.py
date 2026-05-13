@@ -294,6 +294,32 @@ def body_positions_from_bvh(
     return frames
 
 
+def global_body_position_maps_from_bvh(
+    motion: BVHMotion,
+    body_names: Sequence[str],
+    position_scale: float = 0.01,
+) -> list[dict[str, tuple[float, float, float]]]:
+    """Return global body positions by body name for every frame."""
+
+    name_to_index = {joint.name: index for index, joint in enumerate(motion.joints)}
+    body_indices = [(name, name_to_index.get(name)) for name in body_names]
+    frames = []
+    for row in motion.frames:
+        global_positions, _ = _forward_kinematics(motion, row)
+        frame_positions: dict[str, tuple[float, float, float]] = {}
+        for name, index in body_indices:
+            if index is None:
+                continue
+            position = global_positions[index]
+            frame_positions[name] = (
+                position[0] * position_scale,
+                position[1] * position_scale,
+                position[2] * position_scale,
+            )
+        frames.append(frame_positions)
+    return frames
+
+
 def _build_sample(
     source_tar: tarfile.TarFile,
     target_tar: tarfile.TarFile,

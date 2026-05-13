@@ -69,6 +69,25 @@ PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-source-quality \
   --max-root-speed 500
 ```
 
+Scan source SOMA BVH FK/contact quality stats for M2Q calibration:
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-source-fk-quality \
+  --data-root /home/user/data/motion_data \
+  --index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
+  --output-root runs \
+  --limit 100 \
+  --ground-height 0.0 \
+  --fps 30 \
+  --frame-stride 2 \
+  --max-frames 256 \
+  --contact-height-threshold 0.04 \
+  --max-contact-slide-speed 0.25 \
+  --max-mean-foot-clearance 0.10 \
+  --max-penetration-depth 0.03 \
+  --min-contact-frame-ratio 0.05
+```
+
 Evaluate prediction/target JSONL outputs offline:
 
 ```bash

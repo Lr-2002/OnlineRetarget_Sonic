@@ -34,6 +34,11 @@ from .supervised_builder import (
     SupervisedBuildResult,
     build_supervised_jsonl,
 )
+from .source_fk_quality import (
+    SourceFKQualityConfig,
+    SourceFKQualityScanResult,
+    scan_source_fk_quality_from_index,
+)
 from .thresholds import ThresholdProposal, propose_thresholds_from_jsonl, write_threshold_proposals
 from .windowed_builder import (
     WindowedBuildConfig,
@@ -53,6 +58,8 @@ __all__ = [
     "ObservationSpec",
     "OutputSpec",
     "RobotStateSpec",
+    "SourceFKQualityConfig",
+    "SourceFKQualityScanResult",
     "SupervisedBuildConfig",
     "SupervisedBuildResult",
     "ThresholdProposal",
@@ -77,6 +84,7 @@ __all__ = [
     "propose_thresholds_from_jsonl",
     "scan_bvh_quality_from_index",
     "scan_g1_quality_from_index",
+    "scan_source_fk_quality_from_index",
     "summarize_metadata",
     "write_threshold_proposals",
 ]

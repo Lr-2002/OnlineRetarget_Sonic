@@ -12,6 +12,10 @@ from online_retarget.data.curation import QualityPolicy, SplitConfig, build_spli
 from online_retarget.data.g1_quality import G1QualityConfig, scan_g1_quality_from_index
 from online_retarget.data.bones_seed import actor_skeletons, summarize_metadata
 from online_retarget.data.quality_merge import merge_quality_stats
+from online_retarget.data.source_fk_quality import (
+    SourceFKQualityConfig,
+    scan_source_fk_quality_from_index,
+)
 from online_retarget.data.supervised_builder import SupervisedBuildConfig, build_supervised_jsonl
 from online_retarget.data.thresholds import write_threshold_proposals
 from online_retarget.data.windowed_builder import WindowedBuildConfig, build_windowed_jsonl
@@ -78,6 +82,30 @@ def main() -> None:
     source_quality.add_argument("--max-root-speed", type=float, default=500.0)
     source_quality.add_argument("--expected-frame-time", type=float)
     source_quality.add_argument("--frame-time-tolerance", type=float, default=1e-4)
+
+    source_fk_quality = subparsers.add_parser(
+        "scan-source-fk-quality",
+        help="Scan source SOMA BVH motions with FK foot/contact geometry metrics",
+    )
+    source_fk_quality.add_argument("--data-root", type=Path, default=Paths.from_env().data_root)
+    source_fk_quality.add_argument("--index-csv", type=Path, required=True)
+    source_fk_quality.add_argument("--output-root", type=Path, default=Paths.from_env().output_root)
+    source_fk_quality.add_argument("--limit", type=int, default=100)
+    source_fk_quality.add_argument("--full", action="store_true", help="Scan all matching rows")
+    source_fk_quality.add_argument("--split", action="append", default=[])
+    source_fk_quality.add_argument("--curation-action", action="append", default=[])
+    source_fk_quality.add_argument("--action-column", default="curation_action")
+    source_fk_quality.add_argument("--fps", type=float, default=30.0)
+    source_fk_quality.add_argument("--position-scale", type=float, default=0.01)
+    source_fk_quality.add_argument("--frame-stride", type=int, default=1)
+    source_fk_quality.add_argument("--max-frames", type=int)
+    source_fk_quality.add_argument("--ground-height", type=float)
+    source_fk_quality.add_argument("--ground-percentile", type=float, default=0.05)
+    source_fk_quality.add_argument("--contact-height-threshold", type=float, default=0.04)
+    source_fk_quality.add_argument("--max-contact-slide-speed", type=float, default=0.25)
+    source_fk_quality.add_argument("--max-mean-foot-clearance", type=float, default=0.10)
+    source_fk_quality.add_argument("--max-penetration-depth", type=float, default=0.03)
+    source_fk_quality.add_argument("--min-contact-frame-ratio", type=float, default=0.05)
 
     thresholds = subparsers.add_parser(
         "propose-thresholds",
@@ -149,6 +177,8 @@ def main() -> None:
         _scan_g1_quality(args)
     elif args.command == "scan-source-quality":
         _scan_source_quality(args)
+    elif args.command == "scan-source-fk-quality":
+        _scan_source_fk_quality(args)
     elif args.command == "propose-thresholds":
         _propose_thresholds(args)
     elif args.command == "build-supervised-jsonl":
@@ -223,6 +253,33 @@ def _scan_source_quality(args: argparse.Namespace) -> None:
         limit=limit,
         splits=tuple(args.split),
         actions=tuple(args.curation_action) or ("keep", "downweight", "quarantine"),
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _scan_source_fk_quality(args: argparse.Namespace) -> None:
+    limit = None if args.full else args.limit
+    result = scan_source_fk_quality_from_index(
+        data_root=args.data_root,
+        index_csv=args.index_csv,
+        output_root=args.output_root,
+        config=SourceFKQualityConfig(
+            fps=args.fps,
+            position_scale=args.position_scale,
+            frame_stride=args.frame_stride,
+            max_frames=args.max_frames,
+            ground_height=args.ground_height,
+            ground_percentile=args.ground_percentile,
+            contact_height_threshold=args.contact_height_threshold,
+            max_contact_slide_speed=args.max_contact_slide_speed,
+            max_mean_foot_clearance=args.max_mean_foot_clearance,
+            max_penetration_depth=args.max_penetration_depth,
+            min_contact_frame_ratio=args.min_contact_frame_ratio,
+        ),
+        limit=limit,
+        splits=tuple(args.split),
+        actions=tuple(args.curation_action) or ("keep", "downweight", "quarantine"),
+        action_column=args.action_column,
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 
