@@ -150,7 +150,18 @@ def main() -> None:
     )
     thresholds.add_argument("--stats-jsonl", type=Path, required=True)
     thresholds.add_argument("--output-json", type=Path, required=True)
-    thresholds.add_argument("--metric", action="append", required=True)
+    thresholds.add_argument(
+        "--metric",
+        action="append",
+        default=[],
+        help="Metric where high values are bad; propose an upper-tail threshold.",
+    )
+    thresholds.add_argument(
+        "--lower-metric",
+        action="append",
+        default=[],
+        help="Metric where low values are bad; propose a lower-tail threshold.",
+    )
     thresholds.add_argument("--percentile", type=float, default=0.99)
     thresholds.add_argument("--action", default="quarantine")
     thresholds.add_argument(
@@ -367,6 +378,9 @@ def _scan_source_fk_quality(args: argparse.Namespace) -> None:
 
 
 def _propose_thresholds(args: argparse.Namespace) -> None:
+    if not args.metric and not args.lower_metric:
+        raise SystemExit("propose-thresholds requires at least one --metric or --lower-metric")
+
     payload = write_threshold_proposals(
         stats_jsonl=args.stats_jsonl,
         output_json=args.output_json,
@@ -375,6 +389,7 @@ def _propose_thresholds(args: argparse.Namespace) -> None:
         action=args.action,
         group_by=tuple(args.group_by),
         min_group_size=args.min_group_size,
+        lower_metrics=tuple(args.lower_metric),
     )
     print(json.dumps(payload, indent=2, sort_keys=True))
 

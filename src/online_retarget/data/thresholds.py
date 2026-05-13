@@ -14,6 +14,8 @@ class ThresholdProposal:
     percentile: float
     value: float
     action: str
+    tail: str
+    comparison: str
     rationale: str
 
     def to_dict(self) -> dict[str, object]:
@@ -27,6 +29,7 @@ def propose_thresholds_from_jsonl(
     action: str = "quarantine",
     group_by: Sequence[str] = (),
     min_group_size: int = 1,
+    lower_metrics: Sequence[str] = (),
 ) -> dict[str, object]:
     """Propose percentile thresholds from scan stats."""
 
@@ -36,8 +39,16 @@ def propose_thresholds_from_jsonl(
         raise ValueError("min_group_size must be positive")
 
     rows = list(_iter_jsonl(stats_jsonl))
-    proposals = _proposals_for_rows(rows, metrics, percentile, action)
-    groups = _group_proposals(rows, metrics, percentile, action, group_by, min_group_size)
+    proposals = _proposals_for_rows(rows, metrics, lower_metrics, percentile, action)
+    groups = _group_proposals(
+        rows,
+        metrics,
+        lower_metrics,
+        percentile,
+        action,
+        group_by,
+        min_group_size,
+    )
     grouped_rows = {
         field: sum(group["sample_count"] for group in field_groups)
         for field, field_groups in groups.items()
@@ -49,6 +60,7 @@ def propose_thresholds_from_jsonl(
         "proposals": [proposal.to_dict() for proposal in proposals],
         "group_by": list(group_by),
         "min_group_size": min_group_size,
+        "lower_metrics": list(lower_metrics),
         "grouped_rows": grouped_rows,
         "groups": groups,
     }
@@ -62,6 +74,7 @@ def write_threshold_proposals(
     action: str = "quarantine",
     group_by: Sequence[str] = (),
     min_group_size: int = 1,
+    lower_metrics: Sequence[str] = (),
 ) -> dict[str, object]:
     payload = propose_thresholds_from_jsonl(
         stats_jsonl=stats_jsonl,
@@ -70,6 +83,7 @@ def write_threshold_proposals(
         action=action,
         group_by=group_by,
         min_group_size=min_group_size,
+        lower_metrics=lower_metrics,
     )
     output_json.parent.mkdir(parents=True, exist_ok=True)
     output_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -79,22 +93,31 @@ def write_threshold_proposals(
 def _proposals_for_rows(
     rows: Sequence[Mapping[str, object]],
     metrics: Sequence[str],
+    lower_metrics: Sequence[str],
     percentile: float,
     action: str,
 ) -> list[ThresholdProposal]:
     proposals = []
-    for metric in metrics:
+    metric_specs = [(metric, "upper") for metric in metrics]
+    metric_specs.extend((metric, "lower") for metric in lower_metrics)
+    for metric, tail in metric_specs:
         values = _numeric_values(rows, metric)
+        effective_percentile = 1.0 - percentile if tail == "lower" else percentile
+        comparison = "<" if tail == "lower" else ">"
+        direction = "minimum accepted" if tail == "lower" else "maximum accepted"
         proposals.append(
             ThresholdProposal(
                 metric=metric,
-                percentile=percentile,
-                value=round(_percentile(sorted(values), percentile), 6) if values else 0.0,
+                percentile=effective_percentile,
+                value=round(_percentile(sorted(values), effective_percentile), 6) if values else 0.0,
                 action=action,
+                tail=tail,
+                comparison=comparison,
                 rationale=(
-                    f"Set {metric} threshold to p{int(percentile * 100)} of "
-                    f"{len(values)} scanned samples. Use as a proposal only; inspect "
-                    "category-specific distributions before excluding data."
+                    f"Set {metric} {direction} threshold to "
+                    f"p{int(round(effective_percentile * 100))} of {len(values)} "
+                    "scanned samples. Use as a proposal only; inspect category-specific "
+                    "distributions before excluding data."
                 ),
             )
         )
@@ -104,6 +127,7 @@ def _proposals_for_rows(
 def _group_proposals(
     rows: Sequence[Mapping[str, object]],
     metrics: Sequence[str],
+    lower_metrics: Sequence[str],
     percentile: float,
     action: str,
     group_by: Sequence[str],
@@ -126,7 +150,13 @@ def _group_proposals(
                     "sample_count": len(group_rows),
                     "proposals": [
                         proposal.to_dict()
-                        for proposal in _proposals_for_rows(group_rows, metrics, percentile, action)
+                        for proposal in _proposals_for_rows(
+                            group_rows,
+                            metrics,
+                            lower_metrics,
+                            percentile,
+                            action,
+                        )
                     ],
                 }
             )
