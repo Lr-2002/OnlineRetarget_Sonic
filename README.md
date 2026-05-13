@@ -169,6 +169,8 @@ PYTHONPATH=src python3 scripts/train.py \
   --batch-size 8
 ```
 
+Successful torch training writes `checkpoint.pt`, `train_report.json`, `train_predictions.jsonl`, and a train-set offline eval report under the run output directory. WandB is disabled by default with `tracking.wandb_mode: disabled`; set it to `offline` or `online` only in the intended conda environment.
+
 For data-path debugging only, bypass the M2Q gate explicitly:
 
 ```bash

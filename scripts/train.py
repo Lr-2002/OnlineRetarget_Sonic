@@ -16,6 +16,7 @@ except ImportError:  # pragma: no cover - environment blocker path
     yaml = None
 
 from online_retarget.data.schema import ObservationSpec, OutputSpec, iter_motion_pair_refs
+from online_retarget.evaluation import EvaluationConfig, evaluate_jsonl
 
 
 FORMAL_SAMPLE_BUILDER = "bvh_fk_30body_window"
@@ -286,6 +287,12 @@ def _train_jsonl(
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     loss_fn = torch.nn.MSELoss()
+    wandb_run = _init_wandb(
+        config=config,
+        quality_gate=quality_gate,
+        output_dir=output_dir,
+        enabled=rank == 0,
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     log_every = max(1, int(_nested_get(config, ("train", "log_every"), 100)))
@@ -298,31 +305,48 @@ def _train_jsonl(
         loss.backward()
         optimizer.step()
         if rank == 0 and (step == 1 or step == steps or step % log_every == 0):
-            print(json.dumps({"step": step, "loss": float(loss.detach().cpu())}, sort_keys=True))
+            step_log = {"step": step, "loss": float(loss.detach().cpu())}
+            print(json.dumps(step_log, sort_keys=True))
+            _wandb_log(wandb_run, step_log, step=step)
 
     with torch.no_grad():
-        final_loss = float(loss_fn(model(x), y).detach().cpu())
+        full_pred = model(x)
+        final_loss = float(loss_fn(full_pred, y).detach().cpu())
     checkpoint = output_dir / "checkpoint.pt"
-    report = {
-        "samples_jsonl": str(samples_jsonl),
-        "output_dir": str(output_dir),
-        "checkpoint": str(checkpoint),
-        "sample_count": len(samples),
-        "input_dim": input_dim,
-        "output_dim": output_dim,
-        "max_steps": steps,
-        "batch_size": batch_size,
-        "learning_rate": learning_rate,
-        "hidden_dims": list(hidden_dims),
-        "dropout": dropout,
-        "quality_gate": quality_gate,
-        "device": str(device),
-        "world_size": world_size,
-        "rank": rank,
-        "final_train_mse": final_loss,
-        "git_sha": _git_sha(),
-        "git_dirty": _git_dirty(),
-    }
+    predictions_jsonl = output_dir / "train_predictions.jsonl"
+    _write_prediction_jsonl(
+        predictions_jsonl,
+        samples=samples,
+        predictions=full_pred.detach().cpu().tolist(),
+    )
+    eval_result = None
+    if bool(_nested_get(config, ("tracking", "auto_offline_eval"), True)):
+        eval_result = evaluate_jsonl(
+            input_jsonl=predictions_jsonl,
+            output_root=output_dir,
+            config=EvaluationConfig(run_name="train_offline_eval"),
+        )
+    report = _build_train_report(
+        samples_jsonl=samples_jsonl,
+        output_dir=output_dir,
+        checkpoint=checkpoint,
+        predictions_jsonl=predictions_jsonl,
+        offline_eval=eval_result.to_dict() if eval_result is not None else {},
+        sample_count=len(samples),
+        input_dim=input_dim,
+        output_dim=output_dim,
+        max_steps=steps,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        hidden_dims=hidden_dims,
+        dropout=dropout,
+        quality_gate=quality_gate,
+        device=str(device),
+        world_size=world_size,
+        rank=rank,
+        final_train_mse=final_loss,
+        wandb_summary=_wandb_summary(wandb_run),
+    )
     torch.save(
         {
             "model_state_dict": model.state_dict(),
@@ -334,6 +358,12 @@ def _train_jsonl(
         json.dumps(report, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    _wandb_log(wandb_run, {"final_train_mse": final_loss})
+    _wandb_save(wandb_run, checkpoint)
+    _wandb_save(wandb_run, output_dir / "train_report.json")
+    if eval_result is not None:
+        _wandb_save(wandb_run, eval_result.summary_json)
+    _wandb_finish(wandb_run)
     print(json.dumps(report, indent=2, sort_keys=True))
 
 
@@ -349,6 +379,131 @@ def _load_supervised_samples(samples_jsonl: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"sample on line {line_number} lacks observation/target_joints")
             samples.append(sample)
     return samples
+
+
+def _write_prediction_jsonl(
+    path: Path,
+    *,
+    samples: list[dict[str, Any]],
+    predictions: list[list[float]],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for sample, prediction in zip(samples, predictions):
+            payload = {
+                "sample_id": sample.get("sample_id", ""),
+                "actor_uid": sample.get("actor_uid", ""),
+                "category": sample.get("category", ""),
+                "package": sample.get("package", ""),
+                "quality_flags": sample.get("quality_flags", []),
+                "predicted_joints": [prediction],
+                "target_joints": [sample["target_joints"]],
+            }
+            f.write(json.dumps(payload, sort_keys=True))
+            f.write("\n")
+
+
+def _build_train_report(
+    *,
+    samples_jsonl: Path,
+    output_dir: Path,
+    checkpoint: Path,
+    predictions_jsonl: Path,
+    offline_eval: dict[str, Any],
+    sample_count: int,
+    input_dim: int,
+    output_dim: int,
+    max_steps: int,
+    batch_size: int,
+    learning_rate: float,
+    hidden_dims: tuple[int, ...],
+    dropout: float,
+    quality_gate: dict[str, Any],
+    device: str,
+    world_size: int,
+    rank: int,
+    final_train_mse: float,
+    wandb_summary: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "samples_jsonl": str(samples_jsonl),
+        "output_dir": str(output_dir),
+        "checkpoint": str(checkpoint),
+        "predictions_jsonl": str(predictions_jsonl),
+        "offline_eval": offline_eval,
+        "sample_count": sample_count,
+        "input_dim": input_dim,
+        "output_dim": output_dim,
+        "max_steps": max_steps,
+        "batch_size": batch_size,
+        "learning_rate": learning_rate,
+        "hidden_dims": list(hidden_dims),
+        "dropout": dropout,
+        "quality_gate": quality_gate,
+        "device": device,
+        "world_size": world_size,
+        "rank": rank,
+        "final_train_mse": final_train_mse,
+        "git_sha": _git_sha(),
+        "git_dirty": _git_dirty(),
+        "wandb": wandb_summary,
+    }
+
+
+def _init_wandb(
+    *,
+    config: dict[str, Any],
+    quality_gate: dict[str, Any],
+    output_dir: Path,
+    enabled: bool,
+):
+    mode = str(_nested_get(config, ("tracking", "wandb_mode"), os.environ.get("WANDB_MODE", "disabled")))
+    if not enabled or mode == "disabled":
+        return None
+    try:
+        import wandb
+    except ImportError:
+        return None
+    project = str(_nested_get(config, ("experiment", "project"), "online-retarget"))
+    name = str(_nested_get(config, ("experiment", "name"), "baseline_mlp_direct_g1"))
+    return wandb.init(
+        project=project,
+        name=name,
+        mode=mode,
+        dir=str(output_dir),
+        config={
+            "config": config,
+            "quality_gate": quality_gate,
+            "git_sha": _git_sha(),
+            "git_dirty": _git_dirty(),
+        },
+    )
+
+
+def _wandb_log(run, payload: dict[str, Any], step: int | None = None) -> None:
+    if run is not None:
+        run.log(payload, step=step)
+
+
+def _wandb_save(run, path: Path) -> None:
+    if run is not None and path.exists():
+        run.save(str(path))
+
+
+def _wandb_finish(run) -> None:
+    if run is not None:
+        run.finish()
+
+
+def _wandb_summary(run) -> dict[str, Any]:
+    if run is None:
+        return {"enabled": False}
+    return {
+        "enabled": True,
+        "project": getattr(run, "project", ""),
+        "name": getattr(run, "name", ""),
+        "id": getattr(run, "id", ""),
+    }
 
 
 def _git_sha() -> str:

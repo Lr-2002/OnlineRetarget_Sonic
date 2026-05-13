@@ -28,6 +28,72 @@ class TrainEntryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 train_entry._load_supervised_samples(samples)
 
+    def test_write_prediction_jsonl_matches_eval_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "predictions.jsonl"
+
+            train_entry._write_prediction_jsonl(
+                output,
+                samples=[
+                    {
+                        "sample_id": "s1",
+                        "actor_uid": "A001",
+                        "category": "Baseline",
+                        "package": "Locomotion",
+                        "quality_flags": ["source_foot_slide"],
+                        "target_joints": [0.0, 1.0],
+                    }
+                ],
+                predictions=[[0.5, 1.5]],
+            )
+
+            payload = json.loads(output.read_text(encoding="utf-8").strip())
+
+        self.assertEqual(payload["predicted_joints"], [[0.5, 1.5]])
+        self.assertEqual(payload["target_joints"], [[0.0, 1.0]])
+        self.assertEqual(payload["quality_flags"], ["source_foot_slide"])
+
+    def test_wandb_disabled_by_default(self):
+        run = train_entry._init_wandb(
+            config={},
+            quality_gate={},
+            output_dir=Path("."),
+            enabled=True,
+        )
+
+        self.assertIsNone(run)
+
+    def test_build_train_report_records_trace_artifacts(self):
+        report = train_entry._build_train_report(
+            samples_jsonl=Path("runs/samples.jsonl"),
+            output_dir=Path("runs/train/run"),
+            checkpoint=Path("runs/train/run/checkpoint.pt"),
+            predictions_jsonl=Path("runs/train/run/train_predictions.jsonl"),
+            offline_eval={"summary_json": "runs/train/run/eval/train_offline_eval/eval_summary.json"},
+            sample_count=2,
+            input_dim=1547,
+            output_dim=29,
+            max_steps=1,
+            batch_size=2,
+            learning_rate=3e-4,
+            hidden_dims=(32,),
+            dropout=0.0,
+            quality_gate={"policy_id": "policy"},
+            device="cpu",
+            world_size=1,
+            rank=0,
+            final_train_mse=0.1,
+            wandb_summary={"enabled": False},
+        )
+
+        self.assertEqual(report["predictions_jsonl"], "runs/train/run/train_predictions.jsonl")
+        self.assertEqual(
+            report["offline_eval"]["summary_json"],
+            "runs/train/run/eval/train_offline_eval/eval_summary.json",
+        )
+        self.assertEqual(report["quality_gate"]["policy_id"], "policy")
+        self.assertFalse(report["wandb"]["enabled"])
+
     def test_quality_gate_blocks_formal_training_without_policy(self):
         context = train_entry._quality_gate_context(
             {},

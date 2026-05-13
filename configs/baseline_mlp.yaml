@@ -46,3 +46,7 @@ train:
   ddp: true
   log_every: 100
   eval_every: 2000
+
+tracking:
+  wandb_mode: disabled
+  auto_offline_eval: true

@@ -18,21 +18,21 @@ Verdict: not complete. The repo now has runnable scaffolds, real BONES-SEED smok
 | Implement M2Q quality filtering | source/G1 scanners, source FK/contact scanner, threshold proposal, `merge-quality`, `worst_clips.csv`, train quality gate | Partial. Smoke quality pipeline exists; source FK/contact smoke exists; full scans, G1 FK/contact, self-collision, and category thresholds remain pending. |
 | Implement M3 schema/obs contract | `src/online_retarget/data/schema.py`, `src/online_retarget/data/windowed_builder.py`, `tests/test_schema.py`, `tests/test_windowed_builder.py`, real 30-body smoke artifact | Smoke path implemented. Formal-scale extraction, normalization policy, robot-state wiring, and online preprocessing are pending. |
 | Implement M4 independent eval | `src/online_retarget/evaluation.py`, CLI `offline-eval`, `tests/test_evaluation.py` | Scaffold implemented. Real model predictions and simulator/contact metrics are pending. |
-| Implement M5 supervised baseline | `scripts/train.py`, `src/online_retarget/data/supervised_builder.py`, `src/online_retarget/data/windowed_builder.py`, supervised JSONL artifacts | Partial. PyTorch optimizer loop exists, but current Python lacks torch and formal-scale 30-body dataset/WandB/auto-eval are pending. |
+| Implement M5 supervised baseline | `scripts/train.py`, `src/online_retarget/data/supervised_builder.py`, `src/online_retarget/data/windowed_builder.py`, supervised JSONL artifacts | Partial. PyTorch optimizer loop exists and post-train prediction JSONL/offline-eval/WandB metadata hooks are coded, but current Python lacks torch and formal-scale 30-body training is pending. |
 | Enforce quality before formal training | `scripts/train.py` quality gate, sample-builder gate, `tests/test_train_entry.py`, dry-run output, raw-debug negative check | Implemented for current training entry. Formal non-dry-run refuses missing quality metadata and raw debug sample artifacts. |
 | DDP support | `scripts/train.py` reads `RANK`/`WORLD_SIZE` and reports them | Minimal scaffold only. Real distributed training not verified. |
-| WandB traceability | `docs/experiment_tracking.md`, config project name | Not implemented in training code yet. |
+| WandB traceability | `docs/experiment_tracking.md`, config project name, `scripts/train.py` optional WandB hooks, `tracking.wandb_mode` | Implemented as optional code path with default disabled mode. Real WandB artifact logging not executed in current no-torch environment. |
 | Implement M6 latency gate | `scripts/benchmark_latency.py --dry-run` scaffold | Scaffold only. Real torch/CUDA/4090 benchmark pending. |
 | Implement M7 Isaac Lab eval | `scripts/eval_isaac.py --dry-run` scaffold | Scaffold only. Real Isaac Lab/G1 replay task pending. |
 | Write live logs | `docs/logs/implementation-log.md` | Satisfied for current implementation history. Keep updating during future work. |
 | Make process/status readable | `docs/milestones.md`, `docs/status/m1_m7_status.md`, this audit | Satisfied as a living tracking surface, not final completion. |
-| Verify current work | `PYTHONPATH=src:. python3 -m unittest discover -s tests` -> 38 tests OK; targeted `py_compile` -> OK; dry-run training -> OK with `samples_builder_is_formal=true`; source FK/contact smoke scan -> OK; raw-debug artifact formal training check fails as intended | Current scaffold verified. Not evidence of full M1-M7 completion. |
+| Verify current work | `PYTHONPATH=src:. python3 -m unittest discover -s tests` -> 42 tests OK; targeted `py_compile` -> OK; dry-run training -> OK with `samples_builder_is_formal=true`; source FK/contact smoke scan -> OK; raw-debug artifact formal training check fails as intended | Current scaffold verified. Not evidence of full M1-M7 completion. |
 
 ## Latest Verification Evidence
 
 ```bash
 PYTHONPATH=src:. python3 -m unittest discover -s tests
-# Ran 39 tests in 0.038s, OK.
+# Ran 42 tests in 0.039s, OK.
 
 PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-source-fk-quality \
   --data-root /home/user/data/motion_data \
@@ -70,4 +70,4 @@ git diff --check
 - Isaac Lab/G1 replay or tracking task binding is not implemented.
 - M2Q quality scanning is still smoke-scale. Source FK/contact/penetration proxies exist; G1 FK/contact, self-collision, full scans, and calibrated category thresholds remain pending.
 - M3/M5 now have a 30-body smoke sample builder, but formal-scale extraction, normalization, and robot-state wiring remain incomplete.
-- WandB logging, checkpoint artifact registration, and automatic post-train offline eval are pending.
+- WandB hooks, checkpoint report metadata, and automatic post-train offline eval are coded but not executed in a real torch training run yet.
