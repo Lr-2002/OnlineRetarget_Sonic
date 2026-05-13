@@ -144,6 +144,8 @@ class SourceFKQualityTests(unittest.TestCase):
         self.assertEqual(result.flag_counts["source_foot_slide"], 1)
         self.assertEqual(result.flag_counts["missing_source_bvh_member"], 1)
         self.assertEqual(rows[0]["ground_source"], "fixed")
+        self.assertEqual(rows[0]["is_mirror"], "False")
+        self.assertEqual(rows[0]["actor_gender"], "M")
 
 
 def _write_index(path: Path) -> None:
@@ -155,6 +157,8 @@ def _write_index(path: Path) -> None:
         "filename",
         "package",
         "category",
+        "is_mirror",
+        "actor_gender",
         "move_soma_proportional_path",
         "curation_action",
     ]
@@ -167,6 +171,8 @@ def _write_index(path: Path) -> None:
             "filename": "good",
             "package": "Locomotion",
             "category": "Baseline",
+            "is_mirror": "False",
+            "actor_gender": "M",
             "move_soma_proportional_path": "soma_proportional/bvh/good.bvh",
             "curation_action": "keep",
         },
@@ -178,6 +184,8 @@ def _write_index(path: Path) -> None:
             "filename": "slide",
             "package": "Locomotion",
             "category": "Baseline",
+            "is_mirror": "False",
+            "actor_gender": "F",
             "move_soma_proportional_path": "soma_proportional/bvh/slide.bvh",
             "curation_action": "keep",
         },
@@ -189,6 +197,8 @@ def _write_index(path: Path) -> None:
             "filename": "missing",
             "package": "Locomotion",
             "category": "Baseline",
+            "is_mirror": "True",
+            "actor_gender": "M",
             "move_soma_proportional_path": "soma_proportional/bvh/missing.bvh",
             "curation_action": "keep",
         },

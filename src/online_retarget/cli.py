@@ -131,6 +131,18 @@ def main() -> None:
     thresholds.add_argument("--metric", action="append", required=True)
     thresholds.add_argument("--percentile", type=float, default=0.99)
     thresholds.add_argument("--action", default="quarantine")
+    thresholds.add_argument(
+        "--group-by",
+        action="append",
+        default=[],
+        help="Also propose thresholds for each value of this stats field, e.g. category.",
+    )
+    thresholds.add_argument(
+        "--min-group-size",
+        type=int,
+        default=1,
+        help="Skip grouped threshold proposals with fewer rows than this.",
+    )
 
     supervised = subparsers.add_parser(
         "build-supervised-jsonl",
@@ -322,6 +334,8 @@ def _propose_thresholds(args: argparse.Namespace) -> None:
         metrics=tuple(args.metric),
         percentile=args.percentile,
         action=args.action,
+        group_by=tuple(args.group_by),
+        min_group_size=args.min_group_size,
     )
     print(json.dumps(payload, indent=2, sort_keys=True))
 

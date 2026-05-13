@@ -169,6 +169,8 @@ def scan_source_fk_member(
         "filename": index_row.get("filename", ""),
         "package": index_row.get("package", ""),
         "category": index_row.get("category", ""),
+        "is_mirror": index_row.get("is_mirror", ""),
+        "actor_gender": index_row.get("actor_gender", ""),
         "move_soma_proportional_path": source_path,
     }
     try:

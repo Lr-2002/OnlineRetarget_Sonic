@@ -184,6 +184,10 @@ def scan_g1_csv_member(
         "actor_uid": index_row.get("actor_uid", ""),
         "move_name": index_row.get("move_name", ""),
         "filename": index_row.get("filename", ""),
+        "package": index_row.get("package", ""),
+        "category": index_row.get("category", ""),
+        "is_mirror": index_row.get("is_mirror", ""),
+        "actor_gender": index_row.get("actor_gender", ""),
         "move_g1_path": target_path,
     }
     try:

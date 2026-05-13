@@ -25,10 +25,63 @@ def propose_thresholds_from_jsonl(
     metrics: Sequence[str],
     percentile: float = 0.99,
     action: str = "quarantine",
+    group_by: Sequence[str] = (),
+    min_group_size: int = 1,
 ) -> dict[str, object]:
     """Propose percentile thresholds from scan stats."""
 
+    if not 0.0 <= percentile <= 1.0:
+        raise ValueError("percentile must be within [0, 1]")
+    if min_group_size <= 0:
+        raise ValueError("min_group_size must be positive")
+
     rows = list(_iter_jsonl(stats_jsonl))
+    proposals = _proposals_for_rows(rows, metrics, percentile, action)
+    groups = _group_proposals(rows, metrics, percentile, action, group_by, min_group_size)
+    grouped_rows = {
+        field: sum(group["sample_count"] for group in field_groups)
+        for field, field_groups in groups.items()
+    }
+    return {
+        "stats_jsonl": str(stats_jsonl),
+        "sample_count": len(rows),
+        "percentile": percentile,
+        "proposals": [proposal.to_dict() for proposal in proposals],
+        "group_by": list(group_by),
+        "min_group_size": min_group_size,
+        "grouped_rows": grouped_rows,
+        "groups": groups,
+    }
+
+
+def write_threshold_proposals(
+    stats_jsonl: Path,
+    output_json: Path,
+    metrics: Sequence[str],
+    percentile: float = 0.99,
+    action: str = "quarantine",
+    group_by: Sequence[str] = (),
+    min_group_size: int = 1,
+) -> dict[str, object]:
+    payload = propose_thresholds_from_jsonl(
+        stats_jsonl=stats_jsonl,
+        metrics=metrics,
+        percentile=percentile,
+        action=action,
+        group_by=group_by,
+        min_group_size=min_group_size,
+    )
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    output_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return payload
+
+
+def _proposals_for_rows(
+    rows: Sequence[Mapping[str, object]],
+    metrics: Sequence[str],
+    percentile: float,
+    action: str,
+) -> list[ThresholdProposal]:
     proposals = []
     for metric in metrics:
         values = _numeric_values(rows, metric)
@@ -45,30 +98,40 @@ def propose_thresholds_from_jsonl(
                 ),
             )
         )
-    return {
-        "stats_jsonl": str(stats_jsonl),
-        "sample_count": len(rows),
-        "percentile": percentile,
-        "proposals": [proposal.to_dict() for proposal in proposals],
-    }
+    return proposals
 
 
-def write_threshold_proposals(
-    stats_jsonl: Path,
-    output_json: Path,
+def _group_proposals(
+    rows: Sequence[Mapping[str, object]],
     metrics: Sequence[str],
-    percentile: float = 0.99,
-    action: str = "quarantine",
-) -> dict[str, object]:
-    payload = propose_thresholds_from_jsonl(
-        stats_jsonl=stats_jsonl,
-        metrics=metrics,
-        percentile=percentile,
-        action=action,
-    )
-    output_json.parent.mkdir(parents=True, exist_ok=True)
-    output_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return payload
+    percentile: float,
+    action: str,
+    group_by: Sequence[str],
+    min_group_size: int,
+) -> dict[str, list[dict[str, object]]]:
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for field in group_by:
+        buckets: dict[str, list[Mapping[str, object]]] = {}
+        for row in rows:
+            key = _group_key(row.get(field))
+            buckets.setdefault(key, []).append(row)
+        field_groups = []
+        for key, group_rows in sorted(buckets.items(), key=lambda item: (-len(item[1]), item[0])):
+            if len(group_rows) < min_group_size:
+                continue
+            field_groups.append(
+                {
+                    "field": field,
+                    "value": key,
+                    "sample_count": len(group_rows),
+                    "proposals": [
+                        proposal.to_dict()
+                        for proposal in _proposals_for_rows(group_rows, metrics, percentile, action)
+                    ],
+                }
+            )
+        grouped[field] = field_groups
+    return grouped
 
 
 def _iter_jsonl(path: Path) -> list[dict[str, object]]:
@@ -95,6 +158,12 @@ def _numeric_values(rows: Sequence[Mapping[str, object]], metric: str) -> list[f
         if isinstance(value, (int, float)):
             values.append(float(value))
     return values
+
+
+def _group_key(value: object) -> str:
+    if value in (None, ""):
+        return "unknown"
+    return str(value)
 
 
 def _percentile(sorted_values: Sequence[float], q: float) -> float:

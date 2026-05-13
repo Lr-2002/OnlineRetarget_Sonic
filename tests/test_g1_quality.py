@@ -52,6 +52,15 @@ class G1QualityTests(unittest.TestCase):
 
             report = json.loads(result.report_json.read_text(encoding="utf-8"))
             self.assertEqual(report["model"]["mode"], "csv_root_joint")
+            rows = [
+                json.loads(line)
+                for line in result.stats_jsonl.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(rows[0]["package"], "Locomotion")
+            self.assertEqual(rows[0]["category"], "Baseline")
+            self.assertEqual(rows[0]["is_mirror"], "False")
+            self.assertEqual(rows[0]["actor_gender"], "M")
 
     def test_summarize_g1_rows_with_mjcf_contact_and_limits(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -132,6 +141,10 @@ def _write_index(path: Path) -> None:
         "actor_uid",
         "move_name",
         "filename",
+        "package",
+        "category",
+        "is_mirror",
+        "actor_gender",
         "move_g1_path",
         "curation_action",
     ]
@@ -142,6 +155,10 @@ def _write_index(path: Path) -> None:
             "actor_uid": "A001",
             "move_name": "good",
             "filename": "good",
+            "package": "Locomotion",
+            "category": "Baseline",
+            "is_mirror": "False",
+            "actor_gender": "M",
             "move_g1_path": "g1/csv/240101/good.csv",
             "curation_action": "keep",
         },
@@ -151,6 +168,10 @@ def _write_index(path: Path) -> None:
             "actor_uid": "A002",
             "move_name": "jump",
             "filename": "jump",
+            "package": "Locomotion",
+            "category": "Baseline",
+            "is_mirror": "False",
+            "actor_gender": "F",
             "move_g1_path": "g1/csv/240101/jump.csv",
             "curation_action": "keep",
         },
@@ -160,6 +181,10 @@ def _write_index(path: Path) -> None:
             "actor_uid": "A003",
             "move_name": "missing",
             "filename": "missing",
+            "package": "Locomotion",
+            "category": "Baseline",
+            "is_mirror": "True",
+            "actor_gender": "M",
             "move_g1_path": "g1/csv/240101/missing.csv",
             "curation_action": "keep",
         },

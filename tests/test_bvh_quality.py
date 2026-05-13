@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import tarfile
 from pathlib import Path
 import tempfile
@@ -51,6 +52,15 @@ class BVHQualityTests(unittest.TestCase):
             self.assertEqual(result.flag_counts["source_channel_jump"], 1)
             self.assertEqual(result.flag_counts["source_root_discontinuity"], 1)
             self.assertEqual(result.flag_counts["missing_source_bvh_member"], 1)
+            rows = [
+                json.loads(line)
+                for line in result.stats_jsonl.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(rows[0]["package"], "Locomotion")
+            self.assertEqual(rows[0]["category"], "Baseline")
+            self.assertEqual(rows[0]["is_mirror"], "False")
+            self.assertEqual(rows[0]["actor_gender"], "M")
 
 
 def _write_index(path: Path) -> None:
@@ -60,6 +70,10 @@ def _write_index(path: Path) -> None:
         "actor_uid",
         "move_name",
         "filename",
+        "package",
+        "category",
+        "is_mirror",
+        "actor_gender",
         "move_soma_proportional_path",
         "curation_action",
     ]
@@ -70,6 +84,10 @@ def _write_index(path: Path) -> None:
             "actor_uid": "A001",
             "move_name": "good",
             "filename": "good",
+            "package": "Locomotion",
+            "category": "Baseline",
+            "is_mirror": "False",
+            "actor_gender": "M",
             "move_soma_proportional_path": "soma_proportional/bvh/240101/good.bvh",
             "curation_action": "keep",
         },
@@ -79,6 +97,10 @@ def _write_index(path: Path) -> None:
             "actor_uid": "A002",
             "move_name": "jump",
             "filename": "jump",
+            "package": "Locomotion",
+            "category": "Baseline",
+            "is_mirror": "False",
+            "actor_gender": "F",
             "move_soma_proportional_path": "soma_proportional/bvh/240101/jump.bvh",
             "curation_action": "keep",
         },
@@ -88,6 +110,10 @@ def _write_index(path: Path) -> None:
             "actor_uid": "A003",
             "move_name": "missing",
             "filename": "missing",
+            "package": "Locomotion",
+            "category": "Baseline",
+            "is_mirror": "True",
+            "actor_gender": "M",
             "move_soma_proportional_path": "soma_proportional/bvh/240101/missing.bvh",
             "curation_action": "keep",
         },
