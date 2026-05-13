@@ -20,6 +20,7 @@ from .curation import (
 )
 from .g1_quality import G1QualityConfig, G1QualityScanResult, scan_g1_quality_from_index
 from .quality_merge import QualityMergeResult, merge_quality_stats
+from .review_manifest import ReviewManifestResult, build_review_manifest
 from .row_sampling import scan_sampling_report, select_rows_for_scan
 from .schema import (
     MORPHOLOGY_NUMERIC_COLUMNS,
@@ -72,11 +73,13 @@ __all__ = [
     "QualityMergeResult",
     "QualityPolicy",
     "QualityThreshold",
+    "ReviewManifestResult",
     "SplitConfig",
     "SplitIndexResult",
     "assess_row_quality",
     "actor_skeletons",
     "build_split_index",
+    "build_review_manifest",
     "build_supervised_jsonl",
     "build_windowed_jsonl",
     "iter_motion_pair_refs",

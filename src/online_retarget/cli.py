@@ -12,6 +12,7 @@ from online_retarget.data.curation import QualityPolicy, SplitConfig, build_spli
 from online_retarget.data.g1_quality import G1QualityConfig, scan_g1_quality_from_index
 from online_retarget.data.bones_seed import actor_skeletons, summarize_metadata
 from online_retarget.data.quality_merge import merge_quality_stats
+from online_retarget.data.review_manifest import build_review_manifest
 from online_retarget.data.source_fk_quality import (
     SourceFKQualityConfig,
     scan_source_fk_quality_from_index,
@@ -202,6 +203,15 @@ def main() -> None:
     merge_quality.add_argument("--output-root", type=Path, default=Paths.from_env().output_root)
     merge_quality.add_argument("--run-name", default="merged_quality")
 
+    review_manifest = subparsers.add_parser(
+        "build-review-manifest",
+        help="Build JSONL/Markdown manifests for manual review from worst_clips.csv",
+    )
+    review_manifest.add_argument("--worst-clips-csv", type=Path, required=True)
+    review_manifest.add_argument("--output-root", type=Path)
+    review_manifest.add_argument("--run-name", default="manual_review")
+    review_manifest.add_argument("--max-per-family", type=int, default=5)
+
     offline_eval = subparsers.add_parser(
         "offline-eval",
         help="Evaluate prediction/target JSONL and write offline metric reports",
@@ -233,6 +243,8 @@ def main() -> None:
         _build_windowed_jsonl(args)
     elif args.command == "merge-quality":
         _merge_quality(args)
+    elif args.command == "build-review-manifest":
+        _build_review_manifest(args)
     elif args.command == "offline-eval":
         _offline_eval(args)
 
@@ -404,6 +416,16 @@ def _merge_quality(args: argparse.Namespace) -> None:
         g1_stats_jsonl=args.g1_stats_jsonl,
         output_root=args.output_root,
         run_name=args.run_name,
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _build_review_manifest(args: argparse.Namespace) -> None:
+    result = build_review_manifest(
+        worst_clips_csv=args.worst_clips_csv,
+        output_root=args.output_root,
+        run_name=args.run_name,
+        max_per_family=args.max_per_family,
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 

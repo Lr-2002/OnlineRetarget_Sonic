@@ -258,6 +258,8 @@ def _worst_clip_rows(
                 "package": row.get("package", ""),
                 "category": row.get("category", ""),
                 "filename": row.get("filename", ""),
+                "move_soma_proportional_path": row.get("move_soma_proportional_path", ""),
+                "move_g1_path": row.get("move_g1_path", ""),
                 "merged_quality_action": action,
                 "merged_quality_flags": row.get("merged_quality_flags", ""),
                 "source_max_abs_channel_velocity": _stat(source, "max_abs_channel_velocity"),

@@ -93,6 +93,8 @@ class QualityMergeTests(unittest.TestCase):
         self.assertEqual(rows[1]["merged_quality_flags"], "mirror_variant|g1:missing_g1_csv_member")
         self.assertEqual(len(worst), 2)
         self.assertEqual(worst[0]["merged_quality_action"], "exclude")
+        self.assertEqual(worst[0]["move_soma_proportional_path"], "soma/b.bvh")
+        self.assertEqual(worst[0]["move_g1_path"], "g1/b.csv")
         self.assertEqual(worst[0]["g1_penetration_depth"], "0.07")
         self.assertEqual(worst[0]["g1_contact_slide_rate"], "0.25")
         self.assertEqual(worst[0]["g1_joint_limit_violation_rate"], "0.5")
@@ -122,6 +124,8 @@ def _write_split_index(path: Path) -> None:
             "package": "Locomotion",
             "category": "Idle",
             "filename": "motion_a",
+            "move_soma_proportional_path": "soma/a.bvh",
+            "move_g1_path": "g1/a.csv",
             "move_soma_proportional_shape_path": "soma_shapes/soma_proportion_fit_mhr_params/A001.npz",
             "actor_height_cm": "171",
             "actor_gender": "F",
@@ -136,6 +140,8 @@ def _write_split_index(path: Path) -> None:
             "package": "Locomotion",
             "category": "Run",
             "filename": "motion_b",
+            "move_soma_proportional_path": "soma/b.bvh",
+            "move_g1_path": "g1/b.csv",
             "move_soma_proportional_shape_path": "soma_shapes/soma_proportion_fit_mhr_params/A002.npz",
             "actor_height_cm": "183",
             "actor_gender": "M",
@@ -150,6 +156,8 @@ def _write_split_index(path: Path) -> None:
             "package": "Locomotion",
             "category": "Walk",
             "filename": "motion_c",
+            "move_soma_proportional_path": "soma/c.bvh",
+            "move_g1_path": "g1/c.csv",
             "move_soma_proportional_shape_path": "soma_shapes/soma_proportion_fit_mhr_params/A003.npz",
             "actor_height_cm": "164",
             "actor_gender": "M",
