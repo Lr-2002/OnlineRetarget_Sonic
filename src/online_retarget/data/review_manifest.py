@@ -19,6 +19,7 @@ FAMILY_KEYWORDS = {
     "penetration": ("penetration", "ground_penetration"),
     "float": ("float", "low_foot_contact"),
     "joint_limit": ("joint_limit",),
+    "self_collision": ("self_collision", "self_intersection"),
 }
 
 
@@ -161,6 +162,9 @@ def _review_metrics(row: Mapping[str, str]) -> dict[str, str]:
         "g1_max_contact_slide_speed",
         "g1_mean_foot_clearance",
         "g1_penetration_depth",
+        "g1_self_collision_proxy_rate",
+        "g1_min_self_collision_distance",
+        "g1_mean_min_self_collision_distance",
     )
     return {key: row.get(key, "") for key in keys if row.get(key, "") != ""}
 

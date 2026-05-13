@@ -26,6 +26,11 @@ DEFAULT_FOOT_BODIES = (
     "right_ankle_roll_link",
     "right_toe_link",
 )
+DEFAULT_SELF_COLLISION_IGNORE_BODIES = (
+    "imu_in_torso",
+    "head_mocap",
+    "pelvis_contour_link",
+)
 
 
 @dataclass(frozen=True)
@@ -48,12 +53,17 @@ class G1QualityConfig:
     max_joint_limit_violation_rate: float = 0.0
     start_end_frames: int = 10
     max_start_end_root_speed: float = 0.20
+    min_self_collision_distance: float = 0.015
+    max_self_collision_proxy_rate: float = 0.0
+    min_self_collision_kinematic_hops: int = 4
     foot_bodies: tuple[str, ...] = DEFAULT_FOOT_BODIES
+    self_collision_ignore_bodies: tuple[str, ...] = DEFAULT_SELF_COLLISION_IGNORE_BODIES
 
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
         payload["model_xml"] = str(self.model_xml) if self.model_xml is not None else None
         payload["foot_bodies"] = list(self.foot_bodies)
+        payload["self_collision_ignore_bodies"] = list(self.self_collision_ignore_bodies)
         return payload
 
 
@@ -282,6 +292,9 @@ def summarize_g1_rows(
 
     joint_limit_stats = _joint_limit_stats(parsed_frames, model) if model is not None else {}
     contact_stats = _contact_stats(parsed_frames, model, config, effective_fps) if model is not None else {}
+    self_collision_stats = (
+        _self_collision_proxy_stats(parsed_frames, model, config) if model is not None else {}
+    )
 
     action = "keep"
     if frame_count == 0:
@@ -318,6 +331,13 @@ def summarize_g1_rows(
         if contact_stats.get("contact_slide_rate", 0.0) > 0.0:
             flags.append("g1_foot_slide")
             action = _worse_action(action, "downweight")
+    if self_collision_stats:
+        if (
+            self_collision_stats.get("self_collision_proxy_rate", 0.0)
+            > config.max_self_collision_proxy_rate
+        ):
+            flags.append("g1_self_collision_proxy")
+            action = _worse_action(action, "quarantine")
 
     result = {
         **base,
@@ -345,6 +365,7 @@ def summarize_g1_rows(
     if model is not None:
         result.update(_rounded_dict(joint_limit_stats))
         result.update(_rounded_dict(contact_stats))
+        result.update(_rounded_dict(self_collision_stats))
     else:
         result.update(_empty_model_metrics())
     return result
@@ -517,6 +538,98 @@ def _contact_stats(
     }
 
 
+def _self_collision_proxy_stats(
+    parsed_frames: Sequence[tuple[list[float], list[float], list[float], int]],
+    model: G1KinematicModel | None,
+    config: G1QualityConfig,
+) -> dict[str, float]:
+    if model is None or not parsed_frames:
+        return {}
+
+    body_pairs = _self_collision_body_pairs(model, config)
+    if not body_pairs:
+        return {
+            "self_collision_checked_pairs": 0.0,
+            "self_collision_proxy_rate": 0.0,
+            "min_self_collision_distance": 0.0,
+            "mean_min_self_collision_distance": 0.0,
+        }
+
+    min_distances: list[float] = []
+    for joints, root, root_euler, _ in parsed_frames:
+        frame = _g1_fk_positions(model, joints, root, root_euler, include_empty_body_origin=False)
+        frame_min: float | None = None
+        for left, right in body_pairs:
+            for left_point in frame.get(left, ()):
+                for right_point in frame.get(right, ()):
+                    distance = math.dist(left_point, right_point)
+                    if frame_min is None or distance < frame_min:
+                        frame_min = distance
+        if frame_min is not None:
+            min_distances.append(frame_min)
+
+    if not min_distances:
+        return {
+            "self_collision_checked_pairs": float(len(body_pairs)),
+            "self_collision_proxy_rate": 0.0,
+            "min_self_collision_distance": 0.0,
+            "mean_min_self_collision_distance": 0.0,
+        }
+    return {
+        "self_collision_checked_pairs": float(len(body_pairs)),
+        "self_collision_proxy_rate": _rate_below(
+            min_distances, config.min_self_collision_distance
+        ),
+        "min_self_collision_distance": min(min_distances),
+        "mean_min_self_collision_distance": sum(min_distances) / len(min_distances),
+    }
+
+
+def _self_collision_body_pairs(
+    model: G1KinematicModel,
+    config: G1QualityConfig,
+) -> tuple[tuple[str, str], ...]:
+    ignored = set(config.self_collision_ignore_bodies)
+    pairs: list[tuple[str, str]] = []
+    for left_index, left in enumerate(model.bodies):
+        if left.name in ignored:
+            continue
+        for right_index in range(left_index + 1, len(model.bodies)):
+            right = model.bodies[right_index]
+            if right.name in ignored:
+                continue
+            if _kinematic_hop_distance(model, left_index, right_index) < config.min_self_collision_kinematic_hops:
+                continue
+            pairs.append((left.name, right.name))
+    return tuple(pairs)
+
+
+def _kinematic_hop_distance(model: G1KinematicModel, left: int, right: int) -> int:
+    left_depths = _ancestor_depths(model, left)
+    current = right
+    depth = 0
+    while True:
+        if current in left_depths:
+            return depth + left_depths[current]
+        parent = model.bodies[current].parent
+        if parent is None:
+            break
+        current = parent
+        depth += 1
+    return len(model.bodies)
+
+
+def _ancestor_depths(model: G1KinematicModel, body_index: int) -> dict[int, int]:
+    depths = {body_index: 0}
+    current = body_index
+    depth = 0
+    while model.bodies[current].parent is not None:
+        current = model.bodies[current].parent  # type: ignore[assignment]
+        depth += 1
+        depths[current] = depth
+    return depths
+
+
 def _g1_contact_slide_speeds(
     fk_frames: Sequence[Mapping[str, Sequence[tuple[float, float, float]]]],
     model: G1KinematicModel,
@@ -590,6 +703,12 @@ def _validate_config(config: G1QualityConfig) -> None:
         raise ValueError("start_end_frames must be positive")
     if config.max_start_end_root_speed < 0:
         raise ValueError("max_start_end_root_speed must be non-negative")
+    if config.min_self_collision_distance < 0:
+        raise ValueError("min_self_collision_distance must be non-negative")
+    if not 0.0 <= config.max_self_collision_proxy_rate <= 1.0:
+        raise ValueError("max_self_collision_proxy_rate must be within [0, 1]")
+    if config.min_self_collision_kinematic_hops <= 0:
+        raise ValueError("min_self_collision_kinematic_hops must be positive")
 
 
 def _parse_float(value: str | None) -> float | None:
@@ -608,11 +727,18 @@ def _rate_above(values: Sequence[float], threshold: float) -> float:
     return sum(value > threshold for value in values) / len(values)
 
 
+def _rate_below(values: Sequence[float], threshold: float) -> float:
+    if not values:
+        return 0.0
+    return sum(value < threshold for value in values) / len(values)
+
+
 def _g1_fk_positions(
     model: G1KinematicModel,
     joints: Sequence[float],
     root_position: Sequence[float],
     root_euler: Sequence[float],
+    include_empty_body_origin: bool = True,
 ) -> dict[str, tuple[tuple[float, float, float], ...]]:
     joint_values = {
         _joint_name_from_column(column): value for column, value in zip(G1_JOINT_COLUMNS, joints)
@@ -643,7 +769,7 @@ def _g1_fk_positions(
                 parent_position[2] + rotated_pos[2],
             )
         body_transforms.append((global_rotation, global_position))
-        points = body.geom_points or ((0.0, 0.0, 0.0),)
+        points = body.geom_points or (((0.0, 0.0, 0.0),) if include_empty_body_origin else ())
         output[body.name] = tuple(
             _add(global_position, _matvec(global_rotation, point)) for point in points
         )
@@ -668,6 +794,8 @@ def _local_geom_points(element: ET.Element) -> tuple[tuple[float, float, float],
     for geom in element.findall("geom"):
         if "pos" in geom.attrib:
             points.append(_parse_vec3(geom.attrib["pos"]))
+        else:
+            points.append((0.0, 0.0, 0.0))
     return tuple(points)
 
 
@@ -764,6 +892,10 @@ def _empty_model_metrics() -> dict[str, float]:
         "contact_frame_ratio": 0.0,
         "max_contact_slide_speed": 0.0,
         "contact_slide_rate": 0.0,
+        "self_collision_checked_pairs": 0.0,
+        "self_collision_proxy_rate": 0.0,
+        "min_self_collision_distance": 0.0,
+        "mean_min_self_collision_distance": 0.0,
     }
 
 
@@ -841,6 +973,10 @@ def _metric_summary(rows: Sequence[Mapping[str, object]]) -> dict[str, dict[str,
         "contact_frame_ratio",
         "max_contact_slide_speed",
         "contact_slide_rate",
+        "self_collision_checked_pairs",
+        "self_collision_proxy_rate",
+        "min_self_collision_distance",
+        "mean_min_self_collision_distance",
     )
     return {metric: _summarize_values(_numeric_values(rows, metric)) for metric in metrics}
 

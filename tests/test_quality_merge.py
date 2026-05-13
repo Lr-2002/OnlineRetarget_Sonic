@@ -60,6 +60,9 @@ class QualityMergeTests(unittest.TestCase):
                         "penetration_depth": 0.07,
                         "contact_slide_rate": 0.25,
                         "joint_limit_violation_rate": 0.5,
+                        "self_collision_proxy_rate": 0.2,
+                        "min_self_collision_distance": 0.01,
+                        "mean_min_self_collision_distance": 0.04,
                     }
                 )
                 + "\n",
@@ -98,6 +101,8 @@ class QualityMergeTests(unittest.TestCase):
         self.assertEqual(worst[0]["g1_penetration_depth"], "0.07")
         self.assertEqual(worst[0]["g1_contact_slide_rate"], "0.25")
         self.assertEqual(worst[0]["g1_joint_limit_violation_rate"], "0.5")
+        self.assertEqual(worst[0]["g1_self_collision_proxy_rate"], "0.2")
+        self.assertEqual(worst[0]["g1_min_self_collision_distance"], "0.01")
         self.assertEqual(worst[1]["source_fk_contact_slide_rate"], "0.15")
         self.assertEqual(worst[1]["source_fk_penetration_depth"], "0.02")
         self.assertEqual(report["source_fk_stats_jsonl"], str(source_fk_stats))

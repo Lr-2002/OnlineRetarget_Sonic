@@ -33,6 +33,7 @@ class ReviewManifestTests(unittest.TestCase):
         self.assertIn("foot_slide", families)
         self.assertIn("penetration", families)
         self.assertIn("joint_limit", families)
+        self.assertIn("self_collision", families)
         self.assertEqual(result.family_counts["parser"], 1)
         self.assertEqual(report["reviewed_rows"], len(items))
         self.assertEqual(items[0]["motion_paths"]["source_bvh"], "soma/a.bvh")
@@ -78,9 +79,30 @@ def _write_worst_clips(path: Path) -> None:
             "g1_penetration_depth": "0.07",
             "g1_contact_slide_rate": "0.25",
         },
+        {
+            "row_index": "3",
+            "split": "train",
+            "actor_uid": "A003",
+            "package": "Locomotion",
+            "category": "Run",
+            "filename": "c",
+            "move_soma_proportional_path": "soma/c.bvh",
+            "move_g1_path": "g1/c.csv",
+            "merged_quality_action": "quarantine",
+            "merged_quality_flags": "g1:g1_self_collision_proxy",
+            "source_channel_jump_rate": "0.0",
+            "source_max_abs_channel_velocity": "10.0",
+            "g1_joint_limit_violation_rate": "0.0",
+            "g1_penetration_depth": "0.0",
+            "g1_contact_slide_rate": "0.0",
+            "g1_self_collision_proxy_rate": "0.5",
+            "g1_min_self_collision_distance": "0.01",
+            "g1_mean_min_self_collision_distance": "0.03",
+        },
     ]
+    fieldnames = list(dict.fromkeys(key for row in rows for key in row))
     with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 

@@ -280,6 +280,9 @@ def _worst_clip_rows(
                 "g1_contact_frame_ratio": _stat(g1, "contact_frame_ratio"),
                 "g1_contact_slide_rate": _stat(g1, "contact_slide_rate"),
                 "g1_max_contact_slide_speed": _stat(g1, "max_contact_slide_speed"),
+                "g1_self_collision_proxy_rate": _stat(g1, "self_collision_proxy_rate"),
+                "g1_min_self_collision_distance": _stat(g1, "min_self_collision_distance"),
+                "g1_mean_min_self_collision_distance": _stat(g1, "mean_min_self_collision_distance"),
             }
         )
     candidates.sort(key=_worst_sort_key, reverse=True)
@@ -294,6 +297,7 @@ def _worst_sort_key(row: Mapping[str, str]) -> tuple[float, ...]:
         _float(row.get("source_fk_penetration_depth", "")),
         _float(row.get("source_fk_contact_slide_rate", "")),
         _float(row.get("g1_joint_limit_violation_rate", "")),
+        _float(row.get("g1_self_collision_proxy_rate", "")),
         _float(row.get("g1_joint_jump_rate", "")),
         _float(row.get("source_channel_jump_rate", "")),
         _float(row.get("g1_max_abs_joint_velocity", "")),

@@ -170,6 +170,40 @@ class G1QualityTests(unittest.TestCase):
             self.assertIn("g1_foot_float", floating["quality_flags"])
             self.assertIn("g1_ground_penetration", penetrating["quality_flags"])
 
+    def test_summarize_g1_rows_flags_self_collision_proxy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model_xml = Path(tmp) / "g1.xml"
+            model_xml.write_text(_self_collision_proxy_mjcf(), encoding="utf-8")
+            model = load_g1_kinematic_model(model_xml, foot_body_names=("left_foot", "right_foot"))
+            config = G1QualityConfig(
+                fps=30.0,
+                max_joint_velocity=1000.0,
+                max_root_speed=1000.0,
+                root_position_scale=1.0,
+                joint_angle_scale=1.0,
+                root_rotation_scale=1.0,
+                model_xml=model_xml,
+                max_contact_slide_speed=1000.0,
+                max_mean_foot_clearance=1.0,
+                max_penetration_depth=1.0,
+                min_contact_frame_ratio=0.0,
+                max_start_end_root_speed=1000.0,
+                min_self_collision_distance=0.02,
+                min_self_collision_kinematic_hops=2,
+            )
+
+            row = summarize_g1_rows(
+                {"row_index": "4"},
+                _csv_rows([0.0, 0.0, 0.0], root_x_values=[0.0, 0.0, 0.0], root_z_values=[0.0, 0.0, 0.0]),
+                config,
+                model=model,
+            )
+
+            self.assertIn("g1_self_collision_proxy", row["quality_flags"])
+            self.assertEqual(row["quality_action"], "quarantine")
+            self.assertGreater(row["self_collision_proxy_rate"], 0.0)
+            self.assertLess(row["min_self_collision_distance"], 0.02)
+
 
 def _write_index(path: Path) -> None:
     fieldnames = [
@@ -292,6 +326,33 @@ def _minimal_g1_mjcf() -> str:
       <body name="right_ankle_roll_link" pos="0 -0.1 0">
         <geom pos="0 0 0"/>
         <body name="right_toe_link" pos="0.1 0 0"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+
+
+def _self_collision_proxy_mjcf() -> str:
+    return """<mujoco model="self_collision_proxy">
+  <worldbody>
+    <body name="pelvis" pos="0 0 0">
+      <freejoint name="pelvis"/>
+      <body name="left_upper" pos="0 0 0">
+        <geom pos="0 0 0"/>
+        <body name="left_mid" pos="0 0 0">
+          <body name="left_foot" pos="0 0 0">
+            <geom pos="0 0 0"/>
+          </body>
+        </body>
+      </body>
+      <body name="right_upper" pos="0 0 0">
+        <geom pos="0 0 0"/>
+        <body name="right_mid" pos="0 0 0">
+          <body name="right_foot" pos="0 0 0">
+            <geom pos="0 0 0"/>
+          </body>
+        </body>
       </body>
     </body>
   </worldbody>

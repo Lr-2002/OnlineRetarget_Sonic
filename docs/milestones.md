@@ -59,7 +59,7 @@ Gate:
 
 Stop condition: we can say exactly which clips are used for train/test/eval and why.
 
-Current status: metadata-level actor split and curation index are implemented. Source BVH, source FK/contact, and G1 target quality scanners exist. G1 target scanning can optionally load a MJCF asset to compute FK contact, foot slide/float, ground penetration, and joint-limit smoke metrics. Full calibrated thresholds, larger scans, diversity-loss review, and self-collision/simulator-backed labels are tracked by M2Q, so M2 is not fully closed.
+Current status: metadata-level actor split and curation index are implemented. Source BVH, source FK/contact, and G1 target quality scanners exist. G1 target scanning can optionally load a MJCF asset to compute FK contact, foot slide/float, ground penetration, joint-limit, and self-collision proxy smoke metrics. Full calibrated thresholds, larger scans, diversity-loss review, manual review decisions, and simulator-backed labels are tracked by M2Q, so M2 is not fully closed.
 
 ## M2Q - Motion Quality Curation Gate
 

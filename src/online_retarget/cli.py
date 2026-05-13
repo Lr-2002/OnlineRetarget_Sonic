@@ -88,6 +88,9 @@ def main() -> None:
     quality.add_argument("--max-joint-limit-violation-rate", type=float, default=0.0)
     quality.add_argument("--start-end-frames", type=int, default=10)
     quality.add_argument("--max-start-end-root-speed", type=float, default=0.20)
+    quality.add_argument("--min-self-collision-distance", type=float, default=0.015)
+    quality.add_argument("--max-self-collision-proxy-rate", type=float, default=0.0)
+    quality.add_argument("--min-self-collision-kinematic-hops", type=int, default=4)
 
     source_quality = subparsers.add_parser(
         "scan-source-quality",
@@ -303,6 +306,9 @@ def _scan_g1_quality(args: argparse.Namespace) -> None:
             max_joint_limit_violation_rate=args.max_joint_limit_violation_rate,
             start_end_frames=args.start_end_frames,
             max_start_end_root_speed=args.max_start_end_root_speed,
+            min_self_collision_distance=args.min_self_collision_distance,
+            max_self_collision_proxy_rate=args.max_self_collision_proxy_rate,
+            min_self_collision_kinematic_hops=args.min_self_collision_kinematic_hops,
         ),
         limit=limit,
         splits=tuple(args.split),
