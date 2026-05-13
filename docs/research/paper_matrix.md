@@ -40,12 +40,23 @@ Purpose: make model/data/eval choices traceable. This matrix tracks what each re
 | Work | Source curation | Target/humanoid curation | Physics refinement | Quality metrics / filters to borrow |
 | --- | --- | --- | --- | --- |
 | NMR / CEPR | Filters noisy or semantically incompatible SMPL-style motions; cites excessive jerk, bad support-base relation, insufficient foot contact, float/penetration. | Hard-threshold filters retargeted motion for joint jumps, self-intersection, floating feet, and joint-limit artifacts. | Uses clustered RL expert policies to project kinematic references onto a physically feasible G1 manifold. | Separate source quality, G1 target quality, and physics-refined provenance. Use joint jump, self-intersection proxy, float, and joint-limit metrics. |
-| PHUMA / PhySINK | Low-pass filtering, ground/contact inference, clip-level rejection for root jerk, support-base/CoM plausibility, foot-contact score, and pelvis height. | Retargeting objective adds feasibility, grounding, and skating terms. | Physics-constrained optimization, not policy rollout. | Category-aware contact thresholds, foot skate, float, penetration, joint feasibility, retained-diversity report. |
+| PHUMA / PhySINK | Low-pass filtering, ground/contact inference, clip-level rejection for root jerk, support-base/CoM plausibility, foot-contact score, and pelvis height. Public docs state default thresholds preserve airborne phases rather than deleting all float-like clips. | Retargeting objective adds feasibility, grounding, and skating terms. | Physics-constrained optimization, not policy rollout. | Category-aware contact thresholds, foot skate, float, penetration, joint feasibility, retained-diversity report. Avoid global thresholds that erase jumps/kicks/flips. |
 | GMR / Retargeting Matters | Uses curated benchmark subsets; focuses more on retargeting artifacts than raw source filtering. | Addresses scaling, foot sliding, ground penetration, self-intersection, floating, and height artifacts through optimization/FK post-processing. | Evaluates downstream with BeyondMimic rather than generating physics-refined targets. | FK body-height checks, global/root-relative tracking error, policy success sensitivity to artifact quality. |
-| OmniTrack | Takes raw retargeted/teleop references that may contain artifacts. | Uses simulator-generated physically consistent references to eliminate penetration/floating and improve smoothness. | RL physical motion generator in simulation. | Track fidelity-physics tradeoff: MPJPE may rise while feasibility improves. |
+| OmniTrack | Takes raw retargeted/teleop references that may contain artifacts. | Uses simulator-generated physically consistent references to eliminate penetration/floating and improve smoothness. | RL physical motion generator in simulation. | Track fidelity-physics tradeoff: MPJPE may rise while feasibility improves. Record physics-refined provenance and evaluate penetration/floating/smoothness separately from MPJPE. |
 | OmniRetarget | Preserves human/object/environment interactions rather than only keypoints. | Enforces collision avoidance, joint and velocity limits, and foot sticking as hard constraints. | Downstream RL can repair minor remaining violations. | Interaction/contact preservation, penetration, foot skating, joint/velocity limit violation. |
 | KDMR | Uses motion and force/contact measurements for locomotion. | Dynamic retargeting removes foot slip, penetration, and high-acceleration infeasibility. | Multi-contact whole-body trajectory optimization with dynamics/contact constraints. | Contact timing, GRF/contact consistency, acceleration and torque-limit proxies. |
 | Contact/dynamics and self-contact retargeting | Detects foot/self contacts and physically implausible motion from video/mocap. | Optimizes contact preservation and interpenetration reduction on target skeleton/geometry. | Physics-based trajectory optimization or encoder-space optimization. | Contact foot float/penetration/skate definitions; self-contact/interpenetration proxies. |
+
+## Filtering Milestone Implications
+
+M2Q must be completed before formal training. The concrete data filtering plan is:
+
+1. Measure source quality, G1 target quality, pair consistency, and physics provenance independently.
+2. Use `keep/downweight/quarantine/exclude`, not binary keep/drop, so dynamic but valuable data is not lost prematurely.
+3. Calibrate thresholds from BONES-SEED distributions by category, actor, and skeleton. Smoke thresholds are only scanner tests.
+4. Generate worst-clip manifests for manual review by failure type: joint jump, twist, float, foot slide, penetration, joint-limit violation, self-intersection proxy, and start/end instability.
+5. Report diversity loss. A curation policy that removes most actors, skeletons, or dynamic categories is not acceptable even if remaining clips look clean.
+6. Treat simulator-replayed or RL-refined motion as different target provenance, following NMR/CEPR and OmniTrack, not as interchangeable labels with kinematic G1 CSV targets.
 
 ## Design Conclusions
 

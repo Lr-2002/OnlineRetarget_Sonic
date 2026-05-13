@@ -67,6 +67,8 @@ Purpose: make "good enough motion" a measurable dataset property before the mode
 
 Core assumption: neither the source human skeleton motion nor the provided G1 target motion should be treated as ground truth without inspection. A clip can be visually plausible but still harmful because of temporal jumps, wrong contact, floating feet, ground penetration, self-intersection, joint-limit stress, or simulator-infeasible dynamics.
 
+This is a separate milestone, not an implementation detail inside train/test split. The split only becomes meaningful after quality labels exist, because otherwise eval can reward the model for reproducing bad retargeting artifacts.
+
 Required reading coverage:
 
 - NMR / CEPR: physics-aware human curation, humanoid motion curation, and RL physics refinement.
@@ -85,6 +87,7 @@ Quality signals:
 Gate:
 
 - `docs/research/motion_quality_curation.md` maps each quality signal to paper evidence, implementation status, and the current OnlineRetarget action.
+- Paper notes identify, for each core work, the filtering or refinement method, observation/reward/loss/data/model/output/eval fields, and whether the paper actually reports thresholds or only qualitative artifacts.
 - Quality scanners produce per-clip JSONL/CSV stats outside `/home/user/data/motion_data`.
 - Thresholds are calibrated from dataset distributions and reported by split/category/actor/skeleton, not hard-coded from one smoke run.
 - Curation action is one of `keep`, `downweight`, `quarantine`, or `exclude`; binary keep/drop is only allowed for unrecoverable parse/provenance errors.
@@ -93,6 +96,16 @@ Gate:
 - Training code refuses a formal run unless the selected curation policy ID and quality report path are recorded in the config/run metadata.
 
 Stop condition: we can defend why each formal training clip is included, downweighted, quarantined, or excluded, and we can quantify the quality-diversity tradeoff.
+
+Submilestones:
+
+- M2Q.1 Literature-backed curation plan: read and matrix NMR/CEPR, PHUMA/PhySINK, GMR, OmniTrack, OmniRetarget, KDMR, ExBody2, contact-metric papers, and record their curation signals.
+- M2Q.2 Source motion quality: scan parse validity, temporal jumps, root speed/jerk, FK foot contact, foot slide/float, penetration, and category-specific exceptions.
+- M2Q.3 G1 target quality: scan joint jumps, joint-limit margin, FK contact, foot slide/float, penetration, start/end instability, and self-collision proxy.
+- M2Q.4 Pair/provenance quality: verify source-target length/fps/action consistency, mirror and actor leakage, skeleton identity, target availability, and whether each target is kinematic, filtered, simulator-replayed, or policy-generated.
+- M2Q.5 Threshold calibration: propose thresholds from distributions by category/actor/skeleton rather than one global hand-picked value.
+- M2Q.6 Diversity-loss review: quantify which actors, skeletons, packages, and motion classes are lost under each policy; reject policies that only produce "clean" but narrow data.
+- M2Q.7 Manual and simulator review: inspect worst clips by failure mode and later validate a representative subset in Isaac Lab/G1 tracking before formal training.
 
 ## M3 - Dataset Schema and Observation Contract
 

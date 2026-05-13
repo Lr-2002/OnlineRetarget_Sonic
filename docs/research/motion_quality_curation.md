@@ -19,10 +19,10 @@ This follows the pattern in recent humanoid motion work: preserve diversity when
 
 | Work | What they filter or repair | Mechanism / thresholds reported | Implication for OnlineRetarget |
 | --- | --- | --- | --- |
-| NMR / CEPR | Raw SMPL noise, semantically incompatible motion, excessive jerk, bad support-base relation, insufficient foot contact, G1 joint jumps, self-intersection, floating feet | Three-stage pipeline: physics-aware human motion curation, humanoid motion curation, and physics-based humanoid refinement through RL expert policies. The arXiv HTML reports hard-threshold filtering for retargeted segments, including floating-foot pruning around mean foot clearance above 0.10 m and self-intersection cross-ratio thresholding. | Treat source and G1 target quality separately. Use hard `exclude` only for severe failures; use physics-refined provenance labels when Isaac/RL refinement arrives. |
-| PHUMA / PhySINK | Floating, penetration, foot skating, joint-limit stress, unnatural pelvis height, root jerk, weak foot contact | Public docs describe foot-contact threshold tuning. Available summaries report 4-second clips, root jerk threshold around 50 m/s^3, support-base distance checks, average foot-contact score threshold around 0.6, and pelvis-height bounds. Retargeting adds feasibility, grounding, and skating losses. | Add category-aware thresholds. Locomotion can use stricter contact gates than jumps, kicks, sits, or airborne motion. Report diversity lost per category. |
+| NMR / CEPR | Raw SMPL noise, semantically incompatible motion, excessive jerk, bad support-base relation, insufficient foot contact, G1 joint jumps, self-intersection, floating feet | Three-stage pipeline: physics-aware human motion curation, humanoid motion curation, and physics-based humanoid refinement through RL expert policies. The arXiv HTML reports hard-threshold filtering for retargeted segments, including inter-frame joint velocity limits, self-intersection frame-ratio tolerance near 0.05, and floating-foot pruning around mean foot clearance above 0.10 m. | Treat source and G1 target quality separately. Use hard `exclude` only for severe failures; use physics-refined provenance labels when Isaac/RL refinement arrives. |
+| PHUMA / PhySINK | Floating, penetration, foot skating, joint-limit stress, unnatural pelvis height, root jerk, weak foot contact | Public docs describe tunable foot-contact thresholding and explicitly state defaults preserve airborne phases. Available paper summaries report 4-second clips, root jerk threshold around 50 m/s^3, support-base distance checks, average foot-contact score threshold around 0.6, pelvis-height bounds, Butterworth smoothing, and retargeting feasibility/ground/skating losses. | Add category-aware thresholds. Locomotion can use stricter contact gates than jumps, kicks, sits, or airborne motion. Report diversity lost per category. |
 | GMR / Retargeting Matters | Foot sliding, ground penetration, self-intersections, floating, start/end instability, scaling artifacts | Uses retargeting method choices and FK post-processing to reduce height artifacts; evaluates how retarget quality affects BeyondMimic tracking. | Split/eval cannot rely only on supervised loss. FK-based body-height checks and per-category artifact metrics must be in M2/M4. |
-| OmniTrack | Physically infeasible raw retargeted references: inconsistent CoM, foot skating, floating, penetration, jitter | Generates physics-consistent references through simulator rollouts; accepts that MPJPE can increase when physics feasibility improves. | M7 should label simulator-executed/reference data separately from kinematic targets and compare fidelity against physical feasibility. |
+| OmniTrack | Physically infeasible raw retargeted references: inconsistent CoM, foot skating, floating, penetration, jitter | Generates physics-consistent references through simulator rollouts; evaluates penetration duration, floating duration, smoothness/jerk, style fidelity via MPJPE, success rate, MPJPE, velocity error, and acceleration error. It explicitly accepts that MPJPE can increase when physics feasibility improves. | M7 should label simulator-executed/reference data separately from kinematic targets and compare fidelity against physical feasibility. Do not optimize only raw-reference MPJPE. |
 | OmniRetarget | Foot skating, penetration, joint and velocity limit violations, loss of interaction/contact relationships | Interaction mesh optimization with hard constraints for collision avoidance, joint/velocity limits, and foot sticking. | For future interaction data, contact preservation and penetration are part of data quality, not only eval cosmetics. |
 | KDMR | Foot slip, ground penetration, high acceleration exceeding actuator capability, inaccurate contact timing | Multi-contact whole-body trajectory optimization with dynamics and contact complementarity; uses GRF/contact information where available. | Add dynamic feasibility proxies before Isaac: acceleration spikes, contact-state inconsistency, and torque/limit proxies if model data supports them. |
 | Contact and Dynamics from Monocular Video | Foot floating, foot penetration, foot skate, unnatural leaning | Defines contact-based metrics: floating when contact foot is above ground, penetration when below ground, skating when a contact foot moves horizontally. | Use these definitions for source/FK target metrics once foot points and ground plane are available. |
@@ -55,6 +55,33 @@ This follows the pattern in recent humanoid motion work: preserve diversity when
 3. Thresholds must report retained clips/hours and diversity loss by actor, skeleton, package, category, and action label.
 4. Airborne/dynamic categories need separate thresholds from walking/idling categories; otherwise the filter will erase useful jumps, kicks, and acrobatics.
 5. A threshold can only become a training gate after it has a named policy ID, generated artifacts, and a short rationale linked to this document.
+6. Contact thresholds must distinguish "no support when support is expected" from intentional flight or floor interaction. A low contact ratio is not automatically bad for jumps, flips, cartwheels, crawls, sits, or get-up motions.
+7. Filtering should default to `quarantine` plus manual/simulator review for ambiguous categories. `exclude` is reserved for parse/provenance failures, nonfinite required data, severe simulator-impossible geometry, or confirmed data corruption.
+8. A policy is rejected if it improves aggregate quality only by collapsing actor/skeleton/category coverage.
+
+## M2Q Execution Checklist
+
+1. Run metadata split and inventory.
+2. Run source BVH discontinuity scanner.
+3. Run source FK/contact scanner.
+4. Run G1 CSV/FK/contact/joint-limit scanner with the G1 MJCF.
+5. Merge all source/G1/pair quality signals into a curated index.
+6. Generate percentile threshold proposals by metric and category.
+7. Generate diversity-loss reports by actor, source skeleton, package, category, split, mirrored status, and motion provenance.
+8. Inspect worst clips by failure family: jump, twist, float, slide, penetrate, joint-limit, unstable start/end, parser mismatch.
+9. Promote a named curation policy only after the retained/quarantined/excluded tradeoff is documented.
+10. Allow formal training only when the run config records the policy ID, curated index, quality reports, and git SHA.
+
+## Current Design Answer: How to Filter Good Data
+
+The first formal policy should not be a single hard threshold. Use a staged action policy:
+
+- `exclude`: corrupted files, nonfinite required channels, missing target, unrecoverable source-target mismatch, severe confirmed simulator-infeasible geometry.
+- `quarantine`: high root/joint jumps, suspicious contact, float/penetration, joint-limit stress, source/G1 disagreement, category-ambiguous cases pending visual or simulator review.
+- `downweight`: mirror variants, mild foot slide, mild start/end instability, mild threshold outliers where diversity is valuable.
+- `keep`: clips passing source, target, pair, and provenance checks under the chosen policy.
+
+This follows the strongest common pattern across NMR/CEPR, PHUMA, GMR, and OmniTrack: clean obvious defects early, preserve diversity with labels when possible, and use simulation or downstream tracking to resolve physically ambiguous clips.
 
 ## Required Artifacts
 
@@ -73,6 +100,7 @@ Each artifact must record data root, git SHA, policy ID, split ID, thresholds, s
 - M2 is not complete until M2Q has source, target, pair, and at least initial FK/contact quality reports.
 - Current source FK/contact smoke artifact: `runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_source_fk_limit100/source_fk_quality_report.json`. It scanned 100 clips with `frame_stride=2`, `max_frames=256`, and fixed `ground_height=0.0`; result was keep/downweight/quarantine = 42/20/38 with flags `source_foot_slide=20` and `source_low_foot_contact=38`. This is a calibration signal, not yet a formal curation policy.
 - Current G1 MJCF FK/contact smoke artifact: `runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_limit100/g1_quality_report.json`. It scanned 100 clips with `/home/user/repos/GMR/assets/unitree_g1/g1_mocap_29dof.xml`, `frame_stride=2`, `max_frames=256`, and fixed `ground_height=0.0`; result was keep/downweight/quarantine = 19/36/45 with flags `g1_foot_slide=70`, `g1_ground_penetration=41`, `g1_joint_limit_violation=18`, `g1_unstable_start_end=8`, and `g1_foot_float=1`. This is a calibration signal, not yet a formal curation policy.
+- Current curated smoke artifact: `runs/curated/smoke_source_g1_limit100/curated_report.json` merges source BVH discontinuity stats, source FK/contact stats, and G1 FK/contact stats. The latest three-way merge records keep/downweight/quarantine/exclude = 71,088/71,048/83/1, with `merged_source_rows=100`, `merged_source_fk_rows=100`, and `merged_g1_rows=100`.
 - M5 formal training must require a curated index and policy ID. Tiny debug training may use raw or smoke data only when the output path and log state that it is a debug run.
 - M4 must break down metrics by quality flags, because a model can improve average loss by learning bad target artifacts.
 - M7 must keep physics-refined targets separate from kinematic G1 targets, even if both share the same source motion.

@@ -105,6 +105,8 @@ These works are the closest matches to the user's question about how to filter "
 
 Detailed implementation mapping now lives in `docs/research/motion_quality_curation.md`. The important planning change is that motion quality is not a side note under data loading; it is a formal M2Q gate between data inventory and formal training.
 
+Working answer: filter data through labels and staged evidence, not a single global threshold. Source human motion, retargeted G1 targets, source-target pair consistency, and physics-refined provenance must be measured independently. The first formal policy should use `keep`, `downweight`, `quarantine`, and `exclude` so we preserve dynamic but hard motions while blocking corrupted or physically impossible supervision.
+
 ### NMR / CEPR
 
 Primary links:
@@ -129,10 +131,13 @@ Primary links:
 
 PHUMA is a physically grounded humanoid locomotion dataset built from large-scale human video. The abstract explicitly says it addresses floating, penetration, and foot skating through careful data curation and physics-constrained retargeting. It enforces joint limits, ensures ground contact, and removes foot skating. This is the cleanest recent example of treating dataset construction as a physics-quality problem rather than a pure labeling problem.
 
+The public repository adds an important practical warning: default thresholds are tuned to preserve airborne phases such as jumping, so some minor penetration/floating is tolerated. This directly argues against a naive "low contact equals bad" filter. Our filters must be category-aware.
+
 Implication for this repo:
 
 - Treat joint limits, ground contact, and foot skating as first-class curation gates.
 - Use physics-constrained retargeting as a data-quality upgrade path, not only as a training target.
+- Report diversity loss when thresholds change, because stricter filters can accidentally delete jumps, kicks, and other high-value dynamic motions.
 
 ### ExBody2
 
@@ -147,6 +152,34 @@ Implication for this repo:
 
 - Do not choose a single hard threshold without checking how much motion diversity is lost.
 - Consider a scalar quality score or keep/downweight/quarantine policy instead of only keep/drop.
+
+### OmniTrack
+
+Primary links:
+
+- arXiv: https://arxiv.org/abs/2602.23832
+- Project page: https://omnitrack-humanoid.github.io/
+
+OmniTrack is directly relevant to the "motion itself is not perfect" issue. It treats raw retargeted references as potentially physically infeasible due to inconsistent CoM motion, foot skating, floating, penetration, and jitter. It then creates physics-consistent references by rolling out a privileged motion-generation policy in simulation, and trains the final tracker on those generated trajectories. Its reported quality metrics include penetration duration, floating duration, smoothness/jerk, style fidelity through MPJPE, policy success rate, velocity error, and acceleration error.
+
+Implication for this repo:
+
+- Physics-refined data is a separate provenance class, not just a cleaner version of the same label.
+- MPJPE can become worse while physical feasibility improves, so eval must show fidelity and artifact metrics side by side.
+- M7 should validate a representative curation subset in Isaac Lab, especially clips quarantined for contact or dynamic-feasibility reasons.
+
+### KDMR
+
+Primary link:
+
+- arXiv: https://arxiv.org/abs/2603.09956
+
+KDMR frames retargeting as multi-contact whole-body trajectory optimization, adding rigid-body dynamics and contact complementarity rather than relying only on kinematics. It uses GRF/contact information to detect heel-toe contact events and evaluates dynamic feasibility, smoothness, GRF tracking, and downstream BeyondMimic training performance.
+
+Implication for this repo:
+
+- Even before Isaac integration, we should track acceleration/jerk and contact-state inconsistency as proxies for dynamic infeasibility.
+- If future data includes force/contact labels, they should become quality signals, not auxiliary metadata.
 
 ### A Kung Fu Athlete Bot That Can Do It All Day
 

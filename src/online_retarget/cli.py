@@ -167,6 +167,7 @@ def main() -> None:
     )
     merge_quality.add_argument("--split-index-csv", type=Path, required=True)
     merge_quality.add_argument("--source-stats-jsonl", type=Path)
+    merge_quality.add_argument("--source-fk-stats-jsonl", type=Path)
     merge_quality.add_argument("--g1-stats-jsonl", type=Path)
     merge_quality.add_argument("--output-root", type=Path, default=Paths.from_env().output_root)
     merge_quality.add_argument("--run-name", default="merged_quality")
@@ -364,6 +365,7 @@ def _merge_quality(args: argparse.Namespace) -> None:
     result = merge_quality_stats(
         split_index_csv=args.split_index_csv,
         source_stats_jsonl=args.source_stats_jsonl,
+        source_fk_stats_jsonl=args.source_fk_stats_jsonl,
         g1_stats_jsonl=args.g1_stats_jsonl,
         output_root=args.output_root,
         run_name=args.run_name,
