@@ -12,6 +12,7 @@ from typing import Mapping, Sequence
 
 
 ACTION_ORDER = {"keep": 0, "downweight": 1, "quarantine": 2, "exclude": 3}
+RETAIN_ACTIONS = {"keep", "downweight"}
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,7 @@ def merge_quality_stats(
         "action_counts": dict(sorted(action_counts.items())),
         "flag_counts": dict(sorted(flag_counts.items())),
         "breakdown": _breakdown(merged_rows),
+        "diversity_loss": _diversity_loss(merged_rows),
         "git_sha": _git_sha(),
         "git_dirty": _git_dirty(),
     }
@@ -166,6 +168,69 @@ def _breakdown(rows: Sequence[Mapping[str, str]]) -> dict[str, dict[str, dict[st
             for key, counter in sorted(values.items())
         }
         for dimension, values in breakdown.items()
+    }
+
+
+def _diversity_loss(rows: Sequence[Mapping[str, str]]) -> dict[str, object]:
+    dimensions = {
+        "actor_uid": lambda row: _bucket(row.get("actor_uid", "")),
+        "source_skeleton": _source_skeleton,
+        "actor_height_bin": lambda row: _height_bin(row.get("actor_height_cm", "")),
+        "actor_gender": lambda row: _bucket(row.get("actor_gender", "")),
+        "package": lambda row: _bucket(row.get("package", "")),
+        "category": lambda row: _bucket(row.get("category", "")),
+        "split": lambda row: _bucket(row.get("split", "")),
+        "mirror_status": lambda row: "mirror" if _is_true(row.get("is_mirror", "")) else "original",
+    }
+    return {name: _dimension_loss(rows, getter) for name, getter in dimensions.items()}
+
+
+def _dimension_loss(
+    rows: Sequence[Mapping[str, str]],
+    key_for_row,
+) -> dict[str, object]:
+    buckets: dict[str, Counter[str]] = {}
+    for row in rows:
+        key = key_for_row(row)
+        buckets.setdefault(key, Counter())[row.get("merged_quality_action", "keep")] += 1
+
+    groups_without_retained = []
+    groups_with_any_loss = []
+    retained_rows = 0
+    quarantined_or_excluded_rows = 0
+    for key, counter in sorted(buckets.items()):
+        retained = sum(counter[action] for action in RETAIN_ACTIONS)
+        quarantined_or_excluded = sum(
+            count for action, count in counter.items() if ACTION_ORDER.get(action, 0) >= ACTION_ORDER["quarantine"]
+        )
+        total = sum(counter.values())
+        retained_rows += retained
+        quarantined_or_excluded_rows += quarantined_or_excluded
+        group = {
+            "key": key,
+            "total_rows": total,
+            "retained_rows": retained,
+            "quarantined_or_excluded_rows": quarantined_or_excluded,
+            "retained_fraction": round(retained / total, 6) if total else 0.0,
+            "action_counts": dict(sorted(counter.items())),
+        }
+        if retained == 0:
+            groups_without_retained.append(group)
+        if quarantined_or_excluded:
+            groups_with_any_loss.append(group)
+
+    total_groups = len(buckets)
+    groups_with_retained = total_groups - len(groups_without_retained)
+    return {
+        "total_groups": total_groups,
+        "groups_with_retained": groups_with_retained,
+        "groups_without_retained": len(groups_without_retained),
+        "lost_group_fraction": round(len(groups_without_retained) / total_groups, 6) if total_groups else 0.0,
+        "total_rows": len(rows),
+        "retained_rows": retained_rows,
+        "quarantined_or_excluded_rows": quarantined_or_excluded_rows,
+        "groups_without_retained_examples": groups_without_retained[:100],
+        "groups_with_any_loss_examples": groups_with_any_loss[:100],
     }
 
 
@@ -285,6 +350,37 @@ def _split_flags(flags: str) -> list[str]:
     if not flags:
         return []
     return [flag for flag in flags.split("|") if flag]
+
+
+def _source_skeleton(row: Mapping[str, str]) -> str:
+    shape_path = row.get("move_soma_proportional_shape_path", "")
+    if shape_path:
+        return Path(shape_path).stem or _bucket(row.get("actor_uid", ""))
+    return _bucket(row.get("actor_uid", ""))
+
+
+def _height_bin(value: str) -> str:
+    try:
+        height = float(value)
+    except (TypeError, ValueError):
+        return "unknown"
+    if height < 160:
+        return "<160cm"
+    if height < 170:
+        return "160-170cm"
+    if height < 180:
+        return "170-180cm"
+    if height < 190:
+        return "180-190cm"
+    return ">=190cm"
+
+
+def _bucket(value: str | None) -> str:
+    return value or "unknown"
+
+
+def _is_true(value: str | None) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
 
 def _git_sha() -> str:

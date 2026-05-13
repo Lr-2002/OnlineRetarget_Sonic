@@ -78,7 +78,7 @@ class QualityMergeTests(unittest.TestCase):
             worst = _read_csv(result.worst_clips_csv)
             report = json.loads(result.report_json.read_text(encoding="utf-8"))
 
-        self.assertEqual(result.row_count, 2)
+        self.assertEqual(result.row_count, 3)
         self.assertEqual(result.merged_source_rows, 1)
         self.assertEqual(result.merged_source_fk_rows, 1)
         self.assertEqual(result.merged_g1_rows, 2)
@@ -101,6 +101,15 @@ class QualityMergeTests(unittest.TestCase):
         self.assertEqual(report["source_fk_stats_jsonl"], str(source_fk_stats))
         self.assertEqual(report["merged_source_fk_rows"], 1)
         self.assertEqual(report["breakdown"]["split"]["train"]["exclude"], 1)
+        self.assertEqual(report["diversity_loss"]["actor_uid"]["total_groups"], 3)
+        self.assertEqual(report["diversity_loss"]["actor_uid"]["groups_without_retained"], 2)
+        self.assertEqual(report["diversity_loss"]["actor_uid"]["groups_with_retained"], 1)
+        lost_actor_keys = {
+            row["key"] for row in report["diversity_loss"]["actor_uid"]["groups_without_retained_examples"]
+        }
+        self.assertEqual(lost_actor_keys, {"A001", "A002"})
+        self.assertEqual(report["diversity_loss"]["source_skeleton"]["total_groups"], 3)
+        self.assertEqual(report["diversity_loss"]["category"]["groups_with_retained"], 1)
         self.assertEqual(report["worst_clips_csv"], str(result.worst_clips_csv))
 
 
@@ -113,6 +122,10 @@ def _write_split_index(path: Path) -> None:
             "package": "Locomotion",
             "category": "Idle",
             "filename": "motion_a",
+            "move_soma_proportional_shape_path": "soma_shapes/soma_proportion_fit_mhr_params/A001.npz",
+            "actor_height_cm": "171",
+            "actor_gender": "F",
+            "is_mirror": "False",
             "curation_action": "keep",
             "quality_flags": "",
         },
@@ -123,8 +136,26 @@ def _write_split_index(path: Path) -> None:
             "package": "Locomotion",
             "category": "Run",
             "filename": "motion_b",
+            "move_soma_proportional_shape_path": "soma_shapes/soma_proportion_fit_mhr_params/A002.npz",
+            "actor_height_cm": "183",
+            "actor_gender": "M",
+            "is_mirror": "True",
             "curation_action": "downweight",
             "quality_flags": "mirror_variant",
+        },
+        {
+            "row_index": "3",
+            "split": "train",
+            "actor_uid": "A003",
+            "package": "Locomotion",
+            "category": "Walk",
+            "filename": "motion_c",
+            "move_soma_proportional_shape_path": "soma_shapes/soma_proportion_fit_mhr_params/A003.npz",
+            "actor_height_cm": "164",
+            "actor_gender": "M",
+            "is_mirror": "False",
+            "curation_action": "keep",
+            "quality_flags": "",
         },
     ]
     with path.open("w", newline="", encoding="utf-8") as f:

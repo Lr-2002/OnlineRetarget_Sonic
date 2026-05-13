@@ -15,7 +15,7 @@ Verdict: not complete. The repo now has runnable scaffolds, real BONES-SEED smok
 | Implement M2 data inventory/split/curation | `src/online_retarget/data/curation.py`, CLI `split-index`, real index under `runs/indices/...`, tests | Partial. Actor-heldout split and metadata curation are implemented; full quality gate remains incomplete. |
 | Keep source data read-only | `.gitignore`, commands write under `runs/`, data root `/home/user/data/motion_data` only read | Satisfied for current work. |
 | Separate different actors/skeletons | real split report: 522 actors, train/val/test actor split 417/52/53 | Satisfied at metadata split level. |
-| Implement M2Q quality filtering | source/G1 scanners, source FK/contact scanner, G1 MJCF FK/contact scanner, threshold proposal, `merge-quality`, `worst_clips.csv`, train quality gate | Partial. Smoke quality pipeline exists; source BVH, source FK/contact, and G1 FK/contact stats now merge into the curated index. Full scans, self-collision, category thresholds, diversity-loss review, and simulator-backed labels remain pending. |
+| Implement M2Q quality filtering | source/G1 scanners, source FK/contact scanner, G1 MJCF FK/contact scanner, threshold proposal, `merge-quality`, `worst_clips.csv`, train quality gate | Partial. Smoke quality pipeline exists; source BVH, source FK/contact, and G1 FK/contact stats now merge into the curated index, and curated reports include diversity-loss summaries. Full scans, self-collision, category thresholds, manual review, and simulator-backed labels remain pending. |
 | Implement M3 schema/obs contract | `src/online_retarget/data/schema.py`, `src/online_retarget/data/windowed_builder.py`, `tests/test_schema.py`, `tests/test_windowed_builder.py`, real 30-body smoke artifact | Smoke path implemented. Formal-scale extraction, normalization policy, robot-state wiring, and online preprocessing are pending. |
 | Implement M4 independent eval | `src/online_retarget/evaluation.py`, CLI `offline-eval`, `tests/test_evaluation.py` | Scaffold implemented. Real model predictions and simulator/contact metrics are pending. |
 | Implement M5 supervised baseline | `scripts/train.py`, `src/online_retarget/data/supervised_builder.py`, `src/online_retarget/data/windowed_builder.py`, supervised JSONL artifacts | Partial. PyTorch optimizer loop exists and post-train prediction JSONL/offline-eval/WandB metadata hooks are coded, but current Python lacks torch and formal-scale 30-body training is pending. |
@@ -68,6 +68,7 @@ PYTHONPATH=src python3 scripts/inspect_bones_seed.py merge-quality \
 # Three-way curated smoke wrote curated_report.json with
 # keep/downweight/quarantine/exclude = 71088/71048/83/1 and
 # merged_source_rows=100, merged_source_fk_rows=100, merged_g1_rows=100.
+# diversity_loss shows 0 lost actor/source-skeleton groups in this smoke policy.
 
 PYTHONPATH=src:. python3 scripts/train.py --config configs/baseline_mlp.yaml --dry-run --limit 1
 # quality_gate shows policy_id=smoke_source_g1_limit100, quality_report_exists=true,
