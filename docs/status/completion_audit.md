@@ -11,11 +11,11 @@ Verdict: not complete. The repo now has runnable scaffolds, real BONES-SEED smok
 | Requirement | Evidence inspected | Status |
 | --- | --- | --- |
 | Implement M1 paper survey | `docs/research/paper_matrix.md`, `docs/research/literature_review.md`, `docs/research/bibliography.bib`, `docs/research/pdf_manifest.md`, `docs/research/papers/` | Partial. Core matrix exists, but deeper PDF reading and reference/citation expansion are still needed. |
-| Include data filtering research | `docs/research/motion_quality_curation.md`, M2Q in `docs/milestones.md` | Partial. Paper-backed quality plan exists; full implementation still lacks FK/contact metrics and calibrated thresholds. |
+| Include data filtering research | `docs/research/motion_quality_curation.md`, M2Q in `docs/milestones.md` | Partial. Paper-backed quality plan exists; source and G1 FK/contact smoke metrics now exist, but full calibration and simulator-backed validation are still pending. |
 | Implement M2 data inventory/split/curation | `src/online_retarget/data/curation.py`, CLI `split-index`, real index under `runs/indices/...`, tests | Partial. Actor-heldout split and metadata curation are implemented; full quality gate remains incomplete. |
 | Keep source data read-only | `.gitignore`, commands write under `runs/`, data root `/home/user/data/motion_data` only read | Satisfied for current work. |
 | Separate different actors/skeletons | real split report: 522 actors, train/val/test actor split 417/52/53 | Satisfied at metadata split level. |
-| Implement M2Q quality filtering | source/G1 scanners, source FK/contact scanner, threshold proposal, `merge-quality`, `worst_clips.csv`, train quality gate | Partial. Smoke quality pipeline exists; source FK/contact smoke exists; full scans, G1 FK/contact, self-collision, and category thresholds remain pending. |
+| Implement M2Q quality filtering | source/G1 scanners, source FK/contact scanner, G1 MJCF FK/contact scanner, threshold proposal, `merge-quality`, `worst_clips.csv`, train quality gate | Partial. Smoke quality pipeline exists; source and G1 FK/contact smoke exist; full scans, self-collision, category thresholds, and simulator-backed labels remain pending. |
 | Implement M3 schema/obs contract | `src/online_retarget/data/schema.py`, `src/online_retarget/data/windowed_builder.py`, `tests/test_schema.py`, `tests/test_windowed_builder.py`, real 30-body smoke artifact | Smoke path implemented. Formal-scale extraction, normalization policy, robot-state wiring, and online preprocessing are pending. |
 | Implement M4 independent eval | `src/online_retarget/evaluation.py`, CLI `offline-eval`, `tests/test_evaluation.py` | Scaffold implemented. Real model predictions and simulator/contact metrics are pending. |
 | Implement M5 supervised baseline | `scripts/train.py`, `src/online_retarget/data/supervised_builder.py`, `src/online_retarget/data/windowed_builder.py`, supervised JSONL artifacts | Partial. PyTorch optimizer loop exists and post-train prediction JSONL/offline-eval/WandB metadata hooks are coded, but current Python lacks torch and formal-scale 30-body training is pending. |
@@ -26,13 +26,13 @@ Verdict: not complete. The repo now has runnable scaffolds, real BONES-SEED smok
 | Implement M7 Isaac Lab eval | `scripts/eval_isaac.py --dry-run` scaffold | Scaffold only. Real Isaac Lab/G1 replay task pending. |
 | Write live logs | `docs/logs/implementation-log.md` | Satisfied for current implementation history. Keep updating during future work. |
 | Make process/status readable | `docs/milestones.md`, `docs/status/m1_m7_status.md`, this audit | Satisfied as a living tracking surface, not final completion. |
-| Verify current work | `PYTHONPATH=src:. python3 -m unittest discover -s tests` -> 42 tests OK; targeted `py_compile` -> OK; dry-run training -> OK with `samples_builder_is_formal=true`; source FK/contact smoke scan -> OK; raw-debug artifact formal training check fails as intended | Current scaffold verified. Not evidence of full M1-M7 completion. |
+| Verify current work | `PYTHONPATH=src:. python3 -m unittest discover -s tests` -> 44 tests OK; targeted `py_compile` -> OK; dry-run training -> OK with `samples_builder_is_formal=true`; source FK/contact and G1 MJCF FK/contact smoke scans -> OK; raw-debug artifact formal training check fails as intended | Current scaffold verified. Not evidence of full M1-M7 completion. |
 
 ## Latest Verification Evidence
 
 ```bash
 PYTHONPATH=src:. python3 -m unittest discover -s tests
-# Ran 42 tests in 0.039s, OK.
+# Ran 44 tests in 0.042s, OK.
 
 PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-source-fk-quality \
   --data-root /home/user/data/motion_data \
@@ -46,10 +46,22 @@ PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-source-fk-quality \
 # Source FK/contact smoke wrote source_fk_quality_report.json with
 # keep/downweight/quarantine = 42/20/38.
 
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-g1-quality \
+  --data-root /home/user/data/motion_data \
+  --index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
+  --output-root runs \
+  --limit 100 \
+  --model-xml /home/user/repos/GMR/assets/unitree_g1/g1_mocap_29dof.xml \
+  --frame-stride 2 \
+  --max-frames 256
+# G1 MJCF FK/contact smoke wrote g1_quality_report.json with
+# keep/downweight/quarantine = 19/36/45 and flags including
+# g1_foot_slide=70, g1_ground_penetration=41, g1_joint_limit_violation=18.
+
 PYTHONPATH=src:. python3 scripts/train.py --config configs/baseline_mlp.yaml --dry-run --limit 1
 # quality_gate shows policy_id=smoke_source_g1_limit100, quality_report_exists=true,
 # uses_curated_index=true, uses_merged_action=true, samples_builder=bvh_fk_30body_window,
-# samples_builder_is_formal=true, and train_refs=112765.
+# samples_builder_is_formal=true, and train_refs=112768.
 
 PYTHONPATH=src:. python3 scripts/train.py --config configs/baseline_mlp.yaml \
   --samples-jsonl runs/supervised/train_merged-quality-action_h8_limit8/samples.jsonl \
@@ -68,6 +80,6 @@ git diff --check
 
 - Current base Python lacks torch/numpy, so real training and latency benchmarking cannot run in this environment.
 - Isaac Lab/G1 replay or tracking task binding is not implemented.
-- M2Q quality scanning is still smoke-scale. Source FK/contact/penetration proxies exist; G1 FK/contact, self-collision, full scans, and calibrated category thresholds remain pending.
+- M2Q quality scanning is still smoke-scale. Source FK/contact and G1 MJCF FK/contact metrics exist; self-collision, full scans, calibrated category thresholds, and simulator-backed labels remain pending.
 - M3/M5 now have a 30-body smoke sample builder, but formal-scale extraction, normalization, and robot-state wiring remain incomplete.
 - WandB hooks, checkpoint report metadata, and automatic post-train offline eval are coded but not executed in a real torch training run yet.

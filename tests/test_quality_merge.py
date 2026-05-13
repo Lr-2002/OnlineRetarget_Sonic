@@ -40,6 +40,9 @@ class QualityMergeTests(unittest.TestCase):
                         "row_index": "2",
                         "quality_action": "exclude",
                         "quality_flags": "missing_g1_csv_member",
+                        "penetration_depth": 0.07,
+                        "contact_slide_rate": 0.25,
+                        "joint_limit_violation_rate": 0.5,
                     }
                 )
                 + "\n",
@@ -66,6 +69,9 @@ class QualityMergeTests(unittest.TestCase):
         self.assertEqual(rows[1]["merged_quality_flags"], "mirror_variant|g1:missing_g1_csv_member")
         self.assertEqual(len(worst), 2)
         self.assertEqual(worst[0]["merged_quality_action"], "exclude")
+        self.assertEqual(worst[0]["g1_penetration_depth"], "0.07")
+        self.assertEqual(worst[0]["g1_contact_slide_rate"], "0.25")
+        self.assertEqual(worst[0]["g1_joint_limit_violation_rate"], "0.5")
         self.assertEqual(report["breakdown"]["split"]["train"]["exclude"], 1)
         self.assertEqual(report["worst_clips_csv"], str(result.worst_clips_csv))
 

@@ -66,6 +66,21 @@ def main() -> None:
     quality.add_argument("--fps", type=float, default=30.0)
     quality.add_argument("--max-joint-velocity", type=float, default=20.0)
     quality.add_argument("--max-root-speed", type=float, default=8.0)
+    quality.add_argument("--root-position-scale", type=float, default=0.01)
+    quality.add_argument("--joint-angle-scale", type=float, default=0.017453292519943295)
+    quality.add_argument("--root-rotation-scale", type=float, default=0.017453292519943295)
+    quality.add_argument("--frame-stride", type=int, default=1)
+    quality.add_argument("--max-frames", type=int)
+    quality.add_argument("--model-xml", type=Path)
+    quality.add_argument("--ground-height", type=float, default=0.0)
+    quality.add_argument("--contact-height-threshold", type=float, default=0.04)
+    quality.add_argument("--max-contact-slide-speed", type=float, default=0.25)
+    quality.add_argument("--max-mean-foot-clearance", type=float, default=0.10)
+    quality.add_argument("--max-penetration-depth", type=float, default=0.03)
+    quality.add_argument("--min-contact-frame-ratio", type=float, default=0.05)
+    quality.add_argument("--max-joint-limit-violation-rate", type=float, default=0.0)
+    quality.add_argument("--start-end-frames", type=int, default=10)
+    quality.add_argument("--max-start-end-root-speed", type=float, default=0.20)
 
     source_quality = subparsers.add_parser(
         "scan-source-quality",
@@ -230,6 +245,21 @@ def _scan_g1_quality(args: argparse.Namespace) -> None:
             fps=args.fps,
             max_joint_velocity=args.max_joint_velocity,
             max_root_speed=args.max_root_speed,
+            root_position_scale=args.root_position_scale,
+            joint_angle_scale=args.joint_angle_scale,
+            root_rotation_scale=args.root_rotation_scale,
+            frame_stride=args.frame_stride,
+            max_frames=args.max_frames,
+            model_xml=args.model_xml,
+            ground_height=args.ground_height,
+            contact_height_threshold=args.contact_height_threshold,
+            max_contact_slide_speed=args.max_contact_slide_speed,
+            max_mean_foot_clearance=args.max_mean_foot_clearance,
+            max_penetration_depth=args.max_penetration_depth,
+            min_contact_frame_ratio=args.min_contact_frame_ratio,
+            max_joint_limit_violation_rate=args.max_joint_limit_violation_rate,
+            start_end_frames=args.start_end_frames,
+            max_start_end_root_speed=args.max_start_end_root_speed,
         ),
         limit=limit,
         splits=tuple(args.split),

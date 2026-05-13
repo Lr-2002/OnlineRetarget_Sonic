@@ -175,15 +175,25 @@ def _worst_clip_rows(
                 "g1_max_abs_joint_velocity": _stat(g1, "max_abs_joint_velocity"),
                 "g1_joint_jump_rate": _stat(g1, "joint_jump_rate"),
                 "g1_max_root_speed": _stat(g1, "max_root_speed"),
+                "g1_joint_limit_violation_rate": _stat(g1, "joint_limit_violation_rate"),
+                "g1_max_joint_limit_violation": _stat(g1, "max_joint_limit_violation"),
+                "g1_mean_foot_clearance": _stat(g1, "mean_foot_clearance"),
+                "g1_penetration_depth": _stat(g1, "penetration_depth"),
+                "g1_contact_frame_ratio": _stat(g1, "contact_frame_ratio"),
+                "g1_contact_slide_rate": _stat(g1, "contact_slide_rate"),
+                "g1_max_contact_slide_speed": _stat(g1, "max_contact_slide_speed"),
             }
         )
     candidates.sort(key=_worst_sort_key, reverse=True)
     return candidates[:limit]
 
 
-def _worst_sort_key(row: Mapping[str, str]) -> tuple[int, float, float, float, float, float]:
+def _worst_sort_key(row: Mapping[str, str]) -> tuple[float, ...]:
     return (
         ACTION_ORDER.get(row.get("merged_quality_action", "keep"), 0),
+        _float(row.get("g1_penetration_depth", "")),
+        _float(row.get("g1_contact_slide_rate", "")),
+        _float(row.get("g1_joint_limit_violation_rate", "")),
         _float(row.get("g1_joint_jump_rate", "")),
         _float(row.get("source_channel_jump_rate", "")),
         _float(row.get("g1_max_abs_joint_velocity", "")),
