@@ -21,6 +21,7 @@ Purpose: make model/data/eval choices traceable. This matrix tracks what each re
 | SPIDER | Scalable Physics-Informed Dexterous Retargeting | https://arxiv.org/abs/2511.09484 | Read PDF/OpenAlex excerpts, matrixed for physics-informed refinement |
 | Shared Latent Retargeting | Nonparametric Motion Retargeting for Humanoid Robots on Shared Latent Space | https://doi.org/10.15607/RSS.2020.XVI.071 | Read abstract/excerpts, matrixed |
 | Motion Quality Curation | Cross-paper filtering and physics-quality synthesis | `docs/research/motion_quality_curation.md` | Added as M2Q gate |
+| Citation Usage Map | Cited/discussed/actually-used relationship map for core references | `docs/research/citation_usage_map.md` | Added to distinguish citation metadata from implementation evidence |
 
 ## Comparative Matrix
 

@@ -237,6 +237,8 @@ Implication for this repo:
 
 The filtering-specific PDF/OpenAlex pass is recorded in `docs/research/papers/motion_filtering_deep_read.md`. It corrected the KungfuBot arXiv ID to `2506.12851`, added RoboForge, DynaRetarget, and SPIDER, and confirmed that PHUMA reports concrete root jerk, foot-contact, pelvis-height, and support-base filtering metrics. These paper thresholds are not OnlineRetarget defaults; they define signals to scan and then calibrate on BONES-SEED.
 
+The citation/usage expansion pass is recorded in `docs/research/citation_usage_map.md`. The main finding is that OpenAlex has stable work IDs for several 2025/2026 arXiv papers but currently reports empty or sparse citation/reference metadata for them. For this project, usage evidence therefore comes from PDF text and project/code pages: NMR actually uses PHUMA-style filtering, GMR initialization, TMR clustering features, CEPR expert rollouts, AMASS tests, and BeyondMimic tracking; GMR actually uses LAFAN1 retargets and BeyondMimic robustness evaluation; PHUMA actually uses MaskedMimic/IsaacGym policies and category-aware curation; OmniTrack actually uses GMR-retargeted AMASS/LAFAN1 references and simulator-generated physics-consistent references. This distinction prevents us from treating generic citations as implementation evidence.
+
 ## Working Design Choices
 
 1. Baseline output is direct G1 joint reference, not latent.
