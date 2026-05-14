@@ -75,25 +75,18 @@ def scan_pair_quality_from_index(
     g1_tar_path = data_root.expanduser() / "g1.tar"
     scanned: list[dict[str, object]] = []
     skipped_rows = 0
-    with tarfile.open(source_tar_path, "r:*") as source_tar, tarfile.open(g1_tar_path, "r:*") as g1_tar:
+    stats_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with (
+        tarfile.open(source_tar_path, "r:*") as source_tar,
+        tarfile.open(g1_tar_path, "r:*") as g1_tar,
+        stats_jsonl.open("w", encoding="utf-8") as stats_file,
+    ):
         source_member_by_name = {member.name: member for member in source_tar.getmembers()}
         g1_member_by_name = {member.name: member for member in g1_tar.getmembers()}
         for row in rows:
             if not row.get("move_soma_proportional_path") or not row.get("move_g1_path"):
                 skipped_rows += 1
-                scanned.append(
-                    scan_pair_members(
-                        source_tar,
-                        g1_tar,
-                        row,
-                        config,
-                        source_member_by_name=source_member_by_name,
-                        g1_member_by_name=g1_member_by_name,
-                    )
-                )
-                continue
-            scanned.append(
-                scan_pair_members(
+                result = scan_pair_members(
                     source_tar,
                     g1_tar,
                     row,
@@ -101,9 +94,20 @@ def scan_pair_quality_from_index(
                     source_member_by_name=source_member_by_name,
                     g1_member_by_name=g1_member_by_name,
                 )
+                scanned.append(result)
+                _write_jsonl_row(stats_file, result)
+                continue
+            result = scan_pair_members(
+                source_tar,
+                g1_tar,
+                row,
+                config,
+                source_member_by_name=source_member_by_name,
+                g1_member_by_name=g1_member_by_name,
             )
+            scanned.append(result)
+            _write_jsonl_row(stats_file, result)
 
-    _write_jsonl(stats_jsonl, scanned)
     action_counts = Counter(str(row["quality_action"]) for row in scanned)
     flag_counts = Counter()
     for row in scanned:
@@ -270,13 +274,12 @@ def _read_bvh_meta(
 
     with extracted:
         try:
-            text = io.TextIOWrapper(extracted, encoding="utf-8").read()
+            text = io.TextIOWrapper(extracted, encoding="utf-8")
+            return _parse_bvh_meta_stream(text)
         except UnicodeDecodeError:
             return {"present": False, "flags": ("source_bvh_decode_error",)}
-    try:
-        return _parse_bvh_meta(text)
-    except ValueError:
-        return {"present": False, "flags": ("source_bvh_parse_error",)}
+        except ValueError:
+            return {"present": False, "flags": ("source_bvh_parse_error",)}
 
 
 def _parse_bvh_meta(text: str) -> dict[str, object]:
@@ -295,6 +298,30 @@ def _parse_bvh_meta(text: str) -> dict[str, object]:
         "flags": (),
         "declared_frames": declared_frames,
         "frame_count": len(motion_lines),
+        "frame_time": frame_time,
+    }
+
+
+def _parse_bvh_meta_stream(lines: Iterable[str]) -> dict[str, object]:
+    for line in lines:
+        if line.strip() == "MOTION":
+            break
+    else:
+        raise ValueError("BVH missing MOTION section")
+
+    declared_line = next(lines, "")
+    frame_time_line = next(lines, "")
+    if not declared_line or not frame_time_line:
+        raise ValueError("BVH MOTION section is incomplete")
+
+    declared_frames = int(_parse_header_value(declared_line.strip(), "Frames"))
+    frame_time = float(_parse_header_value(frame_time_line.strip(), "Frame Time"))
+    frame_count = sum(1 for line in lines if line.strip())
+    return {
+        "present": True,
+        "flags": (),
+        "declared_frames": declared_frames,
+        "frame_count": frame_count,
         "frame_time": frame_time,
     }
 
@@ -439,8 +466,13 @@ def _write_jsonl(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         for row in rows:
-            f.write(json.dumps(row, sort_keys=True))
-            f.write("\n")
+            _write_jsonl_row(f, row)
+
+
+def _write_jsonl_row(file, row: Mapping[str, object]) -> None:
+    file.write(json.dumps(row, sort_keys=True))
+    file.write("\n")
+    file.flush()
 
 
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:

@@ -108,16 +108,18 @@ def scan_source_fk_quality_from_index(
     source_tar = data_root.expanduser() / "soma_proportional.tar"
     scanned: list[dict[str, object]] = []
     skipped_rows = 0
-    with tarfile.open(source_tar, "r:*") as tar:
+    stats_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(source_tar, "r:*") as tar, stats_jsonl.open("w", encoding="utf-8") as stats_file:
         member_by_name = {member.name: member for member in tar.getmembers()}
         for row in rows:
             source_path = row.get("move_soma_proportional_path", "")
             if not source_path:
                 skipped_rows += 1
                 continue
-            scanned.append(scan_source_fk_member(tar, row, config, member_by_name=member_by_name))
+            result = scan_source_fk_member(tar, row, config, member_by_name=member_by_name)
+            scanned.append(result)
+            _write_jsonl_row(stats_file, result)
 
-    _write_jsonl(stats_jsonl, scanned)
     action_counts = Counter(str(row["quality_action"]) for row in scanned)
     flag_counts = Counter()
     for row in scanned:
@@ -710,8 +712,13 @@ def _write_jsonl(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         for row in rows:
-            f.write(json.dumps(row, sort_keys=True))
-            f.write("\n")
+            _write_jsonl_row(f, row)
+
+
+def _write_jsonl_row(file, row: Mapping[str, object]) -> None:
+    file.write(json.dumps(row, sort_keys=True))
+    file.write("\n")
+    file.flush()
 
 
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:
