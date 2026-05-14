@@ -74,6 +74,21 @@ def main() -> None:
     quality.add_argument("--fps", type=float, default=120.0)
     quality.add_argument("--max-joint-velocity", type=float, default=20.0)
     quality.add_argument("--max-root-speed", type=float, default=8.0)
+    quality.add_argument(
+        "--max-joint-acceleration",
+        type=float,
+        help="Optional threshold for G1 joint acceleration flags. Defaults to metric-only.",
+    )
+    quality.add_argument(
+        "--max-root-acceleration",
+        type=float,
+        help="Optional threshold for G1 root acceleration flags. Defaults to metric-only.",
+    )
+    quality.add_argument(
+        "--max-root-jerk",
+        type=float,
+        help="Optional threshold for G1 root jerk flags. Defaults to metric-only.",
+    )
     quality.add_argument("--root-position-scale", type=float, default=0.01)
     quality.add_argument("--joint-angle-scale", type=float, default=0.017453292519943295)
     quality.add_argument("--root-rotation-scale", type=float, default=0.017453292519943295)
@@ -112,6 +127,21 @@ def main() -> None:
     )
     source_quality.add_argument("--max-channel-velocity", type=float, default=3000.0)
     source_quality.add_argument("--max-root-speed", type=float, default=500.0)
+    source_quality.add_argument(
+        "--max-channel-acceleration",
+        type=float,
+        help="Optional threshold for source channel acceleration flags. Defaults to metric-only.",
+    )
+    source_quality.add_argument(
+        "--max-root-acceleration",
+        type=float,
+        help="Optional threshold for source root acceleration flags. Defaults to metric-only.",
+    )
+    source_quality.add_argument(
+        "--max-root-jerk",
+        type=float,
+        help="Optional threshold for source root jerk flags. Defaults to metric-only.",
+    )
     source_quality.add_argument("--expected-frame-time", type=float)
     source_quality.add_argument("--frame-time-tolerance", type=float, default=1e-4)
 
@@ -334,6 +364,9 @@ def _scan_g1_quality(args: argparse.Namespace) -> None:
             fps=args.fps,
             max_joint_velocity=args.max_joint_velocity,
             max_root_speed=args.max_root_speed,
+            max_joint_acceleration=args.max_joint_acceleration,
+            max_root_acceleration=args.max_root_acceleration,
+            max_root_jerk=args.max_root_jerk,
             root_position_scale=args.root_position_scale,
             joint_angle_scale=args.joint_angle_scale,
             root_rotation_scale=args.root_rotation_scale,
@@ -370,6 +403,9 @@ def _scan_source_quality(args: argparse.Namespace) -> None:
         config=BVHQualityConfig(
             max_channel_velocity=args.max_channel_velocity,
             max_root_speed=args.max_root_speed,
+            max_channel_acceleration=args.max_channel_acceleration,
+            max_root_acceleration=args.max_root_acceleration,
+            max_root_jerk=args.max_root_jerk,
             expected_frame_time=args.expected_frame_time,
             frame_time_tolerance=args.frame_time_tolerance,
         ),

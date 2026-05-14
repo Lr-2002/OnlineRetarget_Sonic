@@ -16,6 +16,8 @@ This file tracks source papers and where to fetch them. Binary PDFs are not comm
 | ExBody2 | https://arxiv.org/pdf/2412.13196 | Link recorded |
 | KungfuBot | https://arxiv.org/pdf/2506.12851 | Fetched to `runs/papers/kungfubot-2506.12851.pdf`; OpenAlex resolved this title to arXiv `2506.12851` |
 | RoboForge | https://arxiv.org/pdf/2603.17927 | Fetched to `runs/papers/roboforge-2603.17927.pdf` |
+| DynaRetarget | https://arxiv.org/pdf/2602.06827 | Fetched to `runs/papers/dynaretarget-2602.06827.pdf`; OpenAlex resolved as `W7128373084` / `W7128408694` |
+| SPIDER | https://arxiv.org/pdf/2511.09484 | Fetched to `runs/papers/spider-2511.09484.pdf`; OpenAlex resolved as `W4416307812` |
 | KDMR | https://arxiv.org/pdf/2603.09956 | Fetched to `runs/papers/kdmr-2603.09956.pdf` |
 | Contact and Dynamics from Monocular Video | https://davrempe.github.io/docs/contact-and-dynamics-2020.pdf | Link recorded |
 | Contact-aware Motion Retargeting / self-contact retargeting | https://arxiv.org/pdf/2109.07431 | Link recorded |

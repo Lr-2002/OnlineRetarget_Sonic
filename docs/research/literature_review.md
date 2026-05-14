@@ -207,9 +207,35 @@ Implication for this repo:
 - M7 should not only evaluate predicted references; it should eventually produce a separately labeled simulator-refined dataset.
 - Physics-refined rollouts must remain a different provenance class from kinematic BONES-SEED G1 CSV targets.
 
+### DynaRetarget
+
+Primary links:
+
+- arXiv: https://arxiv.org/abs/2602.06827
+
+DynaRetarget treats kinematic retargeted humanoid-object demonstrations as imperfect references. Its sampling-based trajectory optimization refines full-horizon G1 trajectories in MuJoCo and reports refinement success, smoothness from joint acceleration, compute efficiency, downstream policy benefit, and failure cases tied to poor reference quality such as abrupt contact/object changes.
+
+Implication for this repo:
+
+- M7 needs a `sim_refine_success` / `sim_refine_failed` style label.
+- Refinement failure is a quality signal for quarantine, not an excuse to overwrite the kinematic G1 label silently.
+
+### SPIDER
+
+Primary links:
+
+- arXiv: https://arxiv.org/abs/2511.09484
+
+SPIDER is broader than humanoid locomotion, but it is useful for the simulator-refinement milestone. It converts noisy kinematic human/object demonstrations into dynamically feasible robot trajectories using parallel physics-based sampling, annealed sampling kernels, virtual contact guidance, and contact filters for unstable short or drifting contacts.
+
+Implication for this repo:
+
+- Contact-sequence correctness should be tracked when simulator refinement arrives.
+- Sampling/refinement-generated trajectories should carry their own provenance and compute budget.
+
 ## 2026-05-14 Deep-Read Update
 
-The filtering-specific PDF/OpenAlex pass is recorded in `docs/research/papers/motion_filtering_deep_read.md`. It corrected the KungfuBot arXiv ID to `2506.12851`, added RoboForge, and confirmed that PHUMA reports concrete root jerk, foot-contact, pelvis-height, and support-base filtering metrics. These paper thresholds are not OnlineRetarget defaults; they define signals to scan and then calibrate on BONES-SEED.
+The filtering-specific PDF/OpenAlex pass is recorded in `docs/research/papers/motion_filtering_deep_read.md`. It corrected the KungfuBot arXiv ID to `2506.12851`, added RoboForge, DynaRetarget, and SPIDER, and confirmed that PHUMA reports concrete root jerk, foot-contact, pelvis-height, and support-base filtering metrics. These paper thresholds are not OnlineRetarget defaults; they define signals to scan and then calibrate on BONES-SEED.
 
 ## Working Design Choices
 

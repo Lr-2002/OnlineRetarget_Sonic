@@ -20,6 +20,9 @@ from .row_sampling import sampling_run_tag, scan_sampling_report, select_rows_fo
 class BVHQualityConfig:
     max_channel_velocity: float = 3000.0
     max_root_speed: float = 500.0
+    max_channel_acceleration: float | None = None
+    max_root_acceleration: float | None = None
+    max_root_jerk: float | None = None
     expected_frame_time: float | None = None
     frame_time_tolerance: float = 1e-4
 
@@ -237,7 +240,10 @@ def _summarize_bvh(
     channel_width = len(channel_names)
 
     channel_velocity_samples: list[float] = []
+    channel_acceleration_samples: list[float] = []
     root_speed_samples: list[float] = []
+    root_acceleration_samples: list[float] = []
+    root_jerk_samples: list[float] = []
     root_joint = ""
     root_group = _select_root_proxy(values, position_groups)
     if root_group is not None:
@@ -245,18 +251,48 @@ def _summarize_bvh(
     else:
         root_indices = ()
 
+    prev_prev_prev_row: list[float] | None = None
+    prev_prev_row: list[float] | None = None
     prev_row: list[float] | None = None
+    prev_prev_prev_root: list[float] | None = None
+    prev_prev_root: list[float] | None = None
     prev_root: list[float] | None = None
     for row in values:
         if len(row) != channel_width:
             continue
         if prev_row is not None:
             channel_velocity_samples.extend(abs(cur - prev) * fps for cur, prev in zip(row, prev_row))
+        if prev_prev_row is not None and prev_row is not None:
+            channel_acceleration_samples.extend(
+                abs(cur - (2.0 * prev) + prev_prev) * fps * fps
+                for cur, prev, prev_prev in zip(row, prev_row, prev_prev_row)
+            )
         if root_indices:
             root = [row[index] for index in root_indices]
             if prev_root is not None:
                 root_speed_samples.append(math.dist(root, prev_root) * fps)
+            if prev_prev_root is not None and prev_root is not None:
+                root_acceleration_samples.append(
+                    _vector_second_difference_norm(root, prev_root, prev_prev_root) * fps * fps
+                )
+            if (
+                prev_prev_prev_root is not None
+                and prev_prev_root is not None
+                and prev_root is not None
+            ):
+                root_jerk_samples.append(
+                    _vector_third_difference_norm(
+                        root, prev_root, prev_prev_root, prev_prev_prev_root
+                    )
+                    * fps
+                    * fps
+                    * fps
+                )
+            prev_prev_prev_root = prev_prev_root
+            prev_prev_root = prev_root
             prev_root = root
+        prev_prev_prev_row = prev_prev_row
+        prev_prev_row = prev_row
         prev_row = row
 
     flags: list[str] = []
@@ -279,11 +315,35 @@ def _summarize_bvh(
             action = _worse_action(action, "quarantine")
     channel_jump_rate = _rate_above(channel_velocity_samples, config.max_channel_velocity)
     root_jump_rate = _rate_above(root_speed_samples, config.max_root_speed)
+    channel_acceleration_jump_rate = (
+        _rate_above(channel_acceleration_samples, config.max_channel_acceleration)
+        if config.max_channel_acceleration is not None
+        else 0.0
+    )
+    root_acceleration_jump_rate = (
+        _rate_above(root_acceleration_samples, config.max_root_acceleration)
+        if config.max_root_acceleration is not None
+        else 0.0
+    )
+    root_jerk_jump_rate = (
+        _rate_above(root_jerk_samples, config.max_root_jerk)
+        if config.max_root_jerk is not None
+        else 0.0
+    )
     if channel_jump_rate > 0.0:
         flags.append("source_channel_jump")
         action = _worse_action(action, "quarantine")
     if root_jump_rate > 0.0:
         flags.append("source_root_discontinuity")
+        action = _worse_action(action, "quarantine")
+    if channel_acceleration_jump_rate > 0.0:
+        flags.append("source_channel_acceleration_jump")
+        action = _worse_action(action, "quarantine")
+    if root_acceleration_jump_rate > 0.0:
+        flags.append("source_root_acceleration_jump")
+        action = _worse_action(action, "quarantine")
+    if root_jerk_jump_rate > 0.0:
+        flags.append("source_root_jerk_jump")
         action = _worse_action(action, "quarantine")
 
     return {
@@ -303,8 +363,21 @@ def _summarize_bvh(
         else 0.0,
         "mean_abs_channel_velocity": round(_mean(channel_velocity_samples), 6),
         "channel_jump_rate": round(channel_jump_rate, 6),
+        "max_abs_channel_acceleration": round(max(channel_acceleration_samples), 6)
+        if channel_acceleration_samples
+        else 0.0,
+        "mean_abs_channel_acceleration": round(_mean(channel_acceleration_samples), 6),
+        "channel_acceleration_jump_rate": round(channel_acceleration_jump_rate, 6),
         "max_root_speed": round(max(root_speed_samples), 6) if root_speed_samples else 0.0,
         "root_jump_rate": round(root_jump_rate, 6),
+        "max_root_acceleration": round(max(root_acceleration_samples), 6)
+        if root_acceleration_samples
+        else 0.0,
+        "mean_root_acceleration": round(_mean(root_acceleration_samples), 6),
+        "root_acceleration_jump_rate": round(root_acceleration_jump_rate, 6),
+        "max_root_jerk": round(max(root_jerk_samples), 6) if root_jerk_samples else 0.0,
+        "mean_root_jerk": round(_mean(root_jerk_samples), 6),
+        "root_jerk_jump_rate": round(root_jerk_jump_rate, 6),
         "quality_action": action,
         "quality_flags": "|".join(flags),
     }
@@ -336,6 +409,35 @@ def _row_position(row: Sequence[float], indices: Sequence[int]) -> list[float] |
     return [row[index] for index in indices]
 
 
+def _vector_second_difference_norm(
+    current: Sequence[float],
+    previous: Sequence[float],
+    previous_previous: Sequence[float],
+) -> float:
+    return math.sqrt(
+        sum(
+            (cur - (2.0 * prev) + prev_prev) ** 2
+            for cur, prev, prev_prev in zip(current, previous, previous_previous)
+        )
+    )
+
+
+def _vector_third_difference_norm(
+    current: Sequence[float],
+    previous: Sequence[float],
+    previous_previous: Sequence[float],
+    previous_previous_previous: Sequence[float],
+) -> float:
+    return math.sqrt(
+        sum(
+            (cur - (3.0 * prev) + (3.0 * prev_prev) - prev_prev_prev) ** 2
+            for cur, prev, prev_prev, prev_prev_prev in zip(
+                current, previous, previous_previous, previous_previous_previous
+            )
+        )
+    )
+
+
 def _empty_result(base: Mapping[str, object], flag: str) -> dict[str, object]:
     return {
         **base,
@@ -352,8 +454,17 @@ def _empty_result(base: Mapping[str, object], flag: str) -> dict[str, object]:
         "max_abs_channel_velocity": 0.0,
         "mean_abs_channel_velocity": 0.0,
         "channel_jump_rate": 0.0,
+        "max_abs_channel_acceleration": 0.0,
+        "mean_abs_channel_acceleration": 0.0,
+        "channel_acceleration_jump_rate": 0.0,
         "max_root_speed": 0.0,
         "root_jump_rate": 0.0,
+        "max_root_acceleration": 0.0,
+        "mean_root_acceleration": 0.0,
+        "root_acceleration_jump_rate": 0.0,
+        "max_root_jerk": 0.0,
+        "mean_root_jerk": 0.0,
+        "root_jerk_jump_rate": 0.0,
         "quality_action": "exclude",
         "quality_flags": flag,
     }
@@ -414,8 +525,17 @@ def _metric_summary(rows: Sequence[Mapping[str, object]]) -> dict[str, dict[str,
         "max_abs_channel_velocity",
         "mean_abs_channel_velocity",
         "channel_jump_rate",
+        "max_abs_channel_acceleration",
+        "mean_abs_channel_acceleration",
+        "channel_acceleration_jump_rate",
         "max_root_speed",
         "root_jump_rate",
+        "max_root_acceleration",
+        "mean_root_acceleration",
+        "root_acceleration_jump_rate",
+        "max_root_jerk",
+        "mean_root_jerk",
+        "root_jerk_jump_rate",
     )
     return {metric: _summarize_values(_numeric_values(rows, metric)) for metric in metrics}
 

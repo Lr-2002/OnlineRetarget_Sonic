@@ -96,6 +96,61 @@ class BVHQualityTests(unittest.TestCase):
             self.assertEqual([row["category"] for row in rows], ["Baseline", "Jump"])
             self.assertEqual(report["sampling"]["mode"], "stratified_round_robin")
 
+    def test_scan_bvh_quality_records_dynamic_metrics_without_default_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "data"
+            output = Path(tmp) / "runs"
+            root.mkdir()
+            _write_source_tar(root / "soma_proportional.tar")
+            index_csv = Path(tmp) / "split_index.csv"
+            _write_index(index_csv)
+
+            result = scan_bvh_quality_from_index(
+                data_root=root,
+                index_csv=index_csv,
+                output_root=output,
+                config=BVHQualityConfig(
+                    max_channel_velocity=1000.0,
+                    max_root_speed=1000.0,
+                    expected_frame_time=0.1,
+                ),
+                limit=1,
+            )
+            row = json.loads(result.stats_jsonl.read_text(encoding="utf-8").splitlines()[0])
+
+        self.assertGreater(row["max_abs_channel_acceleration"], 0.0)
+        self.assertGreater(row["max_root_acceleration"], 0.0)
+        self.assertEqual(row["channel_acceleration_jump_rate"], 0.0)
+        self.assertEqual(row["root_acceleration_jump_rate"], 0.0)
+        self.assertEqual(row["root_jerk_jump_rate"], 0.0)
+
+    def test_scan_bvh_quality_flags_dynamic_thresholds_when_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "data"
+            output = Path(tmp) / "runs"
+            root.mkdir()
+            _write_source_tar(root / "soma_proportional.tar")
+            index_csv = Path(tmp) / "split_index.csv"
+            _write_index(index_csv)
+
+            result = scan_bvh_quality_from_index(
+                data_root=root,
+                index_csv=index_csv,
+                output_root=output,
+                config=BVHQualityConfig(
+                    max_channel_velocity=1000.0,
+                    max_root_speed=1000.0,
+                    max_channel_acceleration=1.0,
+                    max_root_acceleration=1.0,
+                    expected_frame_time=0.1,
+                ),
+                limit=1,
+            )
+
+        self.assertEqual(result.action_counts["quarantine"], 1)
+        self.assertEqual(result.flag_counts["source_channel_acceleration_jump"], 1)
+        self.assertEqual(result.flag_counts["source_root_acceleration_jump"], 1)
+
 
 def _write_index(path: Path) -> None:
     fieldnames = [
@@ -160,7 +215,11 @@ def _write_index(path: Path) -> None:
 
 def _write_source_tar(path: Path) -> None:
     with tarfile.open(path, "w") as tar:
-        _add_member(tar, "soma_proportional/bvh/240101/good.bvh", _bvh_text([0.0, 0.1, 0.2]))
+        _add_member(
+            tar,
+            "soma_proportional/bvh/240101/good.bvh",
+            _bvh_text([0.0, 0.1, 0.4, 0.9]),
+        )
         _add_member(tar, "soma_proportional/bvh/240101/jump.bvh", _bvh_text([0.0, 10.0, 10.2]))
 
 

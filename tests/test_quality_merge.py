@@ -23,6 +23,9 @@ class QualityMergeTests(unittest.TestCase):
                         "row_index": "1",
                         "quality_action": "quarantine",
                         "quality_flags": "source_channel_jump",
+                        "max_abs_channel_acceleration": 12.0,
+                        "max_root_acceleration": 3.0,
+                        "max_root_jerk": 4.0,
                     }
                 )
                 + "\n",
@@ -58,6 +61,9 @@ class QualityMergeTests(unittest.TestCase):
                         "row_index": "2",
                         "quality_action": "exclude",
                         "quality_flags": "missing_g1_csv_member",
+                        "max_abs_joint_acceleration": 30.0,
+                        "max_root_acceleration": 7.0,
+                        "max_root_jerk": 9.0,
                         "penetration_depth": 0.07,
                         "contact_slide_rate": 0.25,
                         "joint_limit_violation_rate": 0.5,
@@ -127,8 +133,14 @@ class QualityMergeTests(unittest.TestCase):
         self.assertEqual(worst[0]["g1_joint_limit_violation_rate"], "0.5")
         self.assertEqual(worst[0]["g1_self_collision_proxy_rate"], "0.2")
         self.assertEqual(worst[0]["g1_min_self_collision_distance"], "0.01")
+        self.assertEqual(worst[0]["g1_max_abs_joint_acceleration"], "30.0")
+        self.assertEqual(worst[0]["g1_max_root_acceleration"], "7.0")
+        self.assertEqual(worst[0]["g1_max_root_jerk"], "9.0")
         self.assertEqual(worst[0]["pair_abs_frame_count_delta"], "2")
         self.assertEqual(worst[0]["pair_target_provenance"], "kinematic_g1_csv")
+        self.assertEqual(worst[1]["source_max_abs_channel_acceleration"], "12.0")
+        self.assertEqual(worst[1]["source_max_root_acceleration"], "3.0")
+        self.assertEqual(worst[1]["source_max_root_jerk"], "4.0")
         self.assertEqual(worst[1]["source_fk_contact_slide_rate"], "0.15")
         self.assertEqual(worst[1]["source_fk_penetration_depth"], "0.02")
         self.assertEqual(report["pair_stats_jsonl"], str(pair_stats))

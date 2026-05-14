@@ -10,8 +10,8 @@ Verdict: not complete. The repo now has runnable scaffolds, real BONES-SEED smok
 
 | Requirement | Evidence inspected | Status |
 | --- | --- | --- |
-| Implement M1 paper survey | `docs/research/paper_matrix.md`, `docs/research/literature_review.md`, `docs/research/bibliography.bib`, `docs/research/pdf_manifest.md`, `docs/research/papers/`, especially `docs/research/papers/motion_filtering_deep_read.md` | Partial. Core matrix exists and filtering deep-read now covers NMR, PHUMA, GMR, KDMR, ReActor, OmniRetarget, KungfuBot, and RoboForge with PDF/OpenAlex evidence. Reference/citation expansion is still needed. |
-| Include data filtering research | `docs/research/motion_quality_curation.md`, M2Q in `docs/milestones.md`, `docs/research/papers/motion_filtering_deep_read.md` | Partial. Paper-backed quality plan exists; source/G1 FK-contact/self-collision-proxy metrics, pair/provenance checks, upper/lower-tail grouped threshold proposals, stratified scan support, diversity-loss reports, and manual review manifests now exist. Deep-read adds jerk, support-base, pelvis/root-height, contact-mask correction, and simulator-refined provenance as required next signals. Policy promotion and simulator-backed validation are still pending. |
+| Implement M1 paper survey | `docs/research/paper_matrix.md`, `docs/research/literature_review.md`, `docs/research/bibliography.bib`, `docs/research/pdf_manifest.md`, `docs/research/papers/`, especially `docs/research/papers/motion_filtering_deep_read.md` | Partial. Core matrix exists and filtering deep-read now covers NMR, PHUMA, GMR, KDMR, ReActor, OmniRetarget, KungfuBot, RoboForge, DynaRetarget, and SPIDER with PDF/OpenAlex/project/code evidence. Reference/citation expansion is still needed. |
+| Include data filtering research | `docs/research/motion_quality_curation.md`, M2Q in `docs/milestones.md`, `docs/research/papers/motion_filtering_deep_read.md` | Partial. Paper-backed quality plan exists; source/G1 FK-contact/self-collision-proxy metrics, pair/provenance checks, upper/lower-tail grouped threshold proposals, stratified scan support, diversity-loss reports, and manual review manifests now exist. Deep-read adds jerk, support-base, pelvis/root-height, contact-mask correction, and simulator-refined provenance as required next signals. Acceleration/jerk is now implemented as metric-only scanner output; support-base/pelvis-height and policy promotion remain pending. |
 | Implement M2 data inventory/split/curation | `src/online_retarget/data/curation.py`, CLI `split-index`, real index under `runs/indices/...`, tests | Partial. Actor-heldout split and metadata curation are implemented; full quality gate remains incomplete. |
 | Keep source data read-only | `.gitignore`, commands write under `runs/`, data root `/home/user/data/motion_data` only read | Satisfied for current work. |
 | Separate different actors/skeletons | real split report: 522 actors, train/val/test actor split 417/52/53 | Satisfied at metadata split level. |
@@ -26,7 +26,7 @@ Verdict: not complete. The repo now has runnable scaffolds, real BONES-SEED smok
 | Implement M7 Isaac Lab eval | `scripts/eval_isaac.py --dry-run` scaffold | Scaffold only. Real Isaac Lab/G1 replay task pending. |
 | Write live logs | `docs/logs/implementation-log.md` | Satisfied for current implementation history. Keep updating during future work. |
 | Make process/status readable | `docs/milestones.md`, `docs/status/m1_m7_status.md`, this audit | Satisfied as a living tracking surface, not final completion. |
-| Verify current work | `PYTHONPATH=src:. python3 -m unittest discover -s tests` -> 57 tests OK; targeted `py_compile` -> OK; dry-run training -> OK with `samples_builder_is_formal=true`; `git diff --check` -> OK; source FK/contact and G1 MJCF FK/contact/self-collision-proxy smoke scans -> OK; representative 560-row scans and upper/lower-tail grouped threshold artifacts generated; four-way `merge-quality` refreshed curated representative artifacts with pair/provenance stats; manual review manifests generated; raw-debug artifact formal training check fails as intended | Current scaffold verified. Not evidence of full M1-M7 completion. |
+| Verify current work | `PYTHONPATH=src:. python3 -m unittest discover -s tests` -> 67 tests OK; targeted `py_compile` -> OK; dry-run training -> OK with `samples_builder_is_formal=true`; `git diff --check` -> OK; source FK/contact and G1 MJCF FK/contact/self-collision-proxy smoke scans -> OK; representative 560-row scans and upper/lower-tail grouped threshold artifacts generated; four-way `merge-quality` refreshed curated representative artifacts with pair/provenance stats; manual review manifests generated; raw-debug artifact formal training check fails as intended | Current scaffold verified. Not evidence of full M1-M7 completion. |
 
 ## Latest Verification Evidence
 
@@ -120,7 +120,7 @@ PYTHONPATH=src:. python3 scripts/train.py --config configs/baseline_mlp.yaml --d
 # samples_builder_is_formal=true, and train_refs=112768.
 
 PYTHONPATH=src:. python3 -m unittest discover -s tests
-# Ran 57 tests in 0.059s, OK.
+# Ran 67 tests in 0.072s, OK.
 
 PYTHONPATH=src:. python3 -m py_compile \
   src/online_retarget/data/thresholds.py \
@@ -148,6 +148,6 @@ git diff --check
 
 - Current base Python lacks torch/numpy, so real training and latency benchmarking cannot run in this environment.
 - Isaac Lab/G1 replay or tracking task binding is not implemented.
-- M2Q quality scanning is beyond first-N smoke scale for representative 560-row category/split samples, but no formal policy is promoted. Source FK/contact and G1 MJCF FK/contact/self-collision-proxy metrics, upper/lower-tail grouped threshold proposals, stratified scan support, diversity-loss summaries, and manual review manifests exist; full scans or accepted representative policy, acceleration/jerk and support-base/pelvis-height scans, calibrated category thresholds, completed review decisions, and simulator-backed labels remain pending.
+- M2Q quality scanning is beyond first-N smoke scale for representative 560-row category/split samples, but no formal policy is promoted. Source FK/contact, source/G1 acceleration-jerk metric outputs, and G1 MJCF FK/contact/self-collision-proxy metrics exist, along with upper/lower-tail grouped threshold proposals, stratified scan support, diversity-loss summaries, and manual review manifests. Full scans or accepted representative policy, support-base/pelvis-height scans, calibrated category thresholds, completed review decisions, and simulator-backed labels remain pending.
 - M3/M5 now have a 30-body smoke sample builder, but formal-scale extraction, normalization, and robot-state wiring remain incomplete.
 - WandB hooks, checkpoint report metadata, and automatic post-train offline eval are coded but not executed in a real torch training run yet.

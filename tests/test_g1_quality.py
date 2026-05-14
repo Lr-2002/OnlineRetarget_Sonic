@@ -102,6 +102,60 @@ class G1QualityTests(unittest.TestCase):
             self.assertEqual(report["sampling"]["mode"], "stratified_round_robin")
             self.assertEqual(report["sampling"]["sample_by"], ["category"])
 
+    def test_summarize_g1_rows_records_dynamic_metrics_without_default_flags(self):
+        row = summarize_g1_rows(
+            {"row_index": "dynamic"},
+            _csv_rows(
+                first_joint_values=[0.0, 0.1, 0.5, 1.5],
+                root_x_values=[0.0, 0.1, 0.5, 1.5],
+                root_z_values=[1.0, 1.0, 1.0, 1.0],
+            ),
+            G1QualityConfig(
+                fps=10.0,
+                max_joint_velocity=1000.0,
+                max_root_speed=1000.0,
+                root_position_scale=1.0,
+                joint_angle_scale=1.0,
+                root_rotation_scale=1.0,
+                max_start_end_root_speed=1000.0,
+            ),
+        )
+
+        self.assertGreater(row["max_abs_joint_acceleration"], 0.0)
+        self.assertGreater(row["max_root_acceleration"], 0.0)
+        self.assertGreater(row["max_root_jerk"], 0.0)
+        self.assertEqual(row["joint_acceleration_jump_rate"], 0.0)
+        self.assertEqual(row["root_acceleration_jump_rate"], 0.0)
+        self.assertEqual(row["root_jerk_jump_rate"], 0.0)
+        self.assertNotIn("g1_root_jerk_jump", row["quality_flags"])
+
+    def test_summarize_g1_rows_flags_dynamic_thresholds_when_configured(self):
+        row = summarize_g1_rows(
+            {"row_index": "dynamic-threshold"},
+            _csv_rows(
+                first_joint_values=[0.0, 0.1, 0.5, 1.5],
+                root_x_values=[0.0, 0.1, 0.5, 1.5],
+                root_z_values=[1.0, 1.0, 1.0, 1.0],
+            ),
+            G1QualityConfig(
+                fps=10.0,
+                max_joint_velocity=1000.0,
+                max_root_speed=1000.0,
+                max_joint_acceleration=1.0,
+                max_root_acceleration=1.0,
+                max_root_jerk=1.0,
+                root_position_scale=1.0,
+                joint_angle_scale=1.0,
+                root_rotation_scale=1.0,
+                max_start_end_root_speed=1000.0,
+            ),
+        )
+
+        self.assertEqual(row["quality_action"], "quarantine")
+        self.assertIn("g1_joint_acceleration_jump", row["quality_flags"])
+        self.assertIn("g1_root_acceleration_jump", row["quality_flags"])
+        self.assertIn("g1_root_jerk_jump", row["quality_flags"])
+
     def test_summarize_g1_rows_with_mjcf_contact_and_limits(self):
         with tempfile.TemporaryDirectory() as tmp:
             model_xml = Path(tmp) / "g1.xml"

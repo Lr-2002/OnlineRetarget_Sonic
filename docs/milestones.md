@@ -74,7 +74,7 @@ Required reading coverage:
 - NMR / CEPR: physics-aware human curation, humanoid motion curation, and RL physics refinement.
 - PHUMA / PhySINK: root jerk, support-base checks, foot-contact score, pelvis-height filtering, joint feasibility, grounding, and skating losses.
 - GMR / Retargeting Matters: retarget artifacts that degrade downstream BeyondMimic tracking, including foot sliding, penetration, self-intersections, floating, and scale-induced errors.
-- OmniTrack, OmniRetarget, and KDMR: physics-consistent references, hard kinematic/contact constraints, and multi-contact dynamic feasibility.
+- OmniTrack, OmniRetarget, KDMR, DynaRetarget, and SPIDER: physics-consistent references, hard kinematic/contact constraints, multi-contact dynamic feasibility, sampling-based simulator refinement, and contact-guided feasibility repair.
 - Contact/dynamics and foot-contact literature: foot contact detection, foot float, penetration, and skating definitions.
 
 Quality signals:
@@ -83,6 +83,7 @@ Quality signals:
 - G1 target motion: joint position/velocity/acceleration spikes, joint-limit margin, root discontinuity, FK body-height artifacts, foot float, foot slide, ground penetration, self-collision proxy, unstable start/end frames.
 - Pair quality: source-target length/fps mismatch, action/category mismatch, mirrored-pair leakage, actor/skeleton leakage, missing G1 target, motion provenance mismatch.
 - Physics quality: kinematic-only, filtered kinematic, simulator-replayed, RL-refined, or policy-generated target labels must not be mixed silently.
+- Refinement quality: simulator refine/replay success, partial success, failure mode, and compute budget become quality metadata once Isaac/MuJoCo refinement is available.
 
 Gate:
 
@@ -106,6 +107,7 @@ Submilestones:
 - M2Q.5 Threshold calibration: propose thresholds from distributions by category/actor/skeleton rather than one global hand-picked value.
 - M2Q.6 Diversity-loss review: quantify which actors, skeletons, packages, and motion classes are lost under each policy; reject policies that only produce "clean" but narrow data.
 - M2Q.7 Manual and simulator review: inspect worst clips by failure mode and later validate a representative subset in Isaac Lab/G1 tracking before formal training.
+- M2Q.8 Physics-refinement labels: once simulator replay/refinement exists, record refinement success/failure separately from kinematic quality and never overwrite kinematic G1 targets without provenance.
 
 ## M3 - Dataset Schema and Observation Contract
 

@@ -38,6 +38,9 @@ class G1QualityConfig:
     fps: float = 120.0
     max_joint_velocity: float = 20.0
     max_root_speed: float = 8.0
+    max_joint_acceleration: float | None = None
+    max_root_acceleration: float | None = None
+    max_root_jerk: float | None = None
     root_position_scale: float = 0.01
     joint_angle_scale: float = math.pi / 180.0
     root_rotation_scale: float = math.pi / 180.0
@@ -233,7 +236,10 @@ def summarize_g1_rows(
     prev_joints: list[float] | None = None
     prev_root: list[float] | None = None
     joint_velocity_samples: list[float] = []
+    joint_acceleration_samples: list[float] = []
     root_speed_samples: list[float] = []
+    root_acceleration_samples: list[float] = []
+    root_jerk_samples: list[float] = []
     start_end_root_speed_samples: list[float] = []
     root_heights: list[float] = []
     parsed_frames: list[tuple[list[float], list[float], list[float], int]] = []
@@ -263,11 +269,43 @@ def summarize_g1_rows(
             joint_velocity_samples.extend(
                 abs(cur - prev) * effective_fps for cur, prev in zip(typed_joints, prev_joints)
             )
+        if len(parsed_frames) >= 2:
+            previous_joints = parsed_frames[-1][0]
+            previous_previous_joints = parsed_frames[-2][0]
+            joint_acceleration_samples.extend(
+                abs(cur - (2.0 * prev) + prev_prev) * effective_fps * effective_fps
+                for cur, prev, prev_prev in zip(
+                    typed_joints, previous_joints, previous_previous_joints
+                )
+            )
         if prev_root is not None:
             root_speed = math.dist(typed_root, prev_root) * effective_fps
             root_speed_samples.append(root_speed)
             if sampled_index < config.start_end_frames or sampled_index >= len(sampled_rows) - config.start_end_frames:
                 start_end_root_speed_samples.append(root_speed)
+        if len(parsed_frames) >= 2:
+            previous_root = parsed_frames[-1][1]
+            previous_previous_root = parsed_frames[-2][1]
+            root_acceleration_samples.append(
+                _vector_second_difference_norm(typed_root, previous_root, previous_previous_root)
+                * effective_fps
+                * effective_fps
+            )
+        if len(parsed_frames) >= 3:
+            previous_root = parsed_frames[-1][1]
+            previous_previous_root = parsed_frames[-2][1]
+            previous_previous_previous_root = parsed_frames[-3][1]
+            root_jerk_samples.append(
+                _vector_third_difference_norm(
+                    typed_root,
+                    previous_root,
+                    previous_previous_root,
+                    previous_previous_previous_root,
+                )
+                * effective_fps
+                * effective_fps
+                * effective_fps
+            )
         root_heights.append(typed_root[2])
         parsed_frames.append((typed_joints, typed_root, typed_root_euler, sampled_index))
         prev_joints = typed_joints
@@ -281,8 +319,39 @@ def summarize_g1_rows(
         else 0.0
     )
     joint_jump_rate = _rate_above(joint_velocity_samples, config.max_joint_velocity)
+    max_abs_joint_acceleration = (
+        max(joint_acceleration_samples) if joint_acceleration_samples else 0.0
+    )
+    mean_abs_joint_acceleration = (
+        sum(joint_acceleration_samples) / len(joint_acceleration_samples)
+        if joint_acceleration_samples
+        else 0.0
+    )
+    joint_acceleration_jump_rate = (
+        _rate_above(joint_acceleration_samples, config.max_joint_acceleration)
+        if config.max_joint_acceleration is not None
+        else 0.0
+    )
     max_root_speed = max(root_speed_samples) if root_speed_samples else 0.0
     root_jump_rate = _rate_above(root_speed_samples, config.max_root_speed)
+    max_root_acceleration = max(root_acceleration_samples) if root_acceleration_samples else 0.0
+    mean_root_acceleration = (
+        sum(root_acceleration_samples) / len(root_acceleration_samples)
+        if root_acceleration_samples
+        else 0.0
+    )
+    root_acceleration_jump_rate = (
+        _rate_above(root_acceleration_samples, config.max_root_acceleration)
+        if config.max_root_acceleration is not None
+        else 0.0
+    )
+    max_root_jerk = max(root_jerk_samples) if root_jerk_samples else 0.0
+    mean_root_jerk = sum(root_jerk_samples) / len(root_jerk_samples) if root_jerk_samples else 0.0
+    root_jerk_jump_rate = (
+        _rate_above(root_jerk_samples, config.max_root_jerk)
+        if config.max_root_jerk is not None
+        else 0.0
+    )
     max_start_end_root_speed = (
         max(start_end_root_speed_samples) if start_end_root_speed_samples else 0.0
     )
@@ -311,6 +380,15 @@ def summarize_g1_rows(
         action = _worse_action(action, "quarantine")
     if root_jump_rate > 0.0:
         flags.append("root_discontinuity")
+        action = _worse_action(action, "quarantine")
+    if joint_acceleration_jump_rate > 0.0:
+        flags.append("g1_joint_acceleration_jump")
+        action = _worse_action(action, "quarantine")
+    if root_acceleration_jump_rate > 0.0:
+        flags.append("g1_root_acceleration_jump")
+        action = _worse_action(action, "quarantine")
+    if root_jerk_jump_rate > 0.0:
+        flags.append("g1_root_jerk_jump")
         action = _worse_action(action, "quarantine")
     if max_start_end_root_speed > config.max_start_end_root_speed:
         flags.append("g1_unstable_start_end")
@@ -350,8 +428,17 @@ def summarize_g1_rows(
         "max_abs_joint_velocity": round(max_abs_joint_velocity, 6),
         "mean_abs_joint_velocity": round(mean_abs_joint_velocity, 6),
         "joint_jump_rate": round(joint_jump_rate, 6),
+        "max_abs_joint_acceleration": round(max_abs_joint_acceleration, 6),
+        "mean_abs_joint_acceleration": round(mean_abs_joint_acceleration, 6),
+        "joint_acceleration_jump_rate": round(joint_acceleration_jump_rate, 6),
         "max_root_speed": round(max_root_speed, 6),
         "root_jump_rate": round(root_jump_rate, 6),
+        "max_root_acceleration": round(max_root_acceleration, 6),
+        "mean_root_acceleration": round(mean_root_acceleration, 6),
+        "root_acceleration_jump_rate": round(root_acceleration_jump_rate, 6),
+        "max_root_jerk": round(max_root_jerk, 6),
+        "mean_root_jerk": round(mean_root_jerk, 6),
+        "root_jerk_jump_rate": round(root_jerk_jump_rate, 6),
         "max_start_end_root_speed": round(max_start_end_root_speed, 6),
         "root_height_min": round(root_height_min, 6),
         "root_height_max": round(root_height_max, 6),
@@ -677,6 +764,12 @@ def _validate_config(config: G1QualityConfig) -> None:
         raise ValueError("max_joint_velocity must be positive")
     if config.max_root_speed <= 0:
         raise ValueError("max_root_speed must be positive")
+    if config.max_joint_acceleration is not None and config.max_joint_acceleration <= 0:
+        raise ValueError("max_joint_acceleration must be positive when set")
+    if config.max_root_acceleration is not None and config.max_root_acceleration <= 0:
+        raise ValueError("max_root_acceleration must be positive when set")
+    if config.max_root_jerk is not None and config.max_root_jerk <= 0:
+        raise ValueError("max_root_jerk must be positive when set")
     if config.root_position_scale <= 0:
         raise ValueError("root_position_scale must be positive")
     if config.joint_angle_scale <= 0:
@@ -731,6 +824,35 @@ def _rate_below(values: Sequence[float], threshold: float) -> float:
     if not values:
         return 0.0
     return sum(value < threshold for value in values) / len(values)
+
+
+def _vector_second_difference_norm(
+    current: Sequence[float],
+    previous: Sequence[float],
+    previous_previous: Sequence[float],
+) -> float:
+    return math.sqrt(
+        sum(
+            (cur - (2.0 * prev) + prev_prev) ** 2
+            for cur, prev, prev_prev in zip(current, previous, previous_previous)
+        )
+    )
+
+
+def _vector_third_difference_norm(
+    current: Sequence[float],
+    previous: Sequence[float],
+    previous_previous: Sequence[float],
+    previous_previous_previous: Sequence[float],
+) -> float:
+    return math.sqrt(
+        sum(
+            (cur - (3.0 * prev) + (3.0 * prev_prev) - prev_prev_prev) ** 2
+            for cur, prev, prev_prev, prev_prev_prev in zip(
+                current, previous, previous_previous, previous_previous_previous
+            )
+        )
+    )
 
 
 def _g1_fk_positions(
@@ -915,8 +1037,17 @@ def _empty_result(
         "max_abs_joint_velocity": 0.0,
         "mean_abs_joint_velocity": 0.0,
         "joint_jump_rate": 0.0,
+        "max_abs_joint_acceleration": 0.0,
+        "mean_abs_joint_acceleration": 0.0,
+        "joint_acceleration_jump_rate": 0.0,
         "max_root_speed": 0.0,
         "root_jump_rate": 0.0,
+        "max_root_acceleration": 0.0,
+        "mean_root_acceleration": 0.0,
+        "root_acceleration_jump_rate": 0.0,
+        "max_root_jerk": 0.0,
+        "mean_root_jerk": 0.0,
+        "root_jerk_jump_rate": 0.0,
         "max_start_end_root_speed": 0.0,
         "root_height_min": 0.0,
         "root_height_max": 0.0,
@@ -956,8 +1087,17 @@ def _metric_summary(rows: Sequence[Mapping[str, object]]) -> dict[str, dict[str,
         "max_abs_joint_velocity",
         "mean_abs_joint_velocity",
         "joint_jump_rate",
+        "max_abs_joint_acceleration",
+        "mean_abs_joint_acceleration",
+        "joint_acceleration_jump_rate",
         "max_root_speed",
         "root_jump_rate",
+        "max_root_acceleration",
+        "mean_root_acceleration",
+        "root_acceleration_jump_rate",
+        "max_root_jerk",
+        "mean_root_jerk",
+        "root_jerk_jump_rate",
         "max_start_end_root_speed",
         "root_height_min",
         "root_height_max",
