@@ -50,6 +50,7 @@ class G1QualityConfig:
     ground_height: float = 0.0
     contact_height_threshold: float = 0.04
     max_contact_slide_speed: float = 0.25
+    max_contact_skate_distance: float = 0.02
     max_mean_foot_clearance: float = 0.10
     max_penetration_depth: float = 0.03
     max_contact_correction_offset: float = 0.15
@@ -614,6 +615,7 @@ def _contact_stats(
     contact_flags = [clearance <= config.contact_height_threshold for clearance in foot_clearances]
     contact_frame_ratio = sum(contact_flags) / len(contact_flags) if contact_flags else 0.0
     contact_slide_speeds = _g1_contact_slide_speeds(fk_frames, model, config, fps)
+    contact_skate_distances = _g1_contact_skate_distances(fk_frames, model, config)
     support_distances = _g1_root_support_distances(fk_frames, model, config)
     min_foot_clearance = min(foot_clearances) if foot_clearances else 0.0
     mean_foot_clearance = sum(foot_clearances) / len(foot_clearances)
@@ -624,6 +626,8 @@ def _contact_stats(
     )
     max_contact_slide_speed = max(contact_slide_speeds) if contact_slide_speeds else 0.0
     contact_slide_rate = _rate_above(contact_slide_speeds, config.max_contact_slide_speed)
+    max_contact_skate_distance = max(contact_skate_distances) if contact_skate_distances else 0.0
+    contact_skate_rate = _rate_above(contact_skate_distances, config.max_contact_skate_distance)
     min_body_clearance = min(body_clearances) if body_clearances else 0.0
     return {
         "ground_height": config.ground_height,
@@ -636,6 +640,8 @@ def _contact_stats(
         "contact_frame_ratio": contact_frame_ratio,
         "max_contact_slide_speed": max_contact_slide_speed,
         "contact_slide_rate": contact_slide_rate,
+        "max_contact_skate_distance": max_contact_skate_distance,
+        "contact_skate_rate": contact_skate_rate,
         "support_frame_ratio": len(support_distances) / len(fk_frames) if fk_frames else 0.0,
         "mean_root_support_distance": (
             sum(support_distances) / len(support_distances) if support_distances else 0.0
@@ -782,6 +788,52 @@ def _g1_root_support_distances(
             continue
         distances.append(_point_to_support_distance((root[0], root[1]), support_points))
     return distances
+
+
+def _g1_contact_skate_distances(
+    fk_frames: Sequence[Mapping[str, Sequence[tuple[float, float, float]]]],
+    model: G1KinematicModel,
+    config: G1QualityConfig,
+) -> list[float]:
+    distances: list[float] = []
+    active_starts: dict[str, tuple[float, float, float]] = {}
+    active_last: dict[str, tuple[float, float, float]] = {}
+    for frame in fk_frames:
+        active_bodies: set[str] = set()
+        for body in model.foot_body_names:
+            points = frame.get(body, ())
+            if not points:
+                continue
+            low = min(points, key=lambda point: point[2])
+            in_contact = low[2] - config.ground_height <= config.contact_height_threshold
+            if not in_contact:
+                if body in active_starts:
+                    distances.append(
+                        _g1_horizontal_distance(
+                            active_starts.pop(body),
+                            active_last.pop(body, low),
+                        )
+                    )
+                continue
+            active_bodies.add(body)
+            active_starts.setdefault(body, low)
+            active_last[body] = low
+        for body in tuple(active_starts):
+            if body not in active_bodies and body not in frame:
+                active_starts.pop(body)
+                active_last.pop(body, None)
+    for body, start in active_starts.items():
+        end = active_last.get(body)
+        if end is not None:
+            distances.append(_g1_horizontal_distance(start, end))
+    return distances
+
+
+def _g1_horizontal_distance(
+    left: tuple[float, float, float],
+    right: tuple[float, float, float],
+) -> float:
+    return math.dist((left[0], left[1]), (right[0], right[1]))
 
 
 def _contact_correction_candidate(
@@ -939,6 +991,8 @@ def _validate_config(config: G1QualityConfig) -> None:
         raise ValueError("contact_height_threshold must be non-negative")
     if config.max_contact_slide_speed <= 0:
         raise ValueError("max_contact_slide_speed must be positive")
+    if config.max_contact_skate_distance <= 0:
+        raise ValueError("max_contact_skate_distance must be positive")
     if config.max_mean_foot_clearance < 0:
         raise ValueError("max_mean_foot_clearance must be non-negative")
     if config.max_penetration_depth < 0:
@@ -1203,6 +1257,8 @@ def _empty_model_metrics() -> dict[str, object]:
         "contact_frame_ratio": 0.0,
         "max_contact_slide_speed": 0.0,
         "contact_slide_rate": 0.0,
+        "max_contact_skate_distance": 0.0,
+        "contact_skate_rate": 0.0,
         "support_frame_ratio": 0.0,
         "mean_root_support_distance": 0.0,
         "max_root_support_distance": 0.0,
@@ -1308,6 +1364,8 @@ def _metric_summary(rows: Sequence[Mapping[str, object]]) -> dict[str, dict[str,
         "contact_frame_ratio",
         "max_contact_slide_speed",
         "contact_slide_rate",
+        "max_contact_skate_distance",
+        "contact_skate_rate",
         "support_frame_ratio",
         "mean_root_support_distance",
         "max_root_support_distance",

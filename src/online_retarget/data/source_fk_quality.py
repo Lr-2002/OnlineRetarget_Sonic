@@ -47,6 +47,7 @@ class SourceFKQualityConfig:
     ground_percentile: float = 0.05
     contact_height_threshold: float = 0.04
     max_contact_slide_speed: float = 0.25
+    max_contact_skate_distance: float = 0.02
     max_mean_foot_clearance: float = 0.10
     max_penetration_depth: float = 0.03
     max_contact_correction_offset: float = 0.15
@@ -273,6 +274,12 @@ def summarize_source_fk_motion(
         config,
         fps=effective_fps,
     )
+    contact_skate_distances = _contact_skate_distances(
+        frames,
+        present_feet,
+        ground_height,
+        config,
+    )
     support_distances = _root_support_distances(frames, present_feet, ground_height, config)
 
     mean_foot_clearance = _mean(foot_clearances)
@@ -287,6 +294,8 @@ def summarize_source_fk_motion(
     )
     max_contact_slide_speed = max(contact_slide_speeds) if contact_slide_speeds else 0.0
     contact_slide_rate = _rate_above(contact_slide_speeds, config.max_contact_slide_speed)
+    max_contact_skate_distance = max(contact_skate_distances) if contact_skate_distances else 0.0
+    contact_skate_rate = _rate_above(contact_skate_distances, config.max_contact_skate_distance)
     root_height_min = min(root_heights) if root_heights else 0.0
     root_height_max = max(root_heights) if root_heights else 0.0
     mean_root_height = _mean(root_heights)
@@ -333,6 +342,8 @@ def summarize_source_fk_motion(
         "contact_frame_ratio": round(contact_frame_ratio, 6),
         "max_contact_slide_speed": round(max_contact_slide_speed, 6),
         "contact_slide_rate": round(contact_slide_rate, 6),
+        "max_contact_skate_distance": round(max_contact_skate_distance, 6),
+        "contact_skate_rate": round(contact_skate_rate, 6),
         "quality_action": action,
         "quality_flags": "|".join(flags),
     }
@@ -389,6 +400,50 @@ def _root_support_distances(
             continue
         distances.append(_point_to_support_distance((root[0], root[2]), support_points))
     return distances
+
+
+def _contact_skate_distances(
+    frames: Sequence[Mapping[str, Sequence[float]]],
+    foot_bodies: Sequence[str],
+    ground_height: float,
+    config: SourceFKQualityConfig,
+) -> list[float]:
+    distances: list[float] = []
+    active_starts: dict[str, Sequence[float]] = {}
+    active_last: dict[str, Sequence[float]] = {}
+    for frame in frames:
+        active_bodies: set[str] = set()
+        for body in foot_bodies:
+            position = frame.get(body)
+            if position is None:
+                continue
+            in_contact = position[1] - ground_height <= config.contact_height_threshold
+            if not in_contact:
+                if body in active_starts:
+                    distances.append(
+                        _horizontal_distance(
+                            active_starts.pop(body),
+                            active_last.pop(body, position),
+                        )
+                    )
+                continue
+            active_bodies.add(body)
+            active_starts.setdefault(body, position)
+            active_last[body] = position
+        for body in tuple(active_starts):
+            if body not in active_bodies and body not in frame:
+                active_starts.pop(body)
+                active_last.pop(body, None)
+    if frames:
+        for body, start in active_starts.items():
+            end = active_last.get(body)
+            if end is not None:
+                distances.append(_horizontal_distance(start, end))
+    return distances
+
+
+def _horizontal_distance(left: Sequence[float], right: Sequence[float]) -> float:
+    return math.dist((left[0], left[2]), (right[0], right[2]))
 
 
 def _contact_correction_candidate(
@@ -538,6 +593,8 @@ def _empty_result(
         "contact_frame_ratio": 0.0,
         "max_contact_slide_speed": 0.0,
         "contact_slide_rate": 0.0,
+        "max_contact_skate_distance": 0.0,
+        "contact_skate_rate": 0.0,
         "quality_action": "exclude",
         "quality_flags": flag,
     }
@@ -589,6 +646,8 @@ def _validate_config(config: SourceFKQualityConfig) -> None:
         raise ValueError("contact_height_threshold must be non-negative")
     if config.max_contact_slide_speed <= 0:
         raise ValueError("max_contact_slide_speed must be positive")
+    if config.max_contact_skate_distance <= 0:
+        raise ValueError("max_contact_skate_distance must be positive")
     if config.max_mean_foot_clearance < 0:
         raise ValueError("max_mean_foot_clearance must be non-negative")
     if config.max_penetration_depth < 0:
@@ -633,6 +692,8 @@ def _metric_summary(rows: Sequence[Mapping[str, object]]) -> dict[str, dict[str,
         "contact_frame_ratio",
         "max_contact_slide_speed",
         "contact_slide_rate",
+        "max_contact_skate_distance",
+        "contact_skate_rate",
     )
     return {metric: _summarize_values(_numeric_values(rows, metric)) for metric in metrics}
 

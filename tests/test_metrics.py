@@ -56,8 +56,37 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(metrics["foot_float_rate"], 1.0)
         self.assertEqual(metrics["contact_slide_rate"], 1.0)
         self.assertEqual(metrics["max_contact_slide_speed"], 2.0)
+        self.assertEqual(metrics["contact_skate_rate"], 1.0)
+        self.assertEqual(metrics["max_contact_skate_distance"], 0.2)
         self.assertEqual(metrics["ground_penetration_rate"], 1 / 3)
         self.assertEqual(metrics["penetration_depth"], 0.01)
+
+    def test_contact_artifact_metrics_separates_slow_skate_from_speed_slide(self):
+        target = [
+            [[0.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0]],
+        ]
+        predicted = [
+            [[0.0, 0.0, 0.0]],
+            [[0.015, 0.0, 0.0]],
+            [[0.03, 0.0, 0.0]],
+        ]
+
+        metrics = contact_artifact_metrics(
+            predicted,
+            fps=1.0,
+            foot_indices=(0,),
+            contact_reference=target,
+            contact_height_threshold=0.04,
+            max_contact_slide_speed=0.25,
+            max_contact_skate_distance=0.02,
+        )
+
+        self.assertEqual(metrics["contact_slide_rate"], 0.0)
+        self.assertEqual(metrics["max_contact_slide_speed"], 0.015)
+        self.assertEqual(metrics["contact_skate_rate"], 1.0)
+        self.assertEqual(metrics["max_contact_skate_distance"], 0.03)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ class EvaluationConfig:
     up_axis: int | str = 2
     contact_height_threshold: float = 0.04
     max_contact_slide_speed: float = 0.25
+    max_contact_skate_distance: float = 0.02
     failure_metric: str = "joint_rmse"
     max_failures: int = 50
     run_name: str = "offline_eval"
@@ -135,6 +136,7 @@ def _sample_metrics(sample: Mapping[str, object], config: EvaluationConfig) -> d
                         up_axis=config.up_axis,
                         contact_height_threshold=config.contact_height_threshold,
                         max_contact_slide_speed=config.max_contact_slide_speed,
+                        max_contact_skate_distance=config.max_contact_skate_distance,
                         contact_reference=target_body_pos,
                     ).items()
                 }

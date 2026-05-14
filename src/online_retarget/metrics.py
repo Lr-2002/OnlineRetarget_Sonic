@@ -99,6 +99,7 @@ def contact_artifact_metrics(
     up_axis: int | str = 2,
     contact_height_threshold: float = 0.04,
     max_contact_slide_speed: float = 0.25,
+    max_contact_skate_distance: float = 0.02,
     contact_reference: Motion3D | None = None,
 ) -> dict[str, float]:
     """Foot contact artifacts for motions shaped T x J x 3.
@@ -115,6 +116,7 @@ def contact_artifact_metrics(
         ground_height=ground_height,
         contact_height_threshold=contact_height_threshold,
         max_contact_slide_speed=max_contact_slide_speed,
+        max_contact_skate_distance=max_contact_skate_distance,
         contact_reference=contact_reference,
     )
     axis = _axis_index(up_axis)
@@ -150,12 +152,15 @@ def contact_artifact_metrics(
     slide_samples = 0
     slide_violations = 0
     max_slide_speed = 0.0
-    for prev_frame, cur_frame, prev_ref_frame, cur_ref_frame in zip(
+    skate_distances: list[float] = []
+    active_contact_start: dict[int, Vector] = {}
+    active_contact_last: dict[int, Vector] = {}
+    for frame_index, (prev_frame, cur_frame, prev_ref_frame, cur_ref_frame) in enumerate(zip(
         body_positions,
         body_positions[1:],
         reference,
         reference[1:],
-    ):
+    )):
         for foot_index in foot_indices:
             prev_contact = (
                 _point_clearance(prev_ref_frame[foot_index], axis, ground_height)
@@ -166,7 +171,21 @@ def contact_artifact_metrics(
                 <= contact_height_threshold
             )
             if not (prev_contact and cur_contact):
+                if prev_contact and foot_index in active_contact_start:
+                    skate_distances.append(
+                        _horizontal_distance(
+                            active_contact_start.pop(foot_index),
+                            active_contact_last.pop(foot_index, prev_frame[foot_index]),
+                            horizontal_axes,
+                        )
+                    )
+                if cur_contact:
+                    active_contact_start[foot_index] = cur_frame[foot_index]
+                    active_contact_last[foot_index] = cur_frame[foot_index]
                 continue
+            if foot_index not in active_contact_start:
+                active_contact_start[foot_index] = prev_frame[foot_index]
+            active_contact_last[foot_index] = cur_frame[foot_index]
             speed = _horizontal_speed(
                 prev_frame[foot_index],
                 cur_frame[foot_index],
@@ -176,12 +195,28 @@ def contact_artifact_metrics(
             max_slide_speed = max(max_slide_speed, speed)
             slide_violations += speed > max_contact_slide_speed
             slide_samples += 1
+            if frame_index == len(body_positions) - 2:
+                skate_distances.append(
+                    _horizontal_distance(
+                        active_contact_start.pop(foot_index),
+                        cur_frame[foot_index],
+                        horizontal_axes,
+                    )
+                )
+
+    for foot_index, start_position in active_contact_start.items():
+        end_position = active_contact_last.get(foot_index, body_positions[-1][foot_index])
+        skate_distances.append(_horizontal_distance(start_position, end_position, horizontal_axes))
+
+    skate_violations = sum(distance > max_contact_skate_distance for distance in skate_distances)
 
     return {
         "contact_frame_ratio": _zero_mean(float(contact_samples), total_foot_samples),
         "foot_float_rate": _zero_mean(float(foot_float_samples), contact_samples),
         "contact_slide_rate": _zero_mean(float(slide_violations), slide_samples),
         "max_contact_slide_speed": max_slide_speed,
+        "contact_skate_rate": _zero_mean(float(skate_violations), len(skate_distances)),
+        "max_contact_skate_distance": max(skate_distances) if skate_distances else 0.0,
         "mean_foot_clearance": _zero_mean(foot_clearance_total, total_foot_samples),
         "mean_contact_foot_clearance": _zero_mean(contact_clearance_total, contact_samples),
         "ground_penetration_rate": _zero_mean(float(penetration_frames), len(body_positions)),
@@ -210,6 +245,7 @@ def _validate_contact_inputs(
     ground_height: float,
     contact_height_threshold: float,
     max_contact_slide_speed: float,
+    max_contact_skate_distance: float,
     contact_reference: Motion3D | None,
 ) -> None:
     if fps <= 0:
@@ -220,6 +256,8 @@ def _validate_contact_inputs(
         raise ValueError("contact_height_threshold must be non-negative")
     if max_contact_slide_speed <= 0:
         raise ValueError("max_contact_slide_speed must be positive")
+    if max_contact_skate_distance <= 0:
+        raise ValueError("max_contact_skate_distance must be positive")
     if not foot_indices:
         raise ValueError("foot_indices must not be empty")
     if not body_positions:
@@ -257,8 +295,12 @@ def _point_clearance(point: Vector, axis: int, ground_height: float) -> float:
 
 
 def _horizontal_speed(left: Vector, right: Vector, horizontal_axes: Sequence[int], fps: float) -> float:
+    return _horizontal_distance(left, right, horizontal_axes) * fps
+
+
+def _horizontal_distance(left: Vector, right: Vector, horizontal_axes: Sequence[int]) -> float:
     squared = sum((right[index] - left[index]) ** 2 for index in horizontal_axes)
-    return math.sqrt(squared) * fps
+    return math.sqrt(squared)
 
 
 def _safe_mean(total: float, count: int) -> float:

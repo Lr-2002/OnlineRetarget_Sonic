@@ -50,6 +50,31 @@ class SourceFKQualityTests(unittest.TestCase):
         self.assertEqual(row["quality_action"], "downweight")
         self.assertIn("source_foot_slide", row["quality_flags"])
         self.assertGreater(row["max_contact_slide_speed"], 0.5)
+        self.assertEqual(row["contact_skate_rate"], 1.0)
+        self.assertEqual(row["max_contact_skate_distance"], 2.0)
+
+    def test_summarize_source_fk_motion_records_slow_contact_skate_without_flag(self):
+        motion = parse_bvh_motion(
+            _bvh_text(left_foot_x=[0.0, 0.015, 0.03], left_foot_y=[0.0, 0.0, 0.0])
+        )
+
+        row = summarize_source_fk_motion(
+            {"row_index": "slow-skate"},
+            motion,
+            SourceFKQualityConfig(
+                fps=1.0,
+                position_scale=1.0,
+                ground_height=0.0,
+                max_contact_slide_speed=0.25,
+                max_contact_skate_distance=0.02,
+            ),
+        )
+
+        self.assertEqual(row["quality_action"], "keep")
+        self.assertNotIn("source_foot_slide", row["quality_flags"])
+        self.assertEqual(row["contact_slide_rate"], 0.0)
+        self.assertEqual(row["contact_skate_rate"], 1.0)
+        self.assertEqual(row["max_contact_skate_distance"], 0.03)
 
     def test_summarize_source_fk_motion_derives_fps_from_bvh_frame_time(self):
         motion = parse_bvh_motion(_bvh_text(left_foot_x=[0.0, 1.0, 2.0], left_foot_y=[0.0, 0.0, 0.0]))

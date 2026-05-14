@@ -93,6 +93,7 @@ M2Q must be completed before formal training. The concrete data filtering plan i
 8. Motion filtering is a formal M2Q gate: source quality, G1 target quality, pair consistency, and physics provenance must be measured before formal training.
 9. Simulator-refined or sampling-refined trajectories are not replacements for kinematic labels; they are separate target provenance and must carry refinement success/failure metadata.
 10. Behavior-balanced review is a necessary complement to metric-worst review; TMR/NMR-style clustering is a future option, but metadata/category balancing is the current no-dependency path.
+11. Contact-skate displacement is now measured separately from speed-based foot slide. The former is a paper-aligned metric-only diagnostic until contact windows and simulator labels are calibrated.
 
 ## Baseline Observation Candidate
 

@@ -65,6 +65,8 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(summary["by_quality_flag"]["none"]["joint_rmse"], 0.0)
         self.assertEqual(summary["by_quality_flag"]["joint_velocity_jump"]["predicted_foot_float_rate"], 1.0)
         self.assertIn("predicted_contact_slide_rate", per_sample_rows[0])
+        self.assertEqual(summary["by_quality_flag"]["joint_velocity_jump"]["predicted_contact_skate_rate"], 1.0)
+        self.assertIn("predicted_max_contact_skate_distance", per_sample_rows[0])
         self.assertEqual(len(failure_rows), 2)
         self.assertIn("s2", failure_rows[1])
 

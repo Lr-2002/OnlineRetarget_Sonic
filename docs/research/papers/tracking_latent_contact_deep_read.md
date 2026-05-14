@@ -47,7 +47,7 @@ Current scanner fields already map cleanly:
 | --- | --- | --- |
 | Contact Dynamics floating | contact foot height `> 0.03 m` above ground | `mean_foot_clearance`, `max_foot_clearance`, future `contact_float_rate_3cm` if we add per-frame contact labels |
 | Contact Dynamics penetration | foot joint height `< -0.03 m` below ground | `penetration_depth`, current threshold `0.03 m` |
-| Contact Dynamics skate | contact foot horizontal displacement `> 0.02 m` while in contact | current `contact_slide_rate` uses speed threshold `0.25 m/s`; add optional displacement-over-contact-window metric if contact windows are stable |
+| Contact Dynamics skate | contact foot horizontal displacement `> 0.02 m` while in contact | `contact_skate_rate` and `max_contact_skate_distance` are now metric-only fields in source FK, G1 FK, and M4 offline eval; existing `contact_slide_rate` remains the speed-threshold gate |
 | BeyondMimic/PHC body tracking | body position/orientation/linear velocity/angular velocity exponential rewards | M4 has MPJPE/body position scaffold; simulator M7 should add body orientation and velocity errors |
 | BeyondMimic/PHC smoothness | previous action/action-rate and energy penalty | M4 can report joint velocity/acceleration/jump; M7 should report action-rate and torque/energy where simulator data exists |
 

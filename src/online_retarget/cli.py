@@ -114,6 +114,7 @@ def main() -> None:
     quality.add_argument("--ground-height", type=float, default=0.0)
     quality.add_argument("--contact-height-threshold", type=float, default=0.04)
     quality.add_argument("--max-contact-slide-speed", type=float, default=0.25)
+    quality.add_argument("--max-contact-skate-distance", type=float, default=0.02)
     quality.add_argument("--max-mean-foot-clearance", type=float, default=0.10)
     quality.add_argument("--max-penetration-depth", type=float, default=0.03)
     quality.add_argument(
@@ -197,6 +198,7 @@ def main() -> None:
     source_fk_quality.add_argument("--ground-percentile", type=float, default=0.05)
     source_fk_quality.add_argument("--contact-height-threshold", type=float, default=0.04)
     source_fk_quality.add_argument("--max-contact-slide-speed", type=float, default=0.25)
+    source_fk_quality.add_argument("--max-contact-skate-distance", type=float, default=0.02)
     source_fk_quality.add_argument("--max-mean-foot-clearance", type=float, default=0.10)
     source_fk_quality.add_argument("--max-penetration-depth", type=float, default=0.03)
     source_fk_quality.add_argument(
@@ -554,6 +556,7 @@ def main() -> None:
     offline_eval.add_argument("--up-axis", default=2)
     offline_eval.add_argument("--contact-height-threshold", type=float, default=0.04)
     offline_eval.add_argument("--max-contact-slide-speed", type=float, default=0.25)
+    offline_eval.add_argument("--max-contact-skate-distance", type=float, default=0.02)
     offline_eval.add_argument("--failure-metric", default="joint_rmse")
     offline_eval.add_argument("--max-failures", type=int, default=50)
 
@@ -653,6 +656,7 @@ def _scan_g1_quality(args: argparse.Namespace) -> None:
             ground_height=args.ground_height,
             contact_height_threshold=args.contact_height_threshold,
             max_contact_slide_speed=args.max_contact_slide_speed,
+            max_contact_skate_distance=args.max_contact_skate_distance,
             max_mean_foot_clearance=args.max_mean_foot_clearance,
             max_penetration_depth=args.max_penetration_depth,
             max_contact_correction_offset=args.max_contact_correction_offset,
@@ -710,6 +714,7 @@ def _scan_source_fk_quality(args: argparse.Namespace) -> None:
             ground_percentile=args.ground_percentile,
             contact_height_threshold=args.contact_height_threshold,
             max_contact_slide_speed=args.max_contact_slide_speed,
+            max_contact_skate_distance=args.max_contact_skate_distance,
             max_mean_foot_clearance=args.max_mean_foot_clearance,
             max_penetration_depth=args.max_penetration_depth,
             max_contact_correction_offset=args.max_contact_correction_offset,
@@ -986,6 +991,7 @@ def _offline_eval(args: argparse.Namespace) -> None:
             up_axis=args.up_axis,
             contact_height_threshold=args.contact_height_threshold,
             max_contact_slide_speed=args.max_contact_slide_speed,
+            max_contact_skate_distance=args.max_contact_skate_distance,
             failure_metric=args.failure_metric,
             max_failures=args.max_failures,
             run_name=args.run_name,
