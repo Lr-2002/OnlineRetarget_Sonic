@@ -32,6 +32,7 @@ class ReviewManifestTests(unittest.TestCase):
         self.assertIn("parser", families)
         self.assertIn("foot_slide", families)
         self.assertIn("penetration", families)
+        self.assertIn("contact_correction", families)
         self.assertIn("joint_limit", families)
         self.assertIn("self_collision", families)
         self.assertEqual(result.family_counts["parser"], 1)
@@ -39,6 +40,16 @@ class ReviewManifestTests(unittest.TestCase):
         self.assertEqual(items[0]["motion_paths"]["source_bvh"], "soma/a.bvh")
         self.assertEqual(items[0]["motion_paths"]["g1_csv"], "g1/a.csv")
         self.assertIn("review_fields", items[0])
+        correction_item = next(item for item in items if item["failure_family"] == "contact_correction")
+        self.assertEqual(correction_item["metrics"]["g1_contact_correction_candidate"], "1")
+        self.assertEqual(
+            correction_item["metrics"]["g1_contact_correction_reason"],
+            "vertical_penetration_offset",
+        )
+        self.assertEqual(
+            correction_item["metrics"]["source_fk_contact_correction_reason"],
+            "vertical_penetration_offset",
+        )
         self.assertIn("Manual Motion Review Manifest", markdown)
         self.assertIn("Recommended action", markdown)
 
@@ -60,6 +71,10 @@ def _write_worst_clips(path: Path) -> None:
             "source_max_abs_channel_velocity": "",
             "g1_joint_limit_violation_rate": "",
             "g1_penetration_depth": "",
+            "g1_contact_correction_candidate": "",
+            "g1_contact_correction_reason": "",
+            "g1_contact_correction_offset": "",
+            "g1_contact_correction_abs_offset": "",
             "g1_contact_slide_rate": "",
         },
         {
@@ -77,7 +92,15 @@ def _write_worst_clips(path: Path) -> None:
             "source_max_abs_channel_velocity": "10.0",
             "g1_joint_limit_violation_rate": "0.5",
             "g1_penetration_depth": "0.07",
+            "g1_contact_correction_candidate": "1",
+            "g1_contact_correction_reason": "vertical_penetration_offset",
+            "g1_contact_correction_offset": "0.07",
+            "g1_contact_correction_abs_offset": "0.07",
             "g1_contact_slide_rate": "0.25",
+            "source_fk_contact_correction_candidate": "1",
+            "source_fk_contact_correction_reason": "vertical_penetration_offset",
+            "source_fk_contact_correction_offset": "0.02",
+            "source_fk_contact_correction_abs_offset": "0.02",
         },
         {
             "row_index": "3",

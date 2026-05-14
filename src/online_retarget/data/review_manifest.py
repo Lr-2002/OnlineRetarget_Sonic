@@ -17,6 +17,7 @@ FAMILY_KEYWORDS = {
     "jump": ("jump", "discontinuity", "unstable_start_end"),
     "foot_slide": ("foot_slide", "slide"),
     "penetration": ("penetration", "ground_penetration"),
+    "contact_correction": ("contact_correction",),
     "float": ("float", "low_foot_contact"),
     "joint_limit": ("joint_limit",),
     "self_collision": ("self_collision", "self_intersection"),
@@ -97,7 +98,7 @@ def _review_items(
     items: list[dict[str, object]] = []
     for row in rows:
         flags = _split_flags(row.get("merged_quality_flags", ""))
-        families = _families_for_flags(flags)
+        families = _families_for_row(row, flags)
         if not families:
             families = ("other",)
         for family in families:
@@ -153,6 +154,10 @@ def _review_metrics(row: Mapping[str, str]) -> dict[str, str]:
         "source_fk_max_contact_slide_speed",
         "source_fk_mean_foot_clearance",
         "source_fk_penetration_depth",
+        "source_fk_contact_correction_candidate",
+        "source_fk_contact_correction_reason",
+        "source_fk_contact_correction_offset",
+        "source_fk_contact_correction_abs_offset",
         "g1_joint_jump_rate",
         "g1_max_abs_joint_velocity",
         "g1_joint_limit_violation_rate",
@@ -162,6 +167,10 @@ def _review_metrics(row: Mapping[str, str]) -> dict[str, str]:
         "g1_max_contact_slide_speed",
         "g1_mean_foot_clearance",
         "g1_penetration_depth",
+        "g1_contact_correction_candidate",
+        "g1_contact_correction_reason",
+        "g1_contact_correction_offset",
+        "g1_contact_correction_abs_offset",
         "g1_self_collision_proxy_rate",
         "g1_min_self_collision_distance",
         "g1_mean_min_self_collision_distance",
@@ -169,13 +178,25 @@ def _review_metrics(row: Mapping[str, str]) -> dict[str, str]:
     return {key: row.get(key, "") for key in keys if row.get(key, "") != ""}
 
 
-def _families_for_flags(flags: Sequence[str]) -> tuple[str, ...]:
+def _families_for_row(row: Mapping[str, str], flags: Sequence[str]) -> tuple[str, ...]:
     families = []
     joined = " ".join(flags)
     for family, keywords in FAMILY_KEYWORDS.items():
         if any(keyword in joined for keyword in keywords):
             families.append(family)
-    return tuple(families)
+    if _is_contact_correction_candidate(row):
+        families.append("contact_correction")
+    return tuple(dict.fromkeys(families))
+
+
+def _is_contact_correction_candidate(row: Mapping[str, str]) -> bool:
+    for key in ("source_fk_contact_correction_candidate", "g1_contact_correction_candidate"):
+        try:
+            if float(row.get(key, "") or 0.0) > 0.0:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def _markdown_report(

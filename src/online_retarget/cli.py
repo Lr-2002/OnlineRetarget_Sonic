@@ -100,6 +100,12 @@ def main() -> None:
     quality.add_argument("--max-contact-slide-speed", type=float, default=0.25)
     quality.add_argument("--max-mean-foot-clearance", type=float, default=0.10)
     quality.add_argument("--max-penetration-depth", type=float, default=0.03)
+    quality.add_argument(
+        "--max-contact-correction-offset",
+        type=float,
+        default=0.15,
+        help="Metric-only cap for vertical contact-mask correction candidate offsets.",
+    )
     quality.add_argument("--min-contact-frame-ratio", type=float, default=0.05)
     quality.add_argument("--max-joint-limit-violation-rate", type=float, default=0.0)
     quality.add_argument("--start-end-frames", type=int, default=10)
@@ -177,6 +183,12 @@ def main() -> None:
     source_fk_quality.add_argument("--max-contact-slide-speed", type=float, default=0.25)
     source_fk_quality.add_argument("--max-mean-foot-clearance", type=float, default=0.10)
     source_fk_quality.add_argument("--max-penetration-depth", type=float, default=0.03)
+    source_fk_quality.add_argument(
+        "--max-contact-correction-offset",
+        type=float,
+        default=0.15,
+        help="Metric-only cap for vertical contact-mask correction candidate offsets.",
+    )
     source_fk_quality.add_argument("--min-contact-frame-ratio", type=float, default=0.05)
 
     pair_quality = subparsers.add_parser(
@@ -378,6 +390,7 @@ def _scan_g1_quality(args: argparse.Namespace) -> None:
             max_contact_slide_speed=args.max_contact_slide_speed,
             max_mean_foot_clearance=args.max_mean_foot_clearance,
             max_penetration_depth=args.max_penetration_depth,
+            max_contact_correction_offset=args.max_contact_correction_offset,
             min_contact_frame_ratio=args.min_contact_frame_ratio,
             max_joint_limit_violation_rate=args.max_joint_limit_violation_rate,
             start_end_frames=args.start_end_frames,
@@ -434,6 +447,7 @@ def _scan_source_fk_quality(args: argparse.Namespace) -> None:
             max_contact_slide_speed=args.max_contact_slide_speed,
             max_mean_foot_clearance=args.max_mean_foot_clearance,
             max_penetration_depth=args.max_penetration_depth,
+            max_contact_correction_offset=args.max_contact_correction_offset,
             min_contact_frame_ratio=args.min_contact_frame_ratio,
         ),
         limit=limit,

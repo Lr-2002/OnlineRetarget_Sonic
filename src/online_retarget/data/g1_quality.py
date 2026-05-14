@@ -52,6 +52,7 @@ class G1QualityConfig:
     max_contact_slide_speed: float = 0.25
     max_mean_foot_clearance: float = 0.10
     max_penetration_depth: float = 0.03
+    max_contact_correction_offset: float = 0.15
     min_contact_frame_ratio: float = 0.05
     max_joint_limit_violation_rate: float = 0.0
     start_end_frames: int = 10
@@ -451,7 +452,7 @@ def summarize_g1_rows(
     }
     if model is not None:
         result.update(_rounded_dict(joint_limit_stats))
-        result.update(_rounded_dict(contact_stats))
+        result.update(_rounded_contact_stats(contact_stats))
         result.update(_rounded_dict(self_collision_stats))
     else:
         result.update(_empty_model_metrics())
@@ -610,16 +611,24 @@ def _contact_stats(
     contact_frame_ratio = sum(contact_flags) / len(contact_flags) if contact_flags else 0.0
     contact_slide_speeds = _g1_contact_slide_speeds(fk_frames, model, config, fps)
     support_distances = _g1_root_support_distances(fk_frames, model, config)
+    min_foot_clearance = min(foot_clearances) if foot_clearances else 0.0
+    mean_foot_clearance = sum(foot_clearances) / len(foot_clearances)
+    contact_correction = _contact_correction_candidate(
+        min_foot_clearance=min_foot_clearance,
+        mean_foot_clearance=mean_foot_clearance,
+        config=config,
+    )
     max_contact_slide_speed = max(contact_slide_speeds) if contact_slide_speeds else 0.0
     contact_slide_rate = _rate_above(contact_slide_speeds, config.max_contact_slide_speed)
     min_body_clearance = min(body_clearances) if body_clearances else 0.0
     return {
         "ground_height": config.ground_height,
         "min_foot_height": min(foot_heights),
-        "mean_foot_clearance": sum(foot_clearances) / len(foot_clearances),
+        "mean_foot_clearance": mean_foot_clearance,
         "max_foot_clearance": max(foot_clearances),
         "min_body_clearance": min_body_clearance,
         "penetration_depth": max(0.0, -min_body_clearance),
+        **contact_correction,
         "contact_frame_ratio": contact_frame_ratio,
         "max_contact_slide_speed": max_contact_slide_speed,
         "contact_slide_rate": contact_slide_rate,
@@ -771,6 +780,30 @@ def _g1_root_support_distances(
     return distances
 
 
+def _contact_correction_candidate(
+    min_foot_clearance: float,
+    mean_foot_clearance: float,
+    config: G1QualityConfig,
+) -> dict[str, object]:
+    reason = ""
+    offset = 0.0
+    if mean_foot_clearance > config.max_mean_foot_clearance:
+        reason = "vertical_float_offset"
+        offset = -mean_foot_clearance
+    elif -min_foot_clearance > config.max_penetration_depth:
+        reason = "vertical_penetration_offset"
+        offset = -min_foot_clearance
+
+    abs_offset = abs(offset)
+    candidate = bool(reason) and abs_offset <= config.max_contact_correction_offset
+    return {
+        "contact_correction_candidate": float(int(candidate)),
+        "contact_correction_reason": reason if candidate else "",
+        "contact_correction_offset": offset if candidate else 0.0,
+        "contact_correction_abs_offset": abs_offset if candidate else 0.0,
+    }
+
+
 def _point_to_support_distance(
     point: tuple[float, float],
     support_points: Sequence[tuple[float, float]],
@@ -901,6 +934,8 @@ def _validate_config(config: G1QualityConfig) -> None:
         raise ValueError("max_mean_foot_clearance must be non-negative")
     if config.max_penetration_depth < 0:
         raise ValueError("max_penetration_depth must be non-negative")
+    if config.max_contact_correction_offset < 0:
+        raise ValueError("max_contact_correction_offset must be non-negative")
     if not 0.0 <= config.min_contact_frame_ratio <= 1.0:
         raise ValueError("min_contact_frame_ratio must be within [0, 1]")
     if not 0.0 <= config.max_joint_limit_violation_rate <= 1.0:
@@ -1113,7 +1148,17 @@ def _rounded_dict(values: Mapping[str, float]) -> dict[str, float]:
     return {key: round(float(value), 6) for key, value in values.items()}
 
 
-def _empty_model_metrics() -> dict[str, float]:
+def _rounded_contact_stats(values: Mapping[str, object]) -> dict[str, object]:
+    rounded: dict[str, object] = {}
+    for key, value in values.items():
+        if isinstance(value, (int, float)):
+            rounded[key] = round(float(value), 6)
+        else:
+            rounded[key] = value
+    return rounded
+
+
+def _empty_model_metrics() -> dict[str, object]:
     return {
         "joint_limit_checked_values": 0.0,
         "joint_limit_violation_rate": 0.0,
@@ -1124,6 +1169,10 @@ def _empty_model_metrics() -> dict[str, float]:
         "max_foot_clearance": 0.0,
         "min_body_clearance": 0.0,
         "penetration_depth": 0.0,
+        "contact_correction_candidate": 0.0,
+        "contact_correction_reason": "",
+        "contact_correction_offset": 0.0,
+        "contact_correction_abs_offset": 0.0,
         "contact_frame_ratio": 0.0,
         "max_contact_slide_speed": 0.0,
         "contact_slide_rate": 0.0,
@@ -1226,6 +1275,9 @@ def _metric_summary(rows: Sequence[Mapping[str, object]]) -> dict[str, dict[str,
         "max_foot_clearance",
         "min_body_clearance",
         "penetration_depth",
+        "contact_correction_candidate",
+        "contact_correction_offset",
+        "contact_correction_abs_offset",
         "contact_frame_ratio",
         "max_contact_slide_speed",
         "contact_slide_rate",

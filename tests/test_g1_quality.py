@@ -266,6 +266,40 @@ class G1QualityTests(unittest.TestCase):
             self.assertIn("g1_foot_float", floating["quality_flags"])
             self.assertIn("g1_ground_penetration", penetrating["quality_flags"])
 
+    def test_summarize_g1_rows_marks_contact_correction_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model_xml = Path(tmp) / "g1.xml"
+            model_xml.write_text(_minimal_g1_mjcf(), encoding="utf-8")
+            model = load_g1_kinematic_model(model_xml)
+            config = G1QualityConfig(
+                fps=30.0,
+                max_joint_velocity=1000.0,
+                max_root_speed=1000.0,
+                root_position_scale=1.0,
+                joint_angle_scale=1.0,
+                root_rotation_scale=1.0,
+                model_xml=model_xml,
+                max_contact_slide_speed=1000.0,
+                max_mean_foot_clearance=0.05,
+                max_penetration_depth=0.03,
+                max_contact_correction_offset=0.10,
+                min_contact_frame_ratio=0.0,
+                max_start_end_root_speed=1000.0,
+            )
+
+            row = summarize_g1_rows(
+                {"row_index": "repairable-float"},
+                _csv_rows([0.0, 0.0, 0.0], root_x_values=[0.0, 0.0, 0.0], root_z_values=[0.08, 0.08, 0.08]),
+                config,
+                model=model,
+            )
+
+            self.assertIn("g1_foot_float", row["quality_flags"])
+            self.assertEqual(row["contact_correction_candidate"], 1.0)
+            self.assertEqual(row["contact_correction_reason"], "vertical_float_offset")
+            self.assertEqual(row["contact_correction_offset"], -0.08)
+            self.assertEqual(row["contact_correction_abs_offset"], 0.08)
+
     def test_summarize_g1_rows_flags_self_collision_proxy(self):
         with tempfile.TemporaryDirectory() as tmp:
             model_xml = Path(tmp) / "g1.xml"

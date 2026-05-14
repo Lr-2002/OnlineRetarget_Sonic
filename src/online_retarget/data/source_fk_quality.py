@@ -49,6 +49,7 @@ class SourceFKQualityConfig:
     max_contact_slide_speed: float = 0.25
     max_mean_foot_clearance: float = 0.10
     max_penetration_depth: float = 0.03
+    max_contact_correction_offset: float = 0.15
     min_contact_frame_ratio: float = 0.05
     root_body: str = "Hips"
     foot_bodies: tuple[str, ...] = DEFAULT_FOOT_BODIES
@@ -271,8 +272,14 @@ def summarize_source_fk_motion(
 
     mean_foot_clearance = _mean(foot_clearances)
     max_foot_clearance = max(foot_clearances) if foot_clearances else 0.0
+    min_foot_clearance = min(foot_clearances) if foot_clearances else 0.0
     min_body_clearance = min(body_clearances) if body_clearances else 0.0
     penetration_depth = max(0.0, -min_body_clearance)
+    contact_correction = _contact_correction_candidate(
+        min_foot_clearance=min_foot_clearance,
+        mean_foot_clearance=mean_foot_clearance,
+        config=config,
+    )
     max_contact_slide_speed = max(contact_slide_speeds) if contact_slide_speeds else 0.0
     contact_slide_rate = _rate_above(contact_slide_speeds, config.max_contact_slide_speed)
     root_height_min = min(root_heights) if root_heights else 0.0
@@ -309,6 +316,7 @@ def summarize_source_fk_motion(
         "max_foot_clearance": round(max_foot_clearance, 6),
         "min_body_clearance": round(min_body_clearance, 6),
         "penetration_depth": round(penetration_depth, 6),
+        **contact_correction,
         "root_body": config.root_body,
         "root_height_min": round(root_height_min, 6),
         "root_height_max": round(root_height_max, 6),
@@ -376,6 +384,30 @@ def _root_support_distances(
             continue
         distances.append(_point_to_support_distance((root[0], root[2]), support_points))
     return distances
+
+
+def _contact_correction_candidate(
+    min_foot_clearance: float,
+    mean_foot_clearance: float,
+    config: SourceFKQualityConfig,
+) -> dict[str, object]:
+    reason = ""
+    offset = 0.0
+    if mean_foot_clearance > config.max_mean_foot_clearance:
+        reason = "vertical_float_offset"
+        offset = -mean_foot_clearance
+    elif -min_foot_clearance > config.max_penetration_depth:
+        reason = "vertical_penetration_offset"
+        offset = -min_foot_clearance
+
+    abs_offset = abs(offset)
+    candidate = bool(reason) and abs_offset <= config.max_contact_correction_offset
+    return {
+        "contact_correction_candidate": int(candidate),
+        "contact_correction_reason": reason if candidate else "",
+        "contact_correction_offset": round(offset if candidate else 0.0, 6),
+        "contact_correction_abs_offset": round(abs_offset if candidate else 0.0, 6),
+    }
 
 
 def _point_to_support_distance(
@@ -486,6 +518,10 @@ def _empty_result(
         "max_foot_clearance": 0.0,
         "min_body_clearance": 0.0,
         "penetration_depth": 0.0,
+        "contact_correction_candidate": 0,
+        "contact_correction_reason": "",
+        "contact_correction_offset": 0.0,
+        "contact_correction_abs_offset": 0.0,
         "root_body": "",
         "root_height_min": 0.0,
         "root_height_max": 0.0,
@@ -552,6 +588,8 @@ def _validate_config(config: SourceFKQualityConfig) -> None:
         raise ValueError("max_mean_foot_clearance must be non-negative")
     if config.max_penetration_depth < 0:
         raise ValueError("max_penetration_depth must be non-negative")
+    if config.max_contact_correction_offset < 0:
+        raise ValueError("max_contact_correction_offset must be non-negative")
     if not 0.0 <= config.min_contact_frame_ratio <= 1.0:
         raise ValueError("min_contact_frame_ratio must be within [0, 1]")
 
@@ -577,6 +615,9 @@ def _metric_summary(rows: Sequence[Mapping[str, object]]) -> dict[str, dict[str,
         "max_foot_clearance",
         "min_body_clearance",
         "penetration_depth",
+        "contact_correction_candidate",
+        "contact_correction_offset",
+        "contact_correction_abs_offset",
         "root_height_min",
         "root_height_max",
         "root_height_range",

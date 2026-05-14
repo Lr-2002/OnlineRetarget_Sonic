@@ -42,6 +42,10 @@ class QualityMergeTests(unittest.TestCase):
                         "max_contact_slide_speed": 0.4,
                         "mean_foot_clearance": 0.05,
                         "penetration_depth": 0.02,
+                        "contact_correction_candidate": 1,
+                        "contact_correction_reason": "vertical_penetration_offset",
+                        "contact_correction_offset": 0.02,
+                        "contact_correction_abs_offset": 0.02,
                         "root_height_min": 0.8,
                         "root_height_max": 1.2,
                         "root_height_range": 0.4,
@@ -75,6 +79,10 @@ class QualityMergeTests(unittest.TestCase):
                         "root_height_max": 1.8,
                         "root_height_range": 1.4,
                         "penetration_depth": 0.07,
+                        "contact_correction_candidate": 1,
+                        "contact_correction_reason": "vertical_penetration_offset",
+                        "contact_correction_offset": 0.07,
+                        "contact_correction_abs_offset": 0.07,
                         "contact_slide_rate": 0.25,
                         "support_frame_ratio": 0.5,
                         "mean_root_support_distance": 0.04,
@@ -142,6 +150,10 @@ class QualityMergeTests(unittest.TestCase):
         self.assertEqual(worst[0]["move_soma_proportional_path"], "soma/b.bvh")
         self.assertEqual(worst[0]["move_g1_path"], "g1/b.csv")
         self.assertEqual(worst[0]["g1_penetration_depth"], "0.07")
+        self.assertEqual(worst[0]["g1_contact_correction_candidate"], "1")
+        self.assertEqual(worst[0]["g1_contact_correction_reason"], "vertical_penetration_offset")
+        self.assertEqual(worst[0]["g1_contact_correction_offset"], "0.07")
+        self.assertEqual(worst[0]["g1_contact_correction_abs_offset"], "0.07")
         self.assertEqual(worst[0]["g1_contact_slide_rate"], "0.25")
         self.assertEqual(worst[0]["g1_joint_limit_violation_rate"], "0.5")
         self.assertEqual(worst[0]["g1_self_collision_proxy_rate"], "0.2")
@@ -162,6 +174,10 @@ class QualityMergeTests(unittest.TestCase):
         self.assertEqual(worst[1]["source_max_root_jerk"], "4.0")
         self.assertEqual(worst[1]["source_fk_contact_slide_rate"], "0.15")
         self.assertEqual(worst[1]["source_fk_penetration_depth"], "0.02")
+        self.assertEqual(worst[1]["source_fk_contact_correction_candidate"], "1")
+        self.assertEqual(worst[1]["source_fk_contact_correction_reason"], "vertical_penetration_offset")
+        self.assertEqual(worst[1]["source_fk_contact_correction_offset"], "0.02")
+        self.assertEqual(worst[1]["source_fk_contact_correction_abs_offset"], "0.02")
         self.assertEqual(worst[1]["source_fk_root_height_min"], "0.8")
         self.assertEqual(worst[1]["source_fk_root_height_max"], "1.2")
         self.assertEqual(worst[1]["source_fk_root_height_range"], "0.4")

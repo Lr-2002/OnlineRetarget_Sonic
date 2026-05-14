@@ -117,6 +117,47 @@ class SourceFKQualityTests(unittest.TestCase):
         self.assertEqual(floating_row["quality_action"], "quarantine")
         self.assertEqual(penetrating_row["quality_action"], "quarantine")
 
+    def test_summarize_source_fk_motion_marks_contact_correction_candidate(self):
+        motion = parse_bvh_motion(_bvh_text(left_foot_x=[0.0, 0.0, 0.0], left_foot_y=[0.08, 0.08, 0.08]))
+
+        row = summarize_source_fk_motion(
+            {"row_index": "repairable-float"},
+            motion,
+            SourceFKQualityConfig(
+                fps=10.0,
+                position_scale=1.0,
+                ground_height=0.0,
+                max_mean_foot_clearance=0.05,
+                max_contact_correction_offset=0.10,
+            ),
+        )
+
+        self.assertEqual(row["quality_action"], "quarantine")
+        self.assertIn("source_foot_float", row["quality_flags"])
+        self.assertEqual(row["contact_correction_candidate"], 1)
+        self.assertEqual(row["contact_correction_reason"], "vertical_float_offset")
+        self.assertEqual(row["contact_correction_offset"], -0.08)
+        self.assertEqual(row["contact_correction_abs_offset"], 0.08)
+
+    def test_summarize_source_fk_motion_rejects_large_contact_correction_candidate(self):
+        motion = parse_bvh_motion(_bvh_text(left_foot_x=[0.0, 0.0, 0.0], left_foot_y=[0.2, 0.2, 0.2]))
+
+        row = summarize_source_fk_motion(
+            {"row_index": "too-far"},
+            motion,
+            SourceFKQualityConfig(
+                fps=10.0,
+                position_scale=1.0,
+                ground_height=0.0,
+                max_mean_foot_clearance=0.05,
+                max_contact_correction_offset=0.10,
+            ),
+        )
+
+        self.assertEqual(row["contact_correction_candidate"], 0)
+        self.assertEqual(row["contact_correction_reason"], "")
+        self.assertEqual(row["contact_correction_abs_offset"], 0.0)
+
     def test_summarize_source_fk_motion_excludes_nonfinite_fk(self):
         motion = parse_bvh_motion(_bvh_text(left_foot_x=[0.0, float("nan"), 0.0], left_foot_y=[0.0, 0.0, 0.0]))
 

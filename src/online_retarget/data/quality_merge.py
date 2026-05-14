@@ -289,6 +289,18 @@ def _worst_clip_rows(
                 "source_max_root_speed": _stat(source, "max_root_speed"),
                 "source_fk_mean_foot_clearance": _stat(source_fk, "mean_foot_clearance"),
                 "source_fk_penetration_depth": _stat(source_fk, "penetration_depth"),
+                "source_fk_contact_correction_candidate": _stat(
+                    source_fk, "contact_correction_candidate"
+                ),
+                "source_fk_contact_correction_reason": _stat(
+                    source_fk, "contact_correction_reason"
+                ),
+                "source_fk_contact_correction_offset": _stat(
+                    source_fk, "contact_correction_offset"
+                ),
+                "source_fk_contact_correction_abs_offset": _stat(
+                    source_fk, "contact_correction_abs_offset"
+                ),
                 "source_fk_root_height_min": _stat(source_fk, "root_height_min"),
                 "source_fk_root_height_max": _stat(source_fk, "root_height_max"),
                 "source_fk_root_height_range": _stat(source_fk, "root_height_range"),
@@ -316,6 +328,12 @@ def _worst_clip_rows(
                 "g1_max_joint_limit_violation": _stat(g1, "max_joint_limit_violation"),
                 "g1_mean_foot_clearance": _stat(g1, "mean_foot_clearance"),
                 "g1_penetration_depth": _stat(g1, "penetration_depth"),
+                "g1_contact_correction_candidate": _stat(g1, "contact_correction_candidate"),
+                "g1_contact_correction_reason": _stat(g1, "contact_correction_reason"),
+                "g1_contact_correction_offset": _stat(g1, "contact_correction_offset"),
+                "g1_contact_correction_abs_offset": _stat(
+                    g1, "contact_correction_abs_offset"
+                ),
                 "g1_support_frame_ratio": _stat(g1, "support_frame_ratio"),
                 "g1_mean_root_support_distance": _stat(g1, "mean_root_support_distance"),
                 "g1_max_root_support_distance": _stat(g1, "max_root_support_distance"),
@@ -340,9 +358,11 @@ def _worst_sort_key(row: Mapping[str, str]) -> tuple[float, ...]:
     return (
         ACTION_ORDER.get(row.get("merged_quality_action", "keep"), 0),
         _float(row.get("g1_penetration_depth", "")),
+        _float(row.get("g1_contact_correction_abs_offset", "")),
         _float(row.get("g1_contact_slide_rate", "")),
         _float(row.get("g1_max_root_support_distance", "")),
         _float(row.get("source_fk_penetration_depth", "")),
+        _float(row.get("source_fk_contact_correction_abs_offset", "")),
         _float(row.get("source_fk_contact_slide_rate", "")),
         _float(row.get("source_fk_max_root_support_distance", "")),
         _float(row.get("g1_joint_limit_violation_rate", "")),
