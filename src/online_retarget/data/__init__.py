@@ -25,6 +25,8 @@ from .policy_audit import (
     CurationPolicyAuditResult,
     CurationPolicyPreflightResult,
     audit_curation_policy,
+    discover_threshold_proposals_for_run,
+    discover_threshold_proposals_from_report,
     preflight_curation_policy,
 )
 from .quality_merge import QualityMergeResult, merge_quality_stats
@@ -116,6 +118,8 @@ __all__ = [
     "merge_review_decisions",
     "motion_pair_ref_from_index_row",
     "propose_thresholds_from_jsonl",
+    "discover_threshold_proposals_for_run",
+    "discover_threshold_proposals_from_report",
     "preflight_curation_policy",
     "scan_bvh_quality_from_index",
     "scan_g1_quality_from_index",

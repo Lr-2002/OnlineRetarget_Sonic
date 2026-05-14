@@ -154,7 +154,7 @@ def preflight_curation_policy(
     resolved_policy_id = policy_id or run_dir.name
     audit_json = output_json or run_dir / "policy_preflight.json"
 
-    threshold_proposals = _discover_threshold_proposals(curated_report)
+    threshold_proposals = discover_threshold_proposals_from_report(curated_report)
     review_dir = run_dir / "manual_review"
     review_report_json = _existing_path(review_dir / "review_report.json")
     review_manifest_jsonl = _existing_path(review_dir / "review_manifest.jsonl")
@@ -438,7 +438,18 @@ def _audit_manual_review(
         blockers.append(f"{len(invalid_actions)} manual review items have invalid actions{suffix}")
 
 
-def _discover_threshold_proposals(curated_report: Mapping[str, object]) -> list[Path]:
+def discover_threshold_proposals_for_run(curated_run_dir: Path) -> list[Path]:
+    """Find threshold proposal files referenced by a curated run report."""
+
+    curated_report_json = curated_run_dir.expanduser() / "curated_report.json"
+    if not curated_report_json.exists():
+        raise FileNotFoundError(f"missing curated report: {curated_report_json}")
+    return discover_threshold_proposals_from_report(_read_json(curated_report_json))
+
+
+def discover_threshold_proposals_from_report(curated_report: Mapping[str, object]) -> list[Path]:
+    """Find proposal JSONs whose stats path matches a curated report stats path."""
+
     stats_paths = {
         str(curated_report.get("source_stats_jsonl", "")).strip(),
         str(curated_report.get("source_fk_stats_jsonl", "")).strip(),

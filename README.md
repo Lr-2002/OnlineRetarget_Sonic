@@ -174,6 +174,21 @@ The preflight writes `policy_preflight.json`, discovers matching threshold propo
 from the stats paths in `curated_report.json`, and reports the exact blockers before formal M5
 training can use the policy audit.
 
+After threshold proposals have been reviewed, write the accepted threshold-policy artifact from the
+same curated run:
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py accept-curation-threshold-policy \
+  --curated-run-dir runs/curated/representative_source_g1_pair_limit560_by_category_split \
+  --accepted-by <reviewer> \
+  --rationale "<why these proposal files are accepted>" \
+  --representative
+```
+
+This writes `threshold_policy.json` next to `curated_report.json` and refuses to overwrite an
+existing policy unless `--overwrite` is supplied. It does not bypass the preflight audit: scan
+coverage and manual-review decisions still have to pass before the policy is promotable.
+
 Run smoke tests:
 
 ```bash

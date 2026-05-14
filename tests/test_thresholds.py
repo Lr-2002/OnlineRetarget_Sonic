@@ -233,6 +233,90 @@ class ThresholdProposalTests(unittest.TestCase):
         self.assertEqual(payload["policy_id"], "policy_v1")
         self.assertEqual(payload["status"], "accepted")
 
+    def test_cli_accept_curation_threshold_policy_discovers_proposals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "curated" / "policy_run"
+            quality_dir = root / "quality"
+            run_dir.mkdir(parents=True)
+            quality_dir.mkdir()
+            stats = quality_dir / "g1_quality_stats.jsonl"
+            proposal = quality_dir / "g1_threshold_proposals_grouped_p95.json"
+            output = run_dir / "threshold_policy.json"
+            stats.write_text('{"joint_jump_rate": 0.0}\n{"joint_jump_rate": 0.2}\n', encoding="utf-8")
+            (run_dir / "curated_report.json").write_text(
+                json.dumps(
+                    {
+                        "g1_stats_jsonl": str(stats),
+                        "row_count": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            write_threshold_proposals(
+                stats_jsonl=stats,
+                output_json=proposal,
+                metrics=("joint_jump_rate",),
+                percentile=0.5,
+                group_by=("category", "split"),
+            )
+
+            argv = [
+                "online-retarget",
+                "accept-curation-threshold-policy",
+                "--curated-run-dir",
+                str(run_dir),
+                "--accepted-by",
+                "unit-test",
+                "--rationale",
+                "Fixture acceptance.",
+                "--representative",
+            ]
+            with mock.patch("sys.argv", argv), contextlib.redirect_stdout(io.StringIO()):
+                cli.main()
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["policy_id"], "policy_run")
+        self.assertEqual(payload["proposal_jsons"], [str(proposal)])
+        self.assertTrue(payload["representative"])
+
+    def test_cli_accept_curation_threshold_policy_refuses_overwrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "curated" / "policy_run"
+            quality_dir = root / "quality"
+            run_dir.mkdir(parents=True)
+            quality_dir.mkdir()
+            stats = quality_dir / "g1_quality_stats.jsonl"
+            proposal = quality_dir / "g1_threshold_proposals_grouped_p95.json"
+            stats.write_text('{"joint_jump_rate": 0.0}\n', encoding="utf-8")
+            (run_dir / "curated_report.json").write_text(
+                json.dumps({"g1_stats_jsonl": str(stats)}),
+                encoding="utf-8",
+            )
+            write_threshold_proposals(
+                stats_jsonl=stats,
+                output_json=proposal,
+                metrics=("joint_jump_rate",),
+            )
+            (run_dir / "threshold_policy.json").write_text("{}", encoding="utf-8")
+
+            argv = [
+                "online-retarget",
+                "accept-curation-threshold-policy",
+                "--curated-run-dir",
+                str(run_dir),
+                "--accepted-by",
+                "unit-test",
+                "--rationale",
+                "Fixture acceptance.",
+            ]
+            with mock.patch("sys.argv", argv), self.assertRaises(SystemExit) as raised:
+                cli.main()
+
+        self.assertIn("already exists", str(raised.exception))
+
     def test_cli_requires_at_least_one_metric(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

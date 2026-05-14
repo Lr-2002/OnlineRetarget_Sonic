@@ -15,6 +15,7 @@ from online_retarget.data.pair_quality import PairQualityConfig, scan_pair_quali
 from online_retarget.data.policy_audit import (
     CurationPolicyAuditConfig,
     audit_curation_policy,
+    discover_threshold_proposals_for_run,
     preflight_curation_policy,
 )
 from online_retarget.data.quality_merge import merge_quality_stats
@@ -277,6 +278,22 @@ def main() -> None:
     threshold_policy.add_argument("--rationale", required=True)
     threshold_policy.add_argument("--representative", action="store_true")
 
+    run_threshold_policy = subparsers.add_parser(
+        "accept-curation-threshold-policy",
+        help="Write threshold_policy.json for a curated run from discovered proposal files",
+    )
+    run_threshold_policy.add_argument("--curated-run-dir", type=Path, required=True)
+    run_threshold_policy.add_argument("--policy-id")
+    run_threshold_policy.add_argument("--output-json", type=Path)
+    run_threshold_policy.add_argument("--accepted-by", required=True)
+    run_threshold_policy.add_argument("--rationale", required=True)
+    run_threshold_policy.add_argument("--representative", action="store_true")
+    run_threshold_policy.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow replacing an existing threshold_policy.json.",
+    )
+
     supervised = subparsers.add_parser(
         "build-supervised-jsonl",
         help="Build small source-BVH to G1-joint JSONL samples for baseline debugging",
@@ -476,6 +493,8 @@ def main() -> None:
         _propose_thresholds(args)
     elif args.command == "accept-threshold-policy":
         _accept_threshold_policy(args)
+    elif args.command == "accept-curation-threshold-policy":
+        _accept_curation_threshold_policy(args)
     elif args.command == "build-supervised-jsonl":
         _build_supervised_jsonl(args)
     elif args.command == "build-windowed-jsonl":
@@ -664,6 +683,24 @@ def _accept_threshold_policy(args: argparse.Namespace) -> None:
         proposal_jsons=tuple(args.threshold_proposal_json),
         output_json=args.output_json,
         policy_id=args.policy_id,
+        accepted_by=args.accepted_by,
+        rationale=args.rationale,
+        representative=args.representative,
+    )
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _accept_curation_threshold_policy(args: argparse.Namespace) -> None:
+    output_json = args.output_json or args.curated_run_dir / "threshold_policy.json"
+    if output_json.exists() and not args.overwrite:
+        raise SystemExit(f"threshold policy already exists; pass --overwrite to replace: {output_json}")
+    proposal_jsons = discover_threshold_proposals_for_run(args.curated_run_dir)
+    if not proposal_jsons:
+        raise SystemExit(f"no threshold proposals found for curated run: {args.curated_run_dir}")
+    payload = write_accepted_threshold_policy(
+        proposal_jsons=tuple(proposal_jsons),
+        output_json=output_json,
+        policy_id=args.policy_id or args.curated_run_dir.name,
         accepted_by=args.accepted_by,
         rationale=args.rationale,
         representative=args.representative,
