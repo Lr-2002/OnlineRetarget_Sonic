@@ -107,6 +107,7 @@ Initial metrics:
 - `action_similarity`: cosine similarity over predicted vs target action/delta vectors.
 - `joint_jump_rate`: thresholded velocity discontinuity rate.
 - `joint_limit_violation_rate`: thresholded limit violation rate.
+- `contact_artifact_metrics`: target-contact-aware foot float, contact slide, ground penetration, and clearance metrics for JSONL samples with body positions and foot body metadata.
 
 Current eval implementation:
 
@@ -114,6 +115,7 @@ Current eval implementation:
 - CLI: `PYTHONPATH=src python3 scripts/inspect_bones_seed.py offline-eval --input-jsonl <path> --output-root runs --run-name <name>`.
 - Outputs: `eval_summary.json`, `per_sample_metrics.csv`, and `failure_manifest.csv`.
 - Grouping: overall, per actor, per category, per package, and per quality flag.
+- Optional contact artifact metrics are emitted when a JSONL row provides `predicted_body_pos`, `target_body_pos`, and either `foot_indices` or `body_names` plus `foot_body_names`/`foot_names`. Contact frames are inferred from the target body positions so the metric catches predicted floating or skating during target support.
 
 Future simulator metrics:
 

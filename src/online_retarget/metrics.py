@@ -90,6 +90,105 @@ def joint_limit_violation_rate(
     return _safe_mean(float(violations), total)
 
 
+def contact_artifact_metrics(
+    body_positions: Motion3D,
+    *,
+    fps: float,
+    foot_indices: Sequence[int],
+    ground_height: float = 0.0,
+    up_axis: int | str = 2,
+    contact_height_threshold: float = 0.04,
+    max_contact_slide_speed: float = 0.25,
+    contact_reference: Motion3D | None = None,
+) -> dict[str, float]:
+    """Foot contact artifacts for motions shaped T x J x 3.
+
+    Contact is inferred from ``contact_reference`` when available; otherwise it
+    is inferred from ``body_positions``. This lets evaluation measure whether a
+    prediction floats or skates during target-contact frames.
+    """
+
+    _validate_contact_inputs(
+        body_positions=body_positions,
+        fps=fps,
+        foot_indices=foot_indices,
+        ground_height=ground_height,
+        contact_height_threshold=contact_height_threshold,
+        max_contact_slide_speed=max_contact_slide_speed,
+        contact_reference=contact_reference,
+    )
+    axis = _axis_index(up_axis)
+    horizontal_axes = tuple(index for index in range(3) if index != axis)
+    reference = contact_reference if contact_reference is not None else body_positions
+
+    contact_samples = 0
+    foot_float_samples = 0
+    total_foot_samples = 0
+    foot_clearance_total = 0.0
+    contact_clearance_total = 0.0
+    penetration_frames = 0
+    penetration_depth = 0.0
+
+    for frame, ref_frame in _zip_equal(body_positions, reference, "frames"):
+        frame_clearances = [_point_clearance(point, axis, ground_height) for point in frame]
+        min_clearance = min(frame_clearances)
+        if min_clearance < 0.0:
+            penetration_frames += 1
+            penetration_depth = max(penetration_depth, -min_clearance)
+        for foot_index in foot_indices:
+            foot_clearance = frame_clearances[foot_index]
+            ref_clearance = _point_clearance(ref_frame[foot_index], axis, ground_height)
+            expected_contact = ref_clearance <= contact_height_threshold
+            total_foot_samples += 1
+            foot_clearance_total += foot_clearance
+            if expected_contact:
+                contact_samples += 1
+                contact_clearance_total += foot_clearance
+                if foot_clearance > contact_height_threshold:
+                    foot_float_samples += 1
+
+    slide_samples = 0
+    slide_violations = 0
+    max_slide_speed = 0.0
+    for prev_frame, cur_frame, prev_ref_frame, cur_ref_frame in zip(
+        body_positions,
+        body_positions[1:],
+        reference,
+        reference[1:],
+    ):
+        for foot_index in foot_indices:
+            prev_contact = (
+                _point_clearance(prev_ref_frame[foot_index], axis, ground_height)
+                <= contact_height_threshold
+            )
+            cur_contact = (
+                _point_clearance(cur_ref_frame[foot_index], axis, ground_height)
+                <= contact_height_threshold
+            )
+            if not (prev_contact and cur_contact):
+                continue
+            speed = _horizontal_speed(
+                prev_frame[foot_index],
+                cur_frame[foot_index],
+                horizontal_axes,
+                fps,
+            )
+            max_slide_speed = max(max_slide_speed, speed)
+            slide_violations += speed > max_contact_slide_speed
+            slide_samples += 1
+
+    return {
+        "contact_frame_ratio": _zero_mean(float(contact_samples), total_foot_samples),
+        "foot_float_rate": _zero_mean(float(foot_float_samples), contact_samples),
+        "contact_slide_rate": _zero_mean(float(slide_violations), slide_samples),
+        "max_contact_slide_speed": max_slide_speed,
+        "mean_foot_clearance": _zero_mean(foot_clearance_total, total_foot_samples),
+        "mean_contact_foot_clearance": _zero_mean(contact_clearance_total, contact_samples),
+        "ground_penetration_rate": _zero_mean(float(penetration_frames), len(body_positions)),
+        "penetration_depth": penetration_depth,
+    }
+
+
 def _cosine(left: Vector, right: Vector) -> float:
     if len(left) != len(right):
         raise ValueError("vectors must have the same width")
@@ -103,9 +202,74 @@ def _cosine(left: Vector, right: Vector) -> float:
     return dot / (left_norm * right_norm)
 
 
+def _validate_contact_inputs(
+    *,
+    body_positions: Motion3D,
+    fps: float,
+    foot_indices: Sequence[int],
+    ground_height: float,
+    contact_height_threshold: float,
+    max_contact_slide_speed: float,
+    contact_reference: Motion3D | None,
+) -> None:
+    if fps <= 0:
+        raise ValueError("fps must be positive")
+    if not math.isfinite(ground_height):
+        raise ValueError("ground_height must be finite")
+    if contact_height_threshold < 0:
+        raise ValueError("contact_height_threshold must be non-negative")
+    if max_contact_slide_speed <= 0:
+        raise ValueError("max_contact_slide_speed must be positive")
+    if not foot_indices:
+        raise ValueError("foot_indices must not be empty")
+    if not body_positions:
+        raise ValueError("body_positions must not be empty")
+    reference = contact_reference if contact_reference is not None else body_positions
+    for frame, ref_frame in _zip_equal(body_positions, reference, "frames"):
+        if len(frame) != len(ref_frame):
+            raise ValueError("contact reference body count must match body_positions")
+        for point in (*frame, *ref_frame):
+            if len(point) != 3:
+                raise ValueError("contact metrics expect 3D body positions")
+    body_count = len(body_positions[0])
+    for foot_index in foot_indices:
+        if foot_index < 0 or foot_index >= body_count:
+            raise ValueError("foot index out of range")
+
+
+def _axis_index(axis: int | str) -> int:
+    if isinstance(axis, str):
+        axis = axis.lower()
+        if axis == "x":
+            return 0
+        if axis == "y":
+            return 1
+        if axis == "z":
+            return 2
+        raise ValueError("up_axis must be x, y, z, 0, 1, or 2")
+    if axis in (0, 1, 2):
+        return axis
+    raise ValueError("up_axis must be x, y, z, 0, 1, or 2")
+
+
+def _point_clearance(point: Vector, axis: int, ground_height: float) -> float:
+    return point[axis] - ground_height
+
+
+def _horizontal_speed(left: Vector, right: Vector, horizontal_axes: Sequence[int], fps: float) -> float:
+    squared = sum((right[index] - left[index]) ** 2 for index in horizontal_axes)
+    return math.sqrt(squared) * fps
+
+
 def _safe_mean(total: float, count: int) -> float:
     if count == 0:
         raise ValueError("metric received no samples")
+    return total / count
+
+
+def _zero_mean(total: float, count: int) -> float:
+    if count == 0:
+        return 0.0
     return total / count
 
 

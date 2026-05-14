@@ -3,6 +3,7 @@ import unittest
 
 from online_retarget.metrics import (
     action_similarity,
+    contact_artifact_metrics,
     joint_jump_rate,
     joint_limit_violation_rate,
     joint_rmse,
@@ -29,6 +30,34 @@ class MetricTests(unittest.TestCase):
     def test_joint_limit_violation_rate(self):
         positions = [[0.0, 2.0], [-2.0, 0.0]]
         self.assertEqual(joint_limit_violation_rate(positions, [-1.0, -1.0], [1.0, 1.0]), 0.5)
+
+    def test_contact_artifact_metrics_use_reference_contact_frames(self):
+        target = [
+            [[0.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.2]],
+        ]
+        predicted = [
+            [[0.0, 0.0, 0.08]],
+            [[0.2, 0.0, 0.08]],
+            [[0.2, 0.0, -0.01]],
+        ]
+
+        metrics = contact_artifact_metrics(
+            predicted,
+            fps=10.0,
+            foot_indices=(0,),
+            contact_reference=target,
+            contact_height_threshold=0.04,
+            max_contact_slide_speed=0.25,
+        )
+
+        self.assertEqual(metrics["contact_frame_ratio"], 2 / 3)
+        self.assertEqual(metrics["foot_float_rate"], 1.0)
+        self.assertEqual(metrics["contact_slide_rate"], 1.0)
+        self.assertEqual(metrics["max_contact_slide_speed"], 2.0)
+        self.assertEqual(metrics["ground_penetration_rate"], 1 / 3)
+        self.assertEqual(metrics["penetration_depth"], 0.01)
 
 
 if __name__ == "__main__":

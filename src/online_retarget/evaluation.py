@@ -10,13 +10,17 @@ from pathlib import Path
 import subprocess
 from typing import Iterable, Mapping, Sequence
 
-from .metrics import action_similarity, joint_jump_rate, joint_rmse, mpjpe
+from .metrics import action_similarity, contact_artifact_metrics, joint_jump_rate, joint_rmse, mpjpe
 
 
 @dataclass(frozen=True)
 class EvaluationConfig:
     fps: float = 30.0
     joint_jump_velocity: float = 20.0
+    ground_height: float = 0.0
+    up_axis: int | str = 2
+    contact_height_threshold: float = 0.04
+    max_contact_slide_speed: float = 0.25
     failure_metric: str = "joint_rmse"
     max_failures: int = 50
     run_name: str = "offline_eval"
@@ -115,8 +119,48 @@ def _sample_metrics(sample: Mapping[str, object], config: EvaluationConfig) -> d
         ),
     }
     if sample.get("predicted_body_pos") is not None and sample.get("target_body_pos") is not None:
-        row["mpjpe"] = mpjpe(sample["predicted_body_pos"], sample["target_body_pos"])
+        predicted_body_pos = sample["predicted_body_pos"]
+        target_body_pos = sample["target_body_pos"]
+        row["mpjpe"] = mpjpe(predicted_body_pos, target_body_pos)
+        foot_indices = _foot_indices(sample)
+        if foot_indices:
+            row.update(
+                {
+                    f"predicted_{metric}": value
+                    for metric, value in contact_artifact_metrics(
+                        predicted_body_pos,
+                        fps=float(sample.get("fps", config.fps)),
+                        foot_indices=foot_indices,
+                        ground_height=config.ground_height,
+                        up_axis=config.up_axis,
+                        contact_height_threshold=config.contact_height_threshold,
+                        max_contact_slide_speed=config.max_contact_slide_speed,
+                        contact_reference=target_body_pos,
+                    ).items()
+                }
+            )
     return row
+
+
+def _foot_indices(sample: Mapping[str, object]) -> tuple[int, ...]:
+    explicit = sample.get("foot_indices")
+    if explicit is not None:
+        if not isinstance(explicit, list):
+            raise ValueError("foot_indices must be a list when provided")
+        return tuple(int(index) for index in explicit)
+    body_names = sample.get("body_names")
+    foot_names = sample.get("foot_body_names", sample.get("foot_names"))
+    if body_names is None or foot_names is None:
+        return ()
+    if not isinstance(body_names, list) or not isinstance(foot_names, list):
+        raise ValueError("body_names and foot_body_names must be lists when provided")
+    name_to_index = {str(name): index for index, name in enumerate(body_names)}
+    indices: list[int] = []
+    for name in foot_names:
+        key = str(name)
+        if key in name_to_index:
+            indices.append(name_to_index[key])
+    return tuple(indices)
 
 
 def _aggregate_metrics(rows: Sequence[Mapping[str, object]]) -> dict[str, float]:
@@ -186,7 +230,13 @@ def _quality_flags_string(value: object) -> str:
 
 def _write_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = list(rows[0].keys()) if rows else []
+    fieldnames: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for key in row.keys():
+            if key not in seen:
+                fieldnames.append(key)
+                seen.add(key)
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         if fieldnames:

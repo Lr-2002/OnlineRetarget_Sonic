@@ -31,8 +31,17 @@ class EvaluationTests(unittest.TestCase):
                     "quality_flags": ["joint_velocity_jump"],
                     "predicted_joints": [[0.0, 0.0], [2.0, 0.0]],
                     "target_joints": [[0.0, 0.0], [0.0, 0.0]],
-                    "predicted_body_pos": [[[1.0, 0.0, 0.0]]],
-                    "target_body_pos": [[[0.0, 0.0, 0.0]]],
+                    "predicted_body_pos": [
+                        [[0.0, 0.0, 0.08]],
+                        [[0.2, 0.0, 0.08]],
+                    ],
+                    "target_body_pos": [
+                        [[0.0, 0.0, 0.0]],
+                        [[0.0, 0.0, 0.0]],
+                    ],
+                    "body_names": ["left_foot"],
+                    "foot_body_names": ["left_foot"],
+                    "fps": 10.0,
                 },
             ]
             with input_jsonl.open("w", encoding="utf-8") as f:
@@ -48,11 +57,14 @@ class EvaluationTests(unittest.TestCase):
 
             summary = json.loads(result.summary_json.read_text())
             failure_rows = result.failure_manifest_csv.read_text().strip().splitlines()
+            per_sample_rows = result.per_sample_csv.read_text().strip().splitlines()
 
         self.assertEqual(result.sample_count, 2)
         self.assertEqual(summary["overall"]["joint_rmse"], 0.5)
         self.assertEqual(summary["by_quality_flag"]["joint_velocity_jump"]["joint_rmse"], 1.0)
         self.assertEqual(summary["by_quality_flag"]["none"]["joint_rmse"], 0.0)
+        self.assertEqual(summary["by_quality_flag"]["joint_velocity_jump"]["predicted_foot_float_rate"], 1.0)
+        self.assertIn("predicted_contact_slide_rate", per_sample_rows[0])
         self.assertEqual(len(failure_rows), 2)
         self.assertIn("s2", failure_rows[1])
 
