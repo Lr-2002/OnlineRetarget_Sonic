@@ -30,6 +30,10 @@ from .policy_audit import (
     preflight_curation_policy,
 )
 from .quality_merge import QualityMergeResult, merge_quality_stats
+from .quality_review_exports import (
+    BalancedReviewExportResult,
+    export_balanced_quality_review_csv,
+)
 from .review_manifest import (
     ReviewDecisionMergeResult,
     ReviewDecisionTemplateResult,
@@ -97,6 +101,7 @@ __all__ = [
     "WindowedBuildConfig",
     "WindowedBuildResult",
     "ActorSkeleton",
+    "BalancedReviewExportResult",
     "CurationPolicyAuditConfig",
     "CurationPolicyAuditResult",
     "CurationPolicyPreflightResult",
@@ -127,6 +132,7 @@ __all__ = [
     "propose_thresholds_from_jsonl",
     "discover_threshold_proposals_for_run",
     "discover_threshold_proposals_from_report",
+    "export_balanced_quality_review_csv",
     "preflight_curation_policy",
     "export_review_clips",
     "scan_bvh_quality_from_index",

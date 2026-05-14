@@ -19,6 +19,7 @@ from online_retarget.data.policy_audit import (
     preflight_curation_policy,
 )
 from online_retarget.data.quality_merge import merge_quality_stats
+from online_retarget.data.quality_review_exports import export_balanced_quality_review_csv
 from online_retarget.data.quality_smoke import QualitySmokeConfig, run_quality_smoke
 from online_retarget.data.review_manifest import (
     build_review_decision_template,
@@ -421,6 +422,32 @@ def main() -> None:
         help="Do not overlay MuJoCo body frames in rendered videos.",
     )
 
+    balanced_review = subparsers.add_parser(
+        "export-balanced-quality-review",
+        help="Build a flag-balanced review CSV from a quality stats JSONL file",
+    )
+    balanced_review.add_argument("--stats-jsonl", type=Path, required=True)
+    balanced_review.add_argument(
+        "--split-index-csv",
+        type=Path,
+        help="Optional split index used to backfill source BVH paths for target-only stats.",
+    )
+    balanced_review.add_argument("--output-csv", type=Path, required=True)
+    balanced_review.add_argument("--output-report-json", type=Path)
+    balanced_review.add_argument(
+        "--flag",
+        action="append",
+        default=[],
+        help="Quality flag to sample. Defaults to all flags found in descending frequency.",
+    )
+    balanced_review.add_argument("--max-per-flag", type=int, default=2)
+    balanced_review.add_argument("--action-min-rank", default="quarantine")
+    balanced_review.add_argument(
+        "--include-downweight",
+        action="store_true",
+        help="Allow downweight rows in addition to quarantine/exclude rows.",
+    )
+
     policy_audit = subparsers.add_parser(
         "audit-curation-policy",
         help="Audit whether a merged quality policy is ready for formal training",
@@ -565,6 +592,8 @@ def main() -> None:
         _merge_review_decisions(args)
     elif args.command == "export-review-clips":
         _export_review_clips(args)
+    elif args.command == "export-balanced-quality-review":
+        _export_balanced_quality_review(args)
     elif args.command == "audit-curation-policy":
         _audit_curation_policy(args)
     elif args.command == "preflight-curation-policy":
@@ -886,6 +915,20 @@ def _export_review_clips(args: argparse.Namespace) -> None:
             angle_scale=args.angle_scale,
             render_frames=not args.hide_render_frames,
         ),
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _export_balanced_quality_review(args: argparse.Namespace) -> None:
+    result = export_balanced_quality_review_csv(
+        stats_jsonl=args.stats_jsonl,
+        output_csv=args.output_csv,
+        split_index_csv=args.split_index_csv,
+        output_report_json=args.output_report_json,
+        flags=tuple(args.flag),
+        max_per_flag=args.max_per_flag,
+        action_min_rank=args.action_min_rank,
+        include_downweight=args.include_downweight,
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 
