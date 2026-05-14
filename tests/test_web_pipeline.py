@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import zipfile
 
 from online_retarget.web_pipeline import run_web_pipeline
 
@@ -34,10 +35,43 @@ class WebPipelineTests(unittest.TestCase):
         self.assertEqual(len(payload["preview"]["robot"]["frames"]), 3)
         self.assertEqual(report["run_id"], payload["run_id"])
 
-    def test_smpl_like_upload_is_explicitly_blocked(self):
+    def test_smpl_like_npz_pipeline_generates_preview_when_numpy_is_available(self):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy is not installed in this Python environment")
+
         with tempfile.TemporaryDirectory() as tmp:
+            npz = Path(tmp) / "motion.npz"
+            np.savez(
+                npz,
+                poses=np.zeros((3, 72), dtype=float),
+                trans=np.array([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.2, 0.0, 0.0]], dtype=float),
+                mocap_framerate=np.array([30.0], dtype=float),
+            )
+            model_xml = Path(tmp) / "g1.xml"
+            model_xml.write_text(_minimal_g1_mjcf(), encoding="utf-8")
             result = run_web_pipeline(
-                b"not a decoded body model",
+                npz.read_bytes(),
+                "motion.npz",
+                output_root=Path(tmp) / "web_runs",
+                model_xml=model_xml,
+                max_frames=3,
+            )
+            payload = result.to_dict()
+
+        self.assertEqual(payload["input_format"], "smpl")
+        self.assertEqual(payload["stages"]["load"]["status"], "ok")
+        self.assertEqual(payload["stages"]["retarget"]["status"], "ok")
+        self.assertEqual(payload["stages"]["kinematic_sim"]["status"], "ok")
+        self.assertEqual(payload["stages"]["load"]["details"]["pose_key"], "poses")
+        self.assertEqual(len(payload["preview"]["source"]["frames"]), 3)
+
+    def test_malformed_smpl_like_upload_fails_before_retarget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            broken_npz = _broken_npz_bytes()
+            result = run_web_pipeline(
+                broken_npz,
                 "motion.npz",
                 output_root=Path(tmp) / "web_runs",
                 model_xml=Path(tmp) / "missing.xml",
@@ -45,7 +79,7 @@ class WebPipelineTests(unittest.TestCase):
             payload = result.to_dict()
 
         self.assertEqual(payload["input_format"], "smpl")
-        self.assertEqual(payload["stages"]["load"]["status"], "blocked")
+        self.assertIn(payload["stages"]["load"]["status"], {"failed", "blocked"})
         self.assertEqual(payload["stages"]["retarget"]["status"], "blocked")
 
 
@@ -113,6 +147,13 @@ def _minimal_g1_mjcf() -> str:
   </worldbody>
 </mujoco>
 """
+
+
+def _broken_npz_bytes() -> bytes:
+    path = Path(tempfile.mkdtemp()) / "broken.npz"
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("readme.txt", "not an npy array")
+    return path.read_bytes()
 
 
 if __name__ == "__main__":

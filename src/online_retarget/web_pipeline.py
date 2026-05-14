@@ -18,6 +18,7 @@ from pathlib import Path
 import time
 import uuid
 from typing import Iterable, Mapping, Sequence
+import zipfile
 
 from .data.bones_seed import G1_CSV_COLUMNS, G1_JOINT_COLUMNS
 from .data.g1_quality import (
@@ -27,7 +28,6 @@ from .data.g1_quality import (
 )
 from .data.windowed_builder import (
     DEFAULT_SOURCE_BODY_NAMES,
-    body_positions_from_bvh,
     global_body_position_maps_from_bvh,
     parse_bvh_motion,
 )
@@ -49,6 +49,17 @@ KINEMATIC_BODY_NAMES = (
     "right_toe_link",
     "left_rubber_hand",
     "right_rubber_hand",
+)
+
+SMPL_PREVIEW_BODY_NAMES = (
+    "Hips",
+    "Spine1",
+    "Chest",
+    "Head",
+    "LeftHand",
+    "RightHand",
+    "LeftFoot",
+    "RightFoot",
 )
 
 
@@ -105,15 +116,16 @@ def run_web_pipeline(
     artifacts["source"] = str(source_path)
 
     input_format = _detect_format(filename, source_bytes)
-    if input_format != "bvh":
-        message = (
-            "Only BVH upload is implemented in this local preview. "
-            "SMPL/SMPL-X input needs a body-model decoder before retargeting."
-        )
+    loaded = _load_preview_source(source_bytes, input_format, max_frames=max_frames)
+    if loaded["status"] != "ok":
         stages["load"] = StageResult(
-            status="blocked",
-            message=message,
-            details={"input_format": input_format, "bytes": len(source_bytes)},
+            status=str(loaded["status"]),
+            message=str(loaded["message"]),
+            details={
+                "input_format": input_format,
+                "bytes": len(source_bytes),
+                **_dict_value(loaded.get("details")),
+            },
         )
         for stage in STAGE_ORDER[1:]:
             stages[stage] = StageResult(status="blocked", message="Blocked by load stage.", details={})
@@ -128,47 +140,25 @@ def run_web_pipeline(
         _write_result(output_dir, result)
         return result
 
-    try:
-        text = source_bytes.decode("utf-8")
-        motion = parse_bvh_motion(text)
-    except (UnicodeDecodeError, ValueError) as exc:
-        stages["load"] = StageResult(
-            status="failed",
-            message=f"BVH load failed: {exc}",
-            details={"input_format": input_format, "bytes": len(source_bytes)},
-        )
-        for stage in STAGE_ORDER[1:]:
-            stages[stage] = StageResult(status="blocked", message="Blocked by load stage.", details={})
-        result = WebPipelineResult(
-            run_id=run_id,
-            output_dir=output_dir,
-            input_format=input_format,
-            stages=stages,
-            artifacts=artifacts,
-            preview=preview,
-        )
-        _write_result(output_dir, result)
-        return result
-
-    source_frames = _source_preview_frames(motion, max_frames=max_frames)
+    frame_time = float(loaded["frame_time"])
+    source_frames = _frame_list(loaded["source_frames"])
     preview["source"] = {
         "frames": source_frames,
-        "body_names": list(DEFAULT_SOURCE_BODY_NAMES),
-        "frame_time": motion.frame_time,
+        "body_names": list(loaded["body_names"]),
+        "frame_time": frame_time,
     }
     stages["load"] = StageResult(
         status="ok",
-        message="BVH parsed and source FK preview frames were generated.",
-        details={
-            "frames": len(motion.frames),
-            "used_frames": len(source_frames),
-            "frame_time": motion.frame_time,
-            "joints": len(motion.joints),
-            "channels": motion.channel_count,
-        },
+        message=str(loaded["message"]),
+        details=_dict_value(loaded.get("details")),
     )
 
-    retarget = _retarget_bvh_to_g1(motion, max_frames=max_frames)
+    retarget = _retarget_preview_frames_to_g1(
+        source_frames,
+        body_names=tuple(str(item) for item in loaded["body_names"]),
+        max_frames=max_frames,
+        mode=str(loaded["retarget_source"]),
+    )
     g1_csv = output_dir / "retargeted_g1_preview.csv"
     _write_g1_csv(g1_csv, retarget["trajectory"])
     artifacts["retargeted_g1_csv"] = str(g1_csv)
@@ -195,7 +185,7 @@ def run_web_pipeline(
                 "body_names": list(KINEMATIC_BODY_NAMES),
                 "model_xml": str(model_xml),
             }
-            preview["timeline"] = _timeline(retarget["trajectory"], motion.frame_time)
+            preview["timeline"] = _timeline(retarget["trajectory"], frame_time)
             kinematic_report = {
                 "model_xml": str(model_xml),
                 "frames": len(robot_frames),
@@ -222,7 +212,7 @@ def run_web_pipeline(
     physics = _run_mujoco_physics_preview(
         model_xml=model_xml,
         trajectory=retarget["trajectory"],
-        frame_time=motion.frame_time,
+        frame_time=frame_time,
     )
     stages["physics_sim"] = StageResult(
         status=str(physics["status"]),
@@ -242,23 +232,149 @@ def run_web_pipeline(
     return result
 
 
-def _retarget_bvh_to_g1(motion: object, max_frames: int) -> dict[str, object]:
-    source_positions = body_positions_from_bvh(
-        motion,  # type: ignore[arg-type]
-        body_names=DEFAULT_SOURCE_BODY_NAMES,
-        root_body="Hips",
-        position_scale=0.01,
-    )
-    frame_count = min(len(source_positions), max_frames)
+def _load_preview_source(source_bytes: bytes, input_format: str, max_frames: int) -> dict[str, object]:
+    if input_format == "bvh":
+        try:
+            text = source_bytes.decode("utf-8")
+            motion = parse_bvh_motion(text)
+        except (UnicodeDecodeError, ValueError) as exc:
+            return {
+                "status": "failed",
+                "message": f"BVH load failed: {exc}",
+                "details": {},
+            }
+        source_frames = _source_preview_frames(motion, max_frames=max_frames)
+        return {
+            "status": "ok",
+            "message": "BVH parsed and source FK preview frames were generated.",
+            "source_frames": source_frames,
+            "body_names": list(DEFAULT_SOURCE_BODY_NAMES),
+            "frame_time": motion.frame_time,
+            "retarget_source": "bvh_fk",
+            "details": {
+                "frames": len(motion.frames),
+                "used_frames": len(source_frames),
+                "frame_time": motion.frame_time,
+                "joints": len(motion.joints),
+                "channels": motion.channel_count,
+            },
+        }
+    if input_format == "smpl":
+        return _load_smpl_preview_source(source_bytes, max_frames=max_frames)
+    return {
+        "status": "blocked",
+        "message": f"Unsupported upload format for preview: {input_format}",
+        "details": {"input_format": input_format},
+    }
+
+
+def _load_smpl_preview_source(source_bytes: bytes, max_frames: int) -> dict[str, object]:
+    if importlib.util.find_spec("numpy") is None:
+        return {
+            "status": "blocked",
+            "message": "SMPL-like .npz preview requires numpy in the active Python environment.",
+            "details": {"input_format": "smpl"},
+        }
+    try:
+        import numpy as np  # type: ignore[import-not-found]
+
+        with np.load(io.BytesIO(source_bytes), allow_pickle=False) as data:
+            keys = set(data.files)
+            pose_key = _first_present(keys, ("poses", "pose_body", "body_pose", "fullpose"))
+            trans_key = _first_present(keys, ("trans", "transl", "translation", "root_trans"))
+            if pose_key is None:
+                return {
+                    "status": "failed",
+                    "message": "SMPL-like .npz missing poses/pose_body/body_pose/fullpose array.",
+                    "details": {"keys": sorted(keys)},
+                }
+            poses = np.asarray(data[pose_key], dtype=float)
+            if poses.ndim == 1:
+                poses = poses.reshape(1, -1)
+            trans = (
+                np.asarray(data[trans_key], dtype=float)
+                if trans_key is not None
+                else np.zeros((poses.shape[0], 3), dtype=float)
+            )
+            if trans.ndim == 1:
+                trans = trans.reshape(1, -1)
+            fps = float(np.asarray(data["mocap_framerate"]).reshape(-1)[0]) if "mocap_framerate" in keys else 30.0
+            source_frames = _smpl_preview_frames_from_arrays(poses, trans, max_frames=max_frames)
+            return {
+                "status": "ok",
+                "message": "SMPL-like NPZ arrays parsed into an approximate preview skeleton.",
+                "source_frames": source_frames,
+                "body_names": list(SMPL_PREVIEW_BODY_NAMES),
+                "frame_time": 1.0 / fps if fps > 0 else 1.0 / 30.0,
+                "retarget_source": "smpl_npz_preview",
+                "details": {
+                    "frames": int(poses.shape[0]),
+                    "used_frames": len(source_frames),
+                    "pose_key": pose_key,
+                    "trans_key": trans_key or "",
+                    "pose_dim": int(poses.shape[1]) if poses.ndim > 1 else 0,
+                    "fps": fps,
+                    "approximation": "SMPL body-model mesh/joint decoding is not implemented; this uses root translation plus low-dimensional pose cues.",
+                },
+            }
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        return {
+            "status": "failed",
+            "message": f"SMPL-like NPZ load failed: {exc}",
+            "details": {},
+        }
+
+
+def _smpl_preview_frames_from_arrays(
+    poses: object,
+    trans: object,
+    max_frames: int,
+) -> list[dict[str, list[float]]]:
+    frame_count = min(len(poses), max_frames)  # type: ignore[arg-type]
+    frames: list[dict[str, list[float]]] = []
+    for index in range(frame_count):
+        pose = [float(value) for value in poses[index].reshape(-1)]  # type: ignore[index,union-attr]
+        root = [float(value) for value in trans[min(index, len(trans) - 1)].reshape(-1)[:3]]  # type: ignore[arg-type,index,union-attr]
+        while len(root) < 3:
+            root.append(0.0)
+        sway = _pose_value(pose, 2) * 0.08
+        arm = _pose_value(pose, 8) * 0.12
+        step = _pose_value(pose, 15) * 0.10
+        crouch = abs(_pose_value(pose, 5)) * 0.04
+        hips = [root[0], root[1], root[2] + 0.9 - crouch]
+        frames.append(
+            {
+                "Hips": _round_point(hips),
+                "Spine1": _round_point((hips[0], hips[1], hips[2] + 0.22)),
+                "Chest": _round_point((hips[0], hips[1], hips[2] + 0.46)),
+                "Head": _round_point((hips[0], hips[1], hips[2] + 0.72)),
+                "LeftHand": _round_point((hips[0] - 0.34, hips[1] + 0.12 + arm, hips[2] + 0.36)),
+                "RightHand": _round_point((hips[0] + 0.34, hips[1] - 0.12 - arm, hips[2] + 0.36)),
+                "LeftFoot": _round_point((hips[0] - 0.09 + step, hips[1] + 0.08 + sway, hips[2] - 0.9)),
+                "RightFoot": _round_point((hips[0] + 0.09 - step, hips[1] - 0.08 + sway, hips[2] - 0.9)),
+            }
+        )
+    return frames
+
+
+def _retarget_preview_frames_to_g1(
+    source_frames: Sequence[Mapping[str, Sequence[float]]],
+    *,
+    body_names: Sequence[str],
+    max_frames: int,
+    mode: str,
+) -> dict[str, object]:
+    frame_count = min(len(source_frames), max_frames)
     trajectory: list[dict[str, object]] = []
     previous_root_x = 0.0
-    for frame_index, positions in enumerate(source_positions[:frame_count]):
-        root_x = _body_axis(positions, 0, 0)
-        root_z = _body_axis(positions, 0, 2)
-        left_foot_y = _named_axis(positions, "LeftFoot", 1)
-        right_foot_y = _named_axis(positions, "RightFoot", 1)
-        left_hand_y = _named_axis(positions, "LeftHand", 1)
-        right_hand_y = _named_axis(positions, "RightHand", 1)
+    for frame_index, frame in enumerate(source_frames[:frame_count]):
+        root = _frame_point(frame, "Hips")
+        root_x = root[0]
+        root_z = root[2]
+        left_foot_y = _frame_point(frame, "LeftFoot")[1]
+        right_foot_y = _frame_point(frame, "RightFoot")[1]
+        left_hand_y = _frame_point(frame, "LeftHand")[1]
+        right_hand_y = _frame_point(frame, "RightHand")[1]
         forward_delta = root_x - previous_root_x if frame_index else 0.0
         previous_root_x = root_x
 
@@ -292,11 +408,13 @@ def _retarget_bvh_to_g1(motion: object, max_frames: int) -> dict[str, object]:
         "trajectory": trajectory,
         "report": {
             "mode": "rule_based_preview",
+            "input_mode": mode,
             "frames": len(trajectory),
             "output_joint_count": len(G1_JOINT_COLUMNS),
+            "source_body_count": len(body_names),
             "limitations": [
                 "Not a learned model prediction.",
-                "SMPL inputs require a decoder before this stage.",
+                "SMPL NPZ support is approximate and does not decode a body model mesh.",
                 "Physical tracking control is not implemented in this placeholder retargeter.",
             ],
         },
@@ -452,6 +570,44 @@ def _timeline(trajectory: Sequence[Mapping[str, object]], frame_time: float) -> 
     ]
 
 
+def _dict_value(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _frame_list(value: object) -> list[dict[str, list[float]]]:
+    if not isinstance(value, Sequence):
+        return []
+    frames: list[dict[str, list[float]]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        frame: dict[str, list[float]] = {}
+        for name, point in item.items():
+            frame[str(name)] = _float_sequence(point, 3)
+        frames.append(frame)
+    return frames
+
+
+def _frame_point(frame: Mapping[str, Sequence[float]], body_name: str) -> list[float]:
+    value = frame.get(body_name)
+    return _float_sequence(value, 3)
+
+
+def _first_present(keys: set[str], candidates: Sequence[str]) -> str | None:
+    for candidate in candidates:
+        if candidate in keys:
+            return candidate
+    return None
+
+
+def _pose_value(values: Sequence[float], index: int) -> float:
+    return values[index] if index < len(values) and math.isfinite(values[index]) else 0.0
+
+
+def _round_point(values: Sequence[float]) -> list[float]:
+    return [round(float(value), 5) for value in values[:3]]
+
+
 def _detect_format(filename: str, content: bytes) -> str:
     suffix = Path(filename).suffix.lower()
     if suffix == ".bvh" or content.lstrip().startswith(b"HIERARCHY"):
@@ -469,19 +625,6 @@ def _safe_filename(filename: str) -> str:
 def _run_id(filename: str) -> str:
     stem = Path(_safe_filename(filename)).stem[:32] or "motion"
     return f"{int(time.time())}-{stem}-{uuid.uuid4().hex[:8]}"
-
-
-def _body_axis(flat_positions: Sequence[float], body_index: int, axis: int) -> float:
-    index = body_index * 3 + axis
-    return float(flat_positions[index]) if 0 <= index < len(flat_positions) else 0.0
-
-
-def _named_axis(flat_positions: Sequence[float], body_name: str, axis: int) -> float:
-    try:
-        body_index = DEFAULT_SOURCE_BODY_NAMES.index(body_name)
-    except ValueError:
-        return 0.0
-    return _body_axis(flat_positions, body_index, axis)
 
 
 def _float_sequence(value: object, length: int) -> list[float]:

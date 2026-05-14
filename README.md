@@ -237,13 +237,14 @@ Launch the local web console for upload -> retarget -> preview runs:
 PYTHONPATH=src python3 scripts/run_web.py --host 127.0.0.1 --port 8765
 ```
 
-Open `http://127.0.0.1:8765`, upload a `.bvh`, and the app writes a per-run bundle under
+Open `http://127.0.0.1:8765`, upload a `.bvh` or SMPL-like `.npz`, and the app writes a per-run bundle under
 `outputs/web_runs/` with the source file, `retargeted_g1_preview.csv`, `retarget_report.json`,
 and `pipeline_result.json`. The current web path implements BVH loading, a deterministic
-rule-based G1 preview target, and G1 MJCF kinematic playback. SMPL/SMPL-X decoding and learned
-retarget inference are explicit blocked stages until those model artifacts exist. MuJoCo physics
-rollout runs only when the Python `mujoco` package is installed; otherwise the physics stage is
-reported as blocked rather than marked successful.
+rule-based G1 preview target, G1 MJCF kinematic playback, MuJoCo stepping, and approximate
+SMPL-like `.npz` preview from common `poses`/`trans` arrays. Full SMPL/SMPL-X body-model decoding
+and learned retarget inference remain explicit future work. MuJoCo physics rollout runs only when
+the Python `mujoco` package is installed; otherwise the physics stage is reported as blocked rather
+than marked successful.
 
 ## Key Docs
 
