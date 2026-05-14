@@ -59,7 +59,7 @@ Gate:
 
 Stop condition: we can say exactly which clips are used for train/test/eval and why.
 
-Current status: metadata-level actor split and curation index are implemented. Source BVH, source FK/contact, and G1 target quality scanners exist. G1 target scanning can optionally load a MJCF asset to compute FK contact, foot slide/float, ground penetration, joint-limit, and self-collision proxy smoke metrics. Full calibrated thresholds, larger scans, diversity-loss review, manual review decisions, and simulator-backed labels are tracked by M2Q, so M2 is not fully closed.
+Current status: metadata-level actor split and curation index are implemented. Source BVH, source FK/contact/support/root-height, and G1 target quality scanners exist. G1 target scanning can optionally load a MJCF asset to compute FK contact, support distance, foot slide/float, ground penetration, joint-limit, and self-collision proxy smoke metrics. Full calibrated thresholds, larger scans, diversity-loss review, manual review decisions, and simulator-backed labels are tracked by M2Q, so M2 is not fully closed.
 
 ## M2Q - Motion Quality Curation Gate
 
@@ -101,8 +101,8 @@ Stop condition: we can defend why each formal training clip is included, downwei
 Submilestones:
 
 - M2Q.1 Literature-backed curation plan: read and matrix NMR/CEPR, PHUMA/PhySINK, GMR, OmniTrack, OmniRetarget, KDMR, ExBody2, contact-metric papers, and record their curation signals.
-- M2Q.2 Source motion quality: scan parse validity, temporal jumps, root speed/jerk, FK foot contact, foot slide/float, penetration, and category-specific exceptions.
-- M2Q.3 G1 target quality: scan joint jumps, joint-limit margin, FK contact, foot slide/float, penetration, start/end instability, and self-collision proxy.
+- M2Q.2 Source motion quality: scan parse validity, temporal jumps, root speed/jerk, FK foot contact, foot slide/float, penetration, support-base distance, pelvis/root height, and category-specific exceptions.
+- M2Q.3 G1 target quality: scan joint jumps, joint-limit margin, FK contact, support-base distance, root height, foot slide/float, penetration, start/end instability, and self-collision proxy.
 - M2Q.4 Pair/provenance quality: verify source-target length/fps/action consistency, mirror and actor leakage, skeleton identity, target availability, and whether each target is kinematic, filtered, simulator-replayed, or policy-generated.
 - M2Q.5 Threshold calibration: propose thresholds from distributions by category/actor/skeleton rather than one global hand-picked value.
 - M2Q.6 Diversity-loss review: quantify which actors, skeletons, packages, and motion classes are lost under each policy; reject policies that only produce "clean" but narrow data.

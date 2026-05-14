@@ -42,6 +42,13 @@ class QualityMergeTests(unittest.TestCase):
                         "max_contact_slide_speed": 0.4,
                         "mean_foot_clearance": 0.05,
                         "penetration_depth": 0.02,
+                        "root_height_min": 0.8,
+                        "root_height_max": 1.2,
+                        "root_height_range": 0.4,
+                        "mean_root_height": 1.0,
+                        "support_frame_ratio": 0.6,
+                        "mean_root_support_distance": 0.03,
+                        "max_root_support_distance": 0.08,
                     }
                 )
                 + "\n",
@@ -64,8 +71,14 @@ class QualityMergeTests(unittest.TestCase):
                         "max_abs_joint_acceleration": 30.0,
                         "max_root_acceleration": 7.0,
                         "max_root_jerk": 9.0,
+                        "root_height_min": 0.4,
+                        "root_height_max": 1.8,
+                        "root_height_range": 1.4,
                         "penetration_depth": 0.07,
                         "contact_slide_rate": 0.25,
+                        "support_frame_ratio": 0.5,
+                        "mean_root_support_distance": 0.04,
+                        "max_root_support_distance": 0.11,
                         "joint_limit_violation_rate": 0.5,
                         "self_collision_proxy_rate": 0.2,
                         "min_self_collision_distance": 0.01,
@@ -136,6 +149,12 @@ class QualityMergeTests(unittest.TestCase):
         self.assertEqual(worst[0]["g1_max_abs_joint_acceleration"], "30.0")
         self.assertEqual(worst[0]["g1_max_root_acceleration"], "7.0")
         self.assertEqual(worst[0]["g1_max_root_jerk"], "9.0")
+        self.assertEqual(worst[0]["g1_root_height_min"], "0.4")
+        self.assertEqual(worst[0]["g1_root_height_max"], "1.8")
+        self.assertEqual(worst[0]["g1_root_height_range"], "1.4")
+        self.assertEqual(worst[0]["g1_support_frame_ratio"], "0.5")
+        self.assertEqual(worst[0]["g1_mean_root_support_distance"], "0.04")
+        self.assertEqual(worst[0]["g1_max_root_support_distance"], "0.11")
         self.assertEqual(worst[0]["pair_abs_frame_count_delta"], "2")
         self.assertEqual(worst[0]["pair_target_provenance"], "kinematic_g1_csv")
         self.assertEqual(worst[1]["source_max_abs_channel_acceleration"], "12.0")
@@ -143,6 +162,13 @@ class QualityMergeTests(unittest.TestCase):
         self.assertEqual(worst[1]["source_max_root_jerk"], "4.0")
         self.assertEqual(worst[1]["source_fk_contact_slide_rate"], "0.15")
         self.assertEqual(worst[1]["source_fk_penetration_depth"], "0.02")
+        self.assertEqual(worst[1]["source_fk_root_height_min"], "0.8")
+        self.assertEqual(worst[1]["source_fk_root_height_max"], "1.2")
+        self.assertEqual(worst[1]["source_fk_root_height_range"], "0.4")
+        self.assertEqual(worst[1]["source_fk_mean_root_height"], "1.0")
+        self.assertEqual(worst[1]["source_fk_support_frame_ratio"], "0.6")
+        self.assertEqual(worst[1]["source_fk_mean_root_support_distance"], "0.03")
+        self.assertEqual(worst[1]["source_fk_max_root_support_distance"], "0.08")
         self.assertEqual(report["pair_stats_jsonl"], str(pair_stats))
         self.assertEqual(report["source_fk_stats_jsonl"], str(source_fk_stats))
         self.assertEqual(report["merged_source_fk_rows"], 1)

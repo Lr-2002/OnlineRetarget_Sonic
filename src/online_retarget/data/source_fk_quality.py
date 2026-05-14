@@ -50,6 +50,7 @@ class SourceFKQualityConfig:
     max_mean_foot_clearance: float = 0.10
     max_penetration_depth: float = 0.03
     min_contact_frame_ratio: float = 0.05
+    root_body: str = "Hips"
     foot_bodies: tuple[str, ...] = DEFAULT_FOOT_BODIES
     body_bodies: tuple[str, ...] = DEFAULT_BODY_BODIES
 
@@ -201,7 +202,9 @@ def summarize_source_fk_motion(
 ) -> dict[str, object]:
     """Summarize foot/ground/contact metrics from parsed BVH motion."""
 
-    requested_bodies = tuple(dict.fromkeys((*config.body_bodies, *config.foot_bodies)))
+    requested_bodies = tuple(
+        dict.fromkeys((config.root_body, *config.body_bodies, *config.foot_bodies))
+    )
     original_frame_count = len(motion.frames)
     sampled_motion = _sample_motion(motion, config)
     frames = global_body_position_maps_from_bvh(
@@ -248,6 +251,12 @@ def summarize_source_fk_motion(
     )
     foot_clearances = [height - ground_height for height in valid_foot_heights]
     body_clearances = [height - ground_height for height in valid_body_heights]
+    root_heights = [
+        position[1] - ground_height
+        for frame in frames
+        for position in (frame.get(config.root_body),)
+        if position is not None
+    ]
     contact_flags = [clearance <= config.contact_height_threshold for clearance in foot_clearances]
     contact_frame_ratio = sum(contact_flags) / len(contact_flags) if contact_flags else 0.0
     effective_fps = _effective_fps(motion, config)
@@ -258,6 +267,7 @@ def summarize_source_fk_motion(
         config,
         fps=effective_fps,
     )
+    support_distances = _root_support_distances(frames, present_feet, ground_height, config)
 
     mean_foot_clearance = _mean(foot_clearances)
     max_foot_clearance = max(foot_clearances) if foot_clearances else 0.0
@@ -265,6 +275,12 @@ def summarize_source_fk_motion(
     penetration_depth = max(0.0, -min_body_clearance)
     max_contact_slide_speed = max(contact_slide_speeds) if contact_slide_speeds else 0.0
     contact_slide_rate = _rate_above(contact_slide_speeds, config.max_contact_slide_speed)
+    root_height_min = min(root_heights) if root_heights else 0.0
+    root_height_max = max(root_heights) if root_heights else 0.0
+    mean_root_height = _mean(root_heights)
+    support_frame_ratio = len(support_distances) / frame_count if frame_count else 0.0
+    mean_root_support_distance = _mean(support_distances)
+    max_root_support_distance = max(support_distances) if support_distances else 0.0
 
     flags: list[str] = []
     action = "keep"
@@ -293,6 +309,14 @@ def summarize_source_fk_motion(
         "max_foot_clearance": round(max_foot_clearance, 6),
         "min_body_clearance": round(min_body_clearance, 6),
         "penetration_depth": round(penetration_depth, 6),
+        "root_body": config.root_body,
+        "root_height_min": round(root_height_min, 6),
+        "root_height_max": round(root_height_max, 6),
+        "root_height_range": round(root_height_max - root_height_min, 6),
+        "mean_root_height": round(mean_root_height, 6),
+        "support_frame_ratio": round(support_frame_ratio, 6),
+        "mean_root_support_distance": round(mean_root_support_distance, 6),
+        "max_root_support_distance": round(max_root_support_distance, 6),
         "contact_frame_ratio": round(contact_frame_ratio, 6),
         "max_contact_slide_speed": round(max_contact_slide_speed, 6),
         "contact_slide_rate": round(contact_slide_rate, 6),
@@ -330,6 +354,114 @@ def _contact_slide_speeds(
     return speeds
 
 
+def _root_support_distances(
+    frames: Sequence[Mapping[str, Sequence[float]]],
+    foot_bodies: Sequence[str],
+    ground_height: float,
+    config: SourceFKQualityConfig,
+) -> list[float]:
+    distances: list[float] = []
+    for frame in frames:
+        root = frame.get(config.root_body)
+        if root is None:
+            continue
+        support_points = [
+            (position[0], position[2])
+            for body in foot_bodies
+            for position in (frame.get(body),)
+            if position is not None
+            and position[1] - ground_height <= config.contact_height_threshold
+        ]
+        if not support_points:
+            continue
+        distances.append(_point_to_support_distance((root[0], root[2]), support_points))
+    return distances
+
+
+def _point_to_support_distance(
+    point: tuple[float, float],
+    support_points: Sequence[tuple[float, float]],
+) -> float:
+    unique_points = tuple(dict.fromkeys(support_points))
+    if len(unique_points) == 1:
+        return math.dist(point, unique_points[0])
+    if len(unique_points) == 2:
+        return _point_to_segment_distance(point, unique_points[0], unique_points[1])
+    hull = _convex_hull(unique_points)
+    if _point_in_convex_polygon(point, hull):
+        return 0.0
+    return min(
+        _point_to_segment_distance(point, hull[index], hull[(index + 1) % len(hull)])
+        for index in range(len(hull))
+    )
+
+
+def _convex_hull(points: Sequence[tuple[float, float]]) -> tuple[tuple[float, float], ...]:
+    ordered = sorted(set(points))
+    if len(ordered) <= 1:
+        return tuple(ordered)
+
+    def cross(
+        origin: tuple[float, float],
+        left: tuple[float, float],
+        right: tuple[float, float],
+    ) -> float:
+        return (left[0] - origin[0]) * (right[1] - origin[1]) - (
+            left[1] - origin[1]
+        ) * (right[0] - origin[0])
+
+    lower: list[tuple[float, float]] = []
+    for point in ordered:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    upper: list[tuple[float, float]] = []
+    for point in reversed(ordered):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    return tuple(lower[:-1] + upper[:-1])
+
+
+def _point_in_convex_polygon(
+    point: tuple[float, float],
+    polygon: Sequence[tuple[float, float]],
+) -> bool:
+    if len(polygon) < 3:
+        return False
+    sign = 0
+    for index in range(len(polygon)):
+        left = polygon[index]
+        right = polygon[(index + 1) % len(polygon)]
+        cross = (right[0] - left[0]) * (point[1] - left[1]) - (
+            right[1] - left[1]
+        ) * (point[0] - left[0])
+        if abs(cross) < 1e-9:
+            continue
+        current_sign = 1 if cross > 0 else -1
+        if sign == 0:
+            sign = current_sign
+        elif sign != current_sign:
+            return False
+    return True
+
+
+def _point_to_segment_distance(
+    point: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> float:
+    segment_x = end[0] - start[0]
+    segment_y = end[1] - start[1]
+    length_sq = segment_x * segment_x + segment_y * segment_y
+    if length_sq == 0.0:
+        return math.dist(point, start)
+    t = ((point[0] - start[0]) * segment_x + (point[1] - start[1]) * segment_y) / length_sq
+    t = max(0.0, min(1.0, t))
+    projection = (start[0] + t * segment_x, start[1] + t * segment_y)
+    return math.dist(point, projection)
+
+
 def _frame_min_height(frame: Mapping[str, Sequence[float]], bodies: Sequence[str]) -> float | None:
     heights = [frame[body][1] for body in bodies if body in frame]
     return min(heights) if heights else None
@@ -354,6 +486,14 @@ def _empty_result(
         "max_foot_clearance": 0.0,
         "min_body_clearance": 0.0,
         "penetration_depth": 0.0,
+        "root_body": "",
+        "root_height_min": 0.0,
+        "root_height_max": 0.0,
+        "root_height_range": 0.0,
+        "mean_root_height": 0.0,
+        "support_frame_ratio": 0.0,
+        "mean_root_support_distance": 0.0,
+        "max_root_support_distance": 0.0,
         "contact_frame_ratio": 0.0,
         "max_contact_slide_speed": 0.0,
         "contact_slide_rate": 0.0,
@@ -437,6 +577,13 @@ def _metric_summary(rows: Sequence[Mapping[str, object]]) -> dict[str, dict[str,
         "max_foot_clearance",
         "min_body_clearance",
         "penetration_depth",
+        "root_height_min",
+        "root_height_max",
+        "root_height_range",
+        "mean_root_height",
+        "support_frame_ratio",
+        "mean_root_support_distance",
+        "max_root_support_distance",
         "contact_frame_ratio",
         "max_contact_slide_speed",
         "contact_slide_rate",

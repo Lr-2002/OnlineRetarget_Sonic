@@ -190,6 +190,45 @@ class G1QualityTests(unittest.TestCase):
             self.assertGreater(row["contact_slide_rate"], 0.0)
             self.assertGreater(row["joint_limit_violation_rate"], 0.0)
 
+    def test_summarize_g1_rows_records_fk_support_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model_xml = Path(tmp) / "g1.xml"
+            model_xml.write_text(_minimal_g1_mjcf(), encoding="utf-8")
+            model = load_g1_kinematic_model(model_xml)
+            config = G1QualityConfig(
+                fps=30.0,
+                max_joint_velocity=1000.0,
+                max_root_speed=1000.0,
+                root_position_scale=1.0,
+                joint_angle_scale=1.0,
+                root_rotation_scale=1.0,
+                model_xml=model_xml,
+                max_contact_slide_speed=1000.0,
+                max_mean_foot_clearance=1.0,
+                max_penetration_depth=1.0,
+                min_contact_frame_ratio=0.0,
+                max_start_end_root_speed=1000.0,
+            )
+
+            row = summarize_g1_rows(
+                {"row_index": "support"},
+                _csv_rows(
+                    [0.0, 0.0, 0.0],
+                    root_x_values=[0.0, 0.0, 0.0],
+                    root_z_values=[0.0, 0.0, 0.0],
+                ),
+                config,
+                model=model,
+            )
+
+            self.assertEqual(row["quality_mode"], "mjcf_fk")
+            self.assertEqual(row["root_height_min"], 0.0)
+            self.assertEqual(row["root_height_max"], 0.0)
+            self.assertEqual(row["root_height_range"], 0.0)
+            self.assertEqual(row["support_frame_ratio"], 1.0)
+            self.assertEqual(row["mean_root_support_distance"], 0.0)
+            self.assertEqual(row["max_root_support_distance"], 0.0)
+
     def test_summarize_g1_rows_flags_fk_float_and_penetration(self):
         with tempfile.TemporaryDirectory() as tmp:
             model_xml = Path(tmp) / "g1.xml"

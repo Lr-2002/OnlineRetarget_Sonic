@@ -67,6 +67,36 @@ class SourceFKQualityTests(unittest.TestCase):
         self.assertEqual(row["quality_action"], "downweight")
         self.assertAlmostEqual(row["max_contact_slide_speed"], 10.0)
 
+    def test_summarize_source_fk_motion_records_root_height_and_support(self):
+        motion = parse_bvh_motion(
+            _bvh_text(
+                left_foot_x=[0.0, 0.0, 0.0],
+                left_foot_y=[1.0, 1.0, 1.0],
+                foot_offset_y=-1.0,
+            )
+        )
+
+        row = summarize_source_fk_motion(
+            {"row_index": "support"},
+            motion,
+            SourceFKQualityConfig(
+                fps=10.0,
+                position_scale=1.0,
+                ground_height=0.0,
+                min_contact_frame_ratio=0.0,
+            ),
+        )
+
+        self.assertEqual(row["quality_action"], "keep")
+        self.assertEqual(row["root_body"], "Hips")
+        self.assertEqual(row["root_height_min"], 1.0)
+        self.assertEqual(row["root_height_max"], 1.0)
+        self.assertEqual(row["root_height_range"], 0.0)
+        self.assertEqual(row["mean_root_height"], 1.0)
+        self.assertEqual(row["support_frame_ratio"], 1.0)
+        self.assertEqual(row["mean_root_support_distance"], 0.0)
+        self.assertEqual(row["max_root_support_distance"], 0.0)
+
     def test_summarize_source_fk_motion_flags_float_and_penetration(self):
         floating = parse_bvh_motion(_bvh_text(left_foot_x=[0.0, 0.0, 0.0], left_foot_y=[0.2, 0.2, 0.2]))
         penetrating = parse_bvh_motion(_bvh_text(left_foot_x=[0.0, 0.0, 0.0], left_foot_y=[-0.1, -0.1, -0.1]))
@@ -281,13 +311,18 @@ def _add_member(tar: tarfile.TarFile, name: str, text: str) -> None:
     tar.addfile(info, io.BytesIO(data))
 
 
-def _bvh_text(left_foot_x: list[float], left_foot_y: list[float]) -> str:
+def _bvh_text(
+    left_foot_x: list[float],
+    left_foot_y: list[float],
+    foot_offset_y: float = 0.0,
+) -> str:
     if len(left_foot_x) != len(left_foot_y):
         raise ValueError("left_foot_x and left_foot_y must have same length")
     rows = "\n".join(
         (
             "0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 "
-            f"{_format_bvh_float(x)} {_format_bvh_float(y)} 0.000000 0.000000 0.000000 0.000000 "
+            f"{_format_bvh_float(x)} {_format_bvh_float(y)} 0.000000 "
+            "0.000000 0.000000 0.000000 "
             "0.000000 0.000000 0.000000"
         )
         for x, y in zip(left_foot_x, left_foot_y)
@@ -303,7 +338,7 @@ ROOT Root
     CHANNELS 6 Xposition Yposition Zposition Zrotation Yrotation Xrotation
     JOINT LeftFoot
     {{
-      OFFSET 0.000000 0.000000 0.000000
+      OFFSET 0.000000 {_format_bvh_float(foot_offset_y)} 0.000000
       CHANNELS 3 Zrotation Yrotation Xrotation
     }}
   }}

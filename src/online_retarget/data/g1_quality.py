@@ -609,6 +609,7 @@ def _contact_stats(
     contact_flags = [clearance <= config.contact_height_threshold for clearance in foot_clearances]
     contact_frame_ratio = sum(contact_flags) / len(contact_flags) if contact_flags else 0.0
     contact_slide_speeds = _g1_contact_slide_speeds(fk_frames, model, config, fps)
+    support_distances = _g1_root_support_distances(fk_frames, model, config)
     max_contact_slide_speed = max(contact_slide_speeds) if contact_slide_speeds else 0.0
     contact_slide_rate = _rate_above(contact_slide_speeds, config.max_contact_slide_speed)
     min_body_clearance = min(body_clearances) if body_clearances else 0.0
@@ -622,6 +623,11 @@ def _contact_stats(
         "contact_frame_ratio": contact_frame_ratio,
         "max_contact_slide_speed": max_contact_slide_speed,
         "contact_slide_rate": contact_slide_rate,
+        "support_frame_ratio": len(support_distances) / len(fk_frames) if fk_frames else 0.0,
+        "mean_root_support_distance": (
+            sum(support_distances) / len(support_distances) if support_distances else 0.0
+        ),
+        "max_root_support_distance": max(support_distances) if support_distances else 0.0,
     }
 
 
@@ -740,6 +746,113 @@ def _g1_contact_slide_speeds(
             horizontal_distance = math.dist((prev_low[0], prev_low[1]), (cur_low[0], cur_low[1]))
             speeds.append(horizontal_distance * fps)
     return speeds
+
+
+def _g1_root_support_distances(
+    fk_frames: Sequence[Mapping[str, Sequence[tuple[float, float, float]]]],
+    model: G1KinematicModel,
+    config: G1QualityConfig,
+) -> list[float]:
+    distances: list[float] = []
+    for frame in fk_frames:
+        pelvis_points = frame.get("pelvis", ())
+        if not pelvis_points:
+            continue
+        root = pelvis_points[0]
+        support_points = [
+            (point[0], point[1])
+            for body in model.foot_body_names
+            for point in frame.get(body, ())
+            if point[2] - config.ground_height <= config.contact_height_threshold
+        ]
+        if not support_points:
+            continue
+        distances.append(_point_to_support_distance((root[0], root[1]), support_points))
+    return distances
+
+
+def _point_to_support_distance(
+    point: tuple[float, float],
+    support_points: Sequence[tuple[float, float]],
+) -> float:
+    unique_points = tuple(dict.fromkeys(support_points))
+    if len(unique_points) == 1:
+        return math.dist(point, unique_points[0])
+    if len(unique_points) == 2:
+        return _point_to_segment_distance(point, unique_points[0], unique_points[1])
+    hull = _convex_hull(unique_points)
+    if _point_in_convex_polygon(point, hull):
+        return 0.0
+    return min(
+        _point_to_segment_distance(point, hull[index], hull[(index + 1) % len(hull)])
+        for index in range(len(hull))
+    )
+
+
+def _convex_hull(points: Sequence[tuple[float, float]]) -> tuple[tuple[float, float], ...]:
+    ordered = sorted(set(points))
+    if len(ordered) <= 1:
+        return tuple(ordered)
+
+    def cross(
+        origin: tuple[float, float],
+        left: tuple[float, float],
+        right: tuple[float, float],
+    ) -> float:
+        return (left[0] - origin[0]) * (right[1] - origin[1]) - (
+            left[1] - origin[1]
+        ) * (right[0] - origin[0])
+
+    lower: list[tuple[float, float]] = []
+    for point in ordered:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    upper: list[tuple[float, float]] = []
+    for point in reversed(ordered):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    return tuple(lower[:-1] + upper[:-1])
+
+
+def _point_in_convex_polygon(
+    point: tuple[float, float],
+    polygon: Sequence[tuple[float, float]],
+) -> bool:
+    if len(polygon) < 3:
+        return False
+    sign = 0
+    for index in range(len(polygon)):
+        left = polygon[index]
+        right = polygon[(index + 1) % len(polygon)]
+        cross = (right[0] - left[0]) * (point[1] - left[1]) - (
+            right[1] - left[1]
+        ) * (point[0] - left[0])
+        if abs(cross) < 1e-9:
+            continue
+        current_sign = 1 if cross > 0 else -1
+        if sign == 0:
+            sign = current_sign
+        elif sign != current_sign:
+            return False
+    return True
+
+
+def _point_to_segment_distance(
+    point: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> float:
+    segment_x = end[0] - start[0]
+    segment_y = end[1] - start[1]
+    length_sq = segment_x * segment_x + segment_y * segment_y
+    if length_sq == 0.0:
+        return math.dist(point, start)
+    t = ((point[0] - start[0]) * segment_x + (point[1] - start[1]) * segment_y) / length_sq
+    t = max(0.0, min(1.0, t))
+    projection = (start[0] + t * segment_x, start[1] + t * segment_y)
+    return math.dist(point, projection)
 
 
 def _write_jsonl(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
@@ -1014,6 +1127,9 @@ def _empty_model_metrics() -> dict[str, float]:
         "contact_frame_ratio": 0.0,
         "max_contact_slide_speed": 0.0,
         "contact_slide_rate": 0.0,
+        "support_frame_ratio": 0.0,
+        "mean_root_support_distance": 0.0,
+        "max_root_support_distance": 0.0,
         "self_collision_checked_pairs": 0.0,
         "self_collision_proxy_rate": 0.0,
         "min_self_collision_distance": 0.0,
@@ -1113,6 +1229,9 @@ def _metric_summary(rows: Sequence[Mapping[str, object]]) -> dict[str, dict[str,
         "contact_frame_ratio",
         "max_contact_slide_speed",
         "contact_slide_rate",
+        "support_frame_ratio",
+        "mean_root_support_distance",
+        "max_root_support_distance",
         "self_collision_checked_pairs",
         "self_collision_proxy_rate",
         "min_self_collision_distance",
