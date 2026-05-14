@@ -19,6 +19,26 @@ REVIEW_FIELD_KEYS = (
     "recommended_action",
 )
 RECOMMENDED_ACTIONS = ("keep", "downweight", "quarantine", "exclude")
+REVIEW_TEMPLATE_COLUMNS = (
+    "review_id",
+    "failure_family",
+    "row_index",
+    "split",
+    "actor_uid",
+    "package",
+    "category",
+    "filename",
+    "source_bvh",
+    "g1_csv",
+    "merged_quality_action",
+    "merged_quality_flags",
+    "metric_summary",
+    "decision",
+    "reviewer",
+    "confirmed_issue",
+    "recommended_action",
+    "notes",
+)
 FAMILY_KEYWORDS = {
     "parser": ("nonfinite", "mismatch", "missing", "decode", "parse", "empty"),
     "mirror": ("mirror_variant",),
@@ -72,6 +92,22 @@ class ReviewDecisionMergeResult:
         return payload
 
 
+@dataclass(frozen=True)
+class ReviewDecisionTemplateResult:
+    output_csv: Path
+    report_json: Path
+    manifest_items: int
+    fieldnames: list[str]
+    git_sha: str
+    git_dirty: bool
+
+    def to_dict(self) -> dict[str, object]:
+        payload = asdict(self)
+        payload["output_csv"] = str(self.output_csv)
+        payload["report_json"] = str(self.report_json)
+        return payload
+
+
 def build_review_manifest(
     worst_clips_csv: Path,
     output_root: Path | None = None,
@@ -115,6 +151,50 @@ def build_review_manifest(
         git_sha=report["git_sha"],
         git_dirty=report["git_dirty"],
     )
+
+
+def build_review_decision_template(
+    review_manifest_jsonl: Path,
+    output_csv: Path | None = None,
+    output_report_json: Path | None = None,
+    overwrite: bool = False,
+) -> ReviewDecisionTemplateResult:
+    """Write a reviewer-fillable CSV decision template from a review manifest."""
+
+    items = _read_jsonl(review_manifest_jsonl)
+    _manifest_by_review_id(items)
+    output_path = output_csv or review_manifest_jsonl.with_name("review_decision_template.csv")
+    report_path = output_report_json or output_path.with_name("review_decision_template_report.json")
+    if not overwrite:
+        _raise_if_exists(output_path)
+        _raise_if_exists(report_path)
+
+    rows = [_template_row(item) for item in items]
+    fieldnames = list(REVIEW_TEMPLATE_COLUMNS)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+    result = ReviewDecisionTemplateResult(
+        output_csv=output_path,
+        report_json=report_path,
+        manifest_items=len(items),
+        fieldnames=fieldnames,
+        git_sha=_git_sha(),
+        git_dirty=_git_dirty(),
+    )
+    report = result.to_dict()
+    report.update(
+        {
+            "review_manifest_jsonl": str(review_manifest_jsonl),
+            "allowed_recommended_actions": list(RECOMMENDED_ACTIONS),
+            "overwrite": overwrite,
+        }
+    )
+    _write_json(report_path, report)
+    return result
 
 
 def merge_review_decisions(
@@ -279,6 +359,35 @@ def _review_metrics(row: Mapping[str, str]) -> dict[str, str]:
     return {key: row.get(key, "") for key in keys if row.get(key, "") != ""}
 
 
+def _template_row(item: Mapping[str, object]) -> dict[str, str]:
+    paths = item.get("motion_paths", {})
+    if not isinstance(paths, Mapping):
+        paths = {}
+    fields = item.get("review_fields", {})
+    if not isinstance(fields, Mapping):
+        fields = {}
+    return {
+        "review_id": _text_field(item.get("review_id", "")),
+        "failure_family": _text_field(item.get("failure_family", "")),
+        "row_index": _text_field(item.get("row_index", "")),
+        "split": _text_field(item.get("split", "")),
+        "actor_uid": _text_field(item.get("actor_uid", "")),
+        "package": _text_field(item.get("package", "")),
+        "category": _text_field(item.get("category", "")),
+        "filename": _text_field(item.get("filename", "")),
+        "source_bvh": _text_field(paths.get("source_bvh", "")),
+        "g1_csv": _text_field(paths.get("g1_csv", "")),
+        "merged_quality_action": _text_field(item.get("merged_quality_action", "")),
+        "merged_quality_flags": _join_list_field(item.get("merged_quality_flags", [])),
+        "metric_summary": _json_field(item.get("metrics", {})),
+        "decision": _text_field(fields.get("decision", "")),
+        "reviewer": _text_field(fields.get("reviewer", "")),
+        "confirmed_issue": _text_field(fields.get("confirmed_issue", "")),
+        "recommended_action": _text_field(fields.get("recommended_action", "")),
+        "notes": _text_field(fields.get("notes", "")),
+    }
+
+
 def _read_decisions(path: Path) -> list[dict[str, object]]:
     suffix = path.suffix.lower()
     if suffix == ".csv":
@@ -327,6 +436,20 @@ def _text_field(value: object) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _join_list_field(value: object) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, Sequence):
+        return "|".join(str(item).strip() for item in value if str(item).strip())
+    return _text_field(value)
+
+
+def _json_field(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    return json.dumps(value, sort_keys=True)
 
 
 def _incomplete_review_ids(items: Sequence[Mapping[str, object]]) -> list[str]:
@@ -461,6 +584,11 @@ def _write_json(path: Path, payload: Mapping[str, object]) -> None:
 def _write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _raise_if_exists(path: Path) -> None:
+    if path.exists():
+        raise FileExistsError(f"refusing to overwrite existing file: {path}")
 
 
 def _split_flags(flags: str) -> list[str]:

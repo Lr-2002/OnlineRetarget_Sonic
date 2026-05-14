@@ -17,7 +17,11 @@ from online_retarget.data.policy_audit import (
     audit_curation_policy,
 )
 from online_retarget.data.quality_merge import merge_quality_stats
-from online_retarget.data.review_manifest import build_review_manifest, merge_review_decisions
+from online_retarget.data.review_manifest import (
+    build_review_decision_template,
+    build_review_manifest,
+    merge_review_decisions,
+)
 from online_retarget.data.source_fk_quality import (
     SourceFKQualityConfig,
     scan_source_fk_quality_from_index,
@@ -322,6 +326,19 @@ def main() -> None:
     review_manifest.add_argument("--run-name", default="manual_review")
     review_manifest.add_argument("--max-per-family", type=int, default=5)
 
+    review_template = subparsers.add_parser(
+        "build-review-decision-template",
+        help="Build a reviewer-fillable CSV decision template from review_manifest.jsonl",
+    )
+    review_template.add_argument("--review-manifest-jsonl", type=Path, required=True)
+    review_template.add_argument("--output-csv", type=Path)
+    review_template.add_argument("--output-report-json", type=Path)
+    review_template.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow replacing an existing template/report file.",
+    )
+
     review_decisions = subparsers.add_parser(
         "merge-review-decisions",
         help="Merge manual review decisions into a new review manifest JSONL",
@@ -424,6 +441,8 @@ def main() -> None:
         _merge_quality(args)
     elif args.command == "build-review-manifest":
         _build_review_manifest(args)
+    elif args.command == "build-review-decision-template":
+        _build_review_decision_template(args)
     elif args.command == "merge-review-decisions":
         _merge_review_decisions(args)
     elif args.command == "audit-curation-policy":
@@ -661,6 +680,16 @@ def _build_review_manifest(args: argparse.Namespace) -> None:
         output_root=args.output_root,
         run_name=args.run_name,
         max_per_family=args.max_per_family,
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _build_review_decision_template(args: argparse.Namespace) -> None:
+    result = build_review_decision_template(
+        review_manifest_jsonl=args.review_manifest_jsonl,
+        output_csv=args.output_csv,
+        output_report_json=args.output_report_json,
+        overwrite=args.overwrite,
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 

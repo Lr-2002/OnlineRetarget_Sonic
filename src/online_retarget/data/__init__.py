@@ -23,7 +23,9 @@ from .pair_quality import PairQualityConfig, PairQualityScanResult, scan_pair_qu
 from .quality_merge import QualityMergeResult, merge_quality_stats
 from .review_manifest import (
     ReviewDecisionMergeResult,
+    ReviewDecisionTemplateResult,
     ReviewManifestResult,
+    build_review_decision_template,
     build_review_manifest,
     merge_review_decisions,
 )
@@ -87,12 +89,14 @@ __all__ = [
     "QualityPolicy",
     "QualityThreshold",
     "ReviewDecisionMergeResult",
+    "ReviewDecisionTemplateResult",
     "ReviewManifestResult",
     "SplitConfig",
     "SplitIndexResult",
     "assess_row_quality",
     "actor_skeletons",
     "build_split_index",
+    "build_review_decision_template",
     "build_review_manifest",
     "build_supervised_jsonl",
     "build_windowed_jsonl",

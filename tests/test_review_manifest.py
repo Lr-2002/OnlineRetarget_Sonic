@@ -4,7 +4,11 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from online_retarget.data.review_manifest import build_review_manifest, merge_review_decisions
+from online_retarget.data.review_manifest import (
+    build_review_decision_template,
+    build_review_manifest,
+    merge_review_decisions,
+)
 
 
 class ReviewManifestTests(unittest.TestCase):
@@ -52,6 +56,62 @@ class ReviewManifestTests(unittest.TestCase):
         )
         self.assertIn("Manual Motion Review Manifest", markdown)
         self.assertIn("Recommended action", markdown)
+
+    def test_build_review_decision_template_can_feed_merge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worst = root / "worst_clips.csv"
+            _write_worst_clips(worst)
+            manifest = build_review_manifest(
+                worst_clips_csv=worst,
+                output_root=root / "review",
+                run_name="fixture",
+                max_per_family=1,
+            )
+
+            template = build_review_decision_template(
+                review_manifest_jsonl=manifest.manifest_jsonl,
+                output_csv=root / "decisions_template.csv",
+                output_report_json=root / "decisions_template_report.json",
+            )
+            rows = _read_csv(template.output_csv)
+            report = json.loads(template.report_json.read_text(encoding="utf-8"))
+            for row in rows:
+                row["decision"] = "confirmed"
+                row["reviewer"] = "unit-test"
+                row["confirmed_issue"] = "yes"
+                row["recommended_action"] = "quarantine"
+                row["notes"] = "filled from template"
+            filled = root / "decisions_filled.csv"
+            _write_rows(filled, rows)
+
+            result = merge_review_decisions(
+                review_manifest_jsonl=manifest.manifest_jsonl,
+                decisions_file=filled,
+                output_jsonl=root / "reviewed.jsonl",
+                output_report_json=root / "decision_report.json",
+            )
+
+        self.assertEqual(template.manifest_items, len(rows))
+        self.assertEqual(report["manifest_items"], len(rows))
+        self.assertIn("metric_summary", rows[0])
+        self.assertEqual(rows[0]["source_bvh"], "soma/a.bvh")
+        self.assertEqual(rows[0]["g1_csv"], "g1/a.csv")
+        self.assertEqual(result.complete_decisions, len(rows))
+
+    def test_build_review_decision_template_refuses_existing_output_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "review_manifest.jsonl"
+            manifest.write_text(
+                json.dumps({"review_id": "known", "review_fields": {}}) + "\n",
+                encoding="utf-8",
+            )
+            output = root / "template.csv"
+            output.write_text("existing\n", encoding="utf-8")
+
+            with self.assertRaises(FileExistsError):
+                build_review_decision_template(manifest, output_csv=output)
 
     def test_merge_review_decisions_writes_reviewed_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -241,6 +301,18 @@ def _write_decisions_csv(path: Path, rows: list[dict[str, str]]) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _write_rows(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _read_csv(path: Path) -> list[dict[str, str]]:
+    with path.open(newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
 
 
 def _read_jsonl(path: Path) -> list[dict[str, object]]:
