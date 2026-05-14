@@ -19,6 +19,7 @@ from online_retarget.data.policy_audit import (
     preflight_curation_policy,
 )
 from online_retarget.data.quality_merge import merge_quality_stats
+from online_retarget.data.quality_smoke import QualitySmokeConfig, run_quality_smoke
 from online_retarget.data.review_manifest import (
     build_review_decision_template,
     build_review_manifest,
@@ -227,6 +228,30 @@ def main() -> None:
     pair_quality.add_argument("--max-frame-count-delta", type=int, default=0)
     pair_quality.add_argument("--max-duration-delta-sec", type=float, default=1e-3)
     pair_quality.add_argument("--target-provenance", default="kinematic_g1_csv")
+
+    quality_smoke = subparsers.add_parser(
+        "quality-smoke",
+        help="Run a bounded non-promotable M2Q data-filtering smoke pipeline",
+    )
+    quality_smoke.add_argument("--data-root", type=Path, default=Paths.from_env().data_root)
+    quality_smoke.add_argument("--output-root", type=Path, default=Paths.from_env().output_root)
+    quality_smoke.add_argument("--run-name", default="quality_smoke_limit24_by_category_split")
+    quality_smoke.add_argument("--limit", type=int, default=24)
+    quality_smoke.add_argument("--seed", type=int, default=17)
+    quality_smoke.add_argument("--train-ratio", type=float, default=0.8)
+    quality_smoke.add_argument("--val-ratio", type=float, default=0.1)
+    quality_smoke.add_argument(
+        "--sample-by",
+        action="append",
+        default=[],
+        help="Stratify bounded source/G1/pair scans by this split-index field. Defaults to category and split.",
+    )
+    quality_smoke.add_argument("--threshold-percentile", type=float, default=0.95)
+    quality_smoke.add_argument("--threshold-min-group-size", type=int, default=1)
+    quality_smoke.add_argument("--frame-stride", type=int, default=2)
+    quality_smoke.add_argument("--max-frames", type=int, default=256)
+    quality_smoke.add_argument("--model-xml", type=Path)
+    quality_smoke.add_argument("--review-max-per-family", type=int, default=3)
 
     thresholds = subparsers.add_parser(
         "propose-thresholds",
@@ -493,6 +518,8 @@ def main() -> None:
         _scan_source_fk_quality(args)
     elif args.command == "scan-pair-quality":
         _scan_pair_quality(args)
+    elif args.command == "quality-smoke":
+        _quality_smoke(args)
     elif args.command == "propose-thresholds":
         _propose_thresholds(args)
     elif args.command == "accept-threshold-policy":
@@ -659,6 +686,29 @@ def _scan_pair_quality(args: argparse.Namespace) -> None:
         splits=tuple(args.split),
         actions=tuple(args.curation_action) or ("keep", "downweight", "quarantine"),
         sample_by=tuple(args.sample_by),
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _quality_smoke(args: argparse.Namespace) -> None:
+    max_frames = args.max_frames if args.max_frames > 0 else None
+    result = run_quality_smoke(
+        data_root=args.data_root,
+        output_root=args.output_root,
+        config=QualitySmokeConfig(
+            run_name=args.run_name,
+            limit=args.limit,
+            seed=args.seed,
+            train_ratio=args.train_ratio,
+            val_ratio=args.val_ratio,
+            sample_by=tuple(args.sample_by) or ("category", "split"),
+            threshold_percentile=args.threshold_percentile,
+            threshold_min_group_size=args.threshold_min_group_size,
+            frame_stride=args.frame_stride,
+            max_frames=max_frames,
+            model_xml=args.model_xml,
+            review_max_per_family=args.review_max_per_family,
+        ),
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 
