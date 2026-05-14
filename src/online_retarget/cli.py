@@ -23,7 +23,10 @@ from online_retarget.data.source_fk_quality import (
     scan_source_fk_quality_from_index,
 )
 from online_retarget.data.supervised_builder import SupervisedBuildConfig, build_supervised_jsonl
-from online_retarget.data.thresholds import write_threshold_proposals
+from online_retarget.data.thresholds import (
+    write_accepted_threshold_policy,
+    write_threshold_proposals,
+)
 from online_retarget.data.windowed_builder import WindowedBuildConfig, build_windowed_jsonl
 from online_retarget.evaluation import EvaluationConfig, evaluate_jsonl
 
@@ -252,6 +255,23 @@ def main() -> None:
         help="Skip grouped threshold proposals with fewer rows than this.",
     )
 
+    threshold_policy = subparsers.add_parser(
+        "accept-threshold-policy",
+        help="Write a named accepted threshold policy artifact from proposal JSON files",
+    )
+    threshold_policy.add_argument("--policy-id", required=True)
+    threshold_policy.add_argument(
+        "--threshold-proposal-json",
+        type=Path,
+        action="append",
+        default=[],
+        help="Threshold proposal artifact to accept into the policy.",
+    )
+    threshold_policy.add_argument("--output-json", type=Path, required=True)
+    threshold_policy.add_argument("--accepted-by", required=True)
+    threshold_policy.add_argument("--rationale", required=True)
+    threshold_policy.add_argument("--representative", action="store_true")
+
     supervised = subparsers.add_parser(
         "build-supervised-jsonl",
         help="Build small source-BVH to G1-joint JSONL samples for baseline debugging",
@@ -322,6 +342,7 @@ def main() -> None:
     )
     policy_audit.add_argument("--policy-id", required=True)
     policy_audit.add_argument("--curated-report-json", type=Path, required=True)
+    policy_audit.add_argument("--threshold-policy-json", type=Path)
     policy_audit.add_argument(
         "--threshold-proposal-json",
         type=Path,
@@ -393,6 +414,8 @@ def main() -> None:
         _scan_pair_quality(args)
     elif args.command == "propose-thresholds":
         _propose_thresholds(args)
+    elif args.command == "accept-threshold-policy":
+        _accept_threshold_policy(args)
     elif args.command == "build-supervised-jsonl":
         _build_supervised_jsonl(args)
     elif args.command == "build-windowed-jsonl":
@@ -570,6 +593,20 @@ def _propose_thresholds(args: argparse.Namespace) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def _accept_threshold_policy(args: argparse.Namespace) -> None:
+    if not args.threshold_proposal_json:
+        raise SystemExit("accept-threshold-policy requires at least one --threshold-proposal-json")
+    payload = write_accepted_threshold_policy(
+        proposal_jsons=tuple(args.threshold_proposal_json),
+        output_json=args.output_json,
+        policy_id=args.policy_id,
+        accepted_by=args.accepted_by,
+        rationale=args.rationale,
+        representative=args.representative,
+    )
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
 def _build_supervised_jsonl(args: argparse.Namespace) -> None:
     result = build_supervised_jsonl(
         data_root=args.data_root,
@@ -642,6 +679,7 @@ def _audit_curation_policy(args: argparse.Namespace) -> None:
     result = audit_curation_policy(
         curated_report_json=args.curated_report_json,
         threshold_proposal_jsons=tuple(args.threshold_proposal_json),
+        threshold_policy_json=args.threshold_policy_json,
         review_report_json=args.review_report_json,
         review_manifest_jsonl=args.review_manifest_jsonl,
         review_decision_report_json=args.review_decision_report_json,

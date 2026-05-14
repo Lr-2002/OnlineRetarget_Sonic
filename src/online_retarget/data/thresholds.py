@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
+import subprocess
 from typing import Mapping, Sequence
 
 
@@ -85,6 +86,52 @@ def write_threshold_proposals(
         min_group_size=min_group_size,
         lower_metrics=lower_metrics,
     )
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    output_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return payload
+
+
+def write_accepted_threshold_policy(
+    proposal_jsons: Sequence[Path],
+    output_json: Path,
+    policy_id: str,
+    accepted_by: str,
+    rationale: str,
+    representative: bool = False,
+) -> dict[str, object]:
+    """Write a named threshold policy artifact from reviewed proposal files."""
+
+    if not proposal_jsons:
+        raise ValueError("at least one threshold proposal JSON is required")
+    policy_id = policy_id.strip()
+    accepted_by = accepted_by.strip()
+    rationale = rationale.strip()
+    if not policy_id:
+        raise ValueError("policy_id is required")
+    if not accepted_by:
+        raise ValueError("accepted_by is required")
+    if not rationale:
+        raise ValueError("rationale is required")
+
+    proposal_reports = [_read_json(path) for path in proposal_jsons]
+    proposal_summaries = [
+        _threshold_report_summary(path, report)
+        for path, report in zip(proposal_jsons, proposal_reports)
+    ]
+    total_samples = sum(int(summary["sample_count"]) for summary in proposal_summaries)
+    payload = {
+        "policy_id": policy_id,
+        "status": "accepted",
+        "accepted_by": accepted_by,
+        "rationale": rationale,
+        "representative": representative,
+        "proposal_jsons": [str(path) for path in proposal_jsons],
+        "proposal_summaries": proposal_summaries,
+        "proposal_count": sum(int(summary["proposal_count"]) for summary in proposal_summaries),
+        "total_samples": total_samples,
+        "git_sha": _git_sha(),
+        "git_dirty": _git_dirty(),
+    }
     output_json.parent.mkdir(parents=True, exist_ok=True)
     output_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return payload
@@ -181,6 +228,45 @@ def _iter_jsonl(path: Path) -> list[dict[str, object]]:
     return rows
 
 
+def _read_json(path: Path) -> dict[str, object]:
+    with path.open(encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError(f"JSON file must contain an object: {path}")
+    return payload
+
+
+def _threshold_report_summary(path: Path, report: Mapping[str, object]) -> dict[str, object]:
+    proposals = report.get("proposals", [])
+    group_by = report.get("group_by", [])
+    grouped_rows = report.get("grouped_rows", {})
+    if not isinstance(proposals, Sequence) or isinstance(proposals, (str, bytes)):
+        proposals = []
+    if not isinstance(group_by, Sequence) or isinstance(group_by, (str, bytes)):
+        group_by = []
+    if not isinstance(grouped_rows, Mapping):
+        grouped_rows = {}
+    metrics = []
+    for proposal in proposals:
+        if isinstance(proposal, Mapping):
+            metric = proposal.get("metric")
+            if metric is not None:
+                metrics.append(str(metric))
+    lower_metrics = report.get("lower_metrics", [])
+    if not isinstance(lower_metrics, Sequence) or isinstance(lower_metrics, (str, bytes)):
+        lower_metrics = []
+    return {
+        "path": str(path),
+        "stats_jsonl": str(report.get("stats_jsonl", "")),
+        "sample_count": _as_int(report.get("sample_count")),
+        "proposal_count": len(proposals),
+        "metrics": metrics,
+        "group_by": [str(field) for field in group_by],
+        "grouped_rows": {str(key): _as_int(value) for key, value in grouped_rows.items()},
+        "lower_metrics": [str(metric) for metric in lower_metrics],
+    }
+
+
 def _numeric_values(rows: Sequence[Mapping[str, object]], metric: str) -> list[float]:
     values: list[float] = []
     for row in rows:
@@ -188,6 +274,21 @@ def _numeric_values(rows: Sequence[Mapping[str, object]], metric: str) -> list[f
         if isinstance(value, (int, float)):
             values.append(float(value))
     return values
+
+
+def _as_int(value: object) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value))
+        except ValueError:
+            return 0
+    return 0
 
 
 def _group_key(value: object) -> str:
@@ -208,3 +309,22 @@ def _percentile(sorted_values: Sequence[float], q: float) -> float:
         return sorted_values[lower]
     weight = position - lower
     return sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight
+
+
+def _git_sha() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def _git_dirty() -> bool:
+    try:
+        result = subprocess.check_output(
+            ["git", "status", "--porcelain"], stderr=subprocess.DEVNULL, text=True
+        )
+        return bool(result.strip())
+    except Exception:
+        return False

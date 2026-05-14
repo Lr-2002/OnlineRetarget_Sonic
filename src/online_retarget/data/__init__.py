@@ -47,7 +47,12 @@ from .source_fk_quality import (
     SourceFKQualityScanResult,
     scan_source_fk_quality_from_index,
 )
-from .thresholds import ThresholdProposal, propose_thresholds_from_jsonl, write_threshold_proposals
+from .thresholds import (
+    ThresholdProposal,
+    propose_thresholds_from_jsonl,
+    write_accepted_threshold_policy,
+    write_threshold_proposals,
+)
 from .windowed_builder import (
     WindowedBuildConfig,
     WindowedBuildResult,
@@ -104,4 +109,5 @@ __all__ = [
     "select_rows_for_scan",
     "summarize_metadata",
     "write_threshold_proposals",
+    "write_accepted_threshold_policy",
 ]

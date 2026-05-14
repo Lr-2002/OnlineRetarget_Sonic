@@ -7,7 +7,11 @@ import contextlib
 import io
 
 from online_retarget import cli
-from online_retarget.data.thresholds import propose_thresholds_from_jsonl, write_threshold_proposals
+from online_retarget.data.thresholds import (
+    propose_thresholds_from_jsonl,
+    write_accepted_threshold_policy,
+    write_threshold_proposals,
+)
 
 
 class ThresholdProposalTests(unittest.TestCase):
@@ -108,6 +112,57 @@ class ThresholdProposalTests(unittest.TestCase):
             self.assertTrue(output.exists())
             self.assertEqual(json.loads(output.read_text())["proposals"][0]["value"], 0.1)
 
+    def test_write_accepted_threshold_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stats = root / "stats.jsonl"
+            proposal = root / "thresholds.json"
+            policy = root / "accepted_policy.json"
+            stats.write_text('{"joint_jump_rate": 0.0}\n{"joint_jump_rate": 0.2}\n', encoding="utf-8")
+            write_threshold_proposals(
+                stats_jsonl=stats,
+                output_json=proposal,
+                metrics=("joint_jump_rate",),
+                percentile=0.5,
+                group_by=("category",),
+            )
+
+            payload = write_accepted_threshold_policy(
+                proposal_jsons=(proposal,),
+                output_json=policy,
+                policy_id="policy_v1",
+                accepted_by="unit-test",
+                rationale="Fixture policy acceptance.",
+                representative=True,
+            )
+            written = json.loads(policy.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["policy_id"], "policy_v1")
+        self.assertEqual(payload["status"], "accepted")
+        self.assertTrue(payload["representative"])
+        self.assertEqual(written["proposal_count"], 1)
+        self.assertEqual(written["proposal_summaries"][0]["metrics"], ["joint_jump_rate"])
+
+    def test_write_accepted_threshold_policy_requires_rationale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proposal = root / "thresholds.json"
+            proposal.write_text(
+                json.dumps({"sample_count": 1, "proposals": [{"metric": "x"}]}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError) as raised:
+                write_accepted_threshold_policy(
+                    proposal_jsons=(proposal,),
+                    output_json=root / "policy.json",
+                    policy_id="policy_v1",
+                    accepted_by="unit-test",
+                    rationale="",
+                )
+
+        self.assertIn("rationale", str(raised.exception))
+
     def test_cli_accepts_only_lower_tail_metric(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -138,6 +193,45 @@ class ThresholdProposalTests(unittest.TestCase):
         self.assertEqual(proposal["metric"], "contact_frame_ratio")
         self.assertEqual(proposal["tail"], "lower")
         self.assertEqual(proposal["comparison"], "<")
+
+    def test_cli_accept_threshold_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proposal = root / "thresholds.json"
+            output = root / "policy.json"
+            proposal.write_text(
+                json.dumps(
+                    {
+                        "sample_count": 1,
+                        "proposals": [{"metric": "joint_jump_rate"}],
+                        "group_by": ["category", "split"],
+                        "grouped_rows": {"category": 1, "split": 1},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            argv = [
+                "online-retarget",
+                "accept-threshold-policy",
+                "--policy-id",
+                "policy_v1",
+                "--threshold-proposal-json",
+                str(proposal),
+                "--output-json",
+                str(output),
+                "--accepted-by",
+                "unit-test",
+                "--rationale",
+                "Fixture acceptance.",
+            ]
+            with mock.patch("sys.argv", argv), contextlib.redirect_stdout(io.StringIO()):
+                cli.main()
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["policy_id"], "policy_v1")
+        self.assertEqual(payload["status"], "accepted")
 
     def test_cli_requires_at_least_one_metric(self):
         with tempfile.TemporaryDirectory() as tmp:

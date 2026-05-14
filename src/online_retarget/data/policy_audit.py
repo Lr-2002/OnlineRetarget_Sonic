@@ -48,6 +48,7 @@ def audit_curation_policy(
     curated_report_json: Path,
     threshold_proposal_jsons: Sequence[Path],
     output_json: Path | None = None,
+    threshold_policy_json: Path | None = None,
     review_report_json: Path | None = None,
     review_manifest_jsonl: Path | None = None,
     review_decision_report_json: Path | None = None,
@@ -58,6 +59,7 @@ def audit_curation_policy(
     cfg = config or CurationPolicyAuditConfig(policy_id=curated_report_json.stem)
     curated_report = _read_json(curated_report_json)
     threshold_reports = [_read_json(path) for path in threshold_proposal_jsons]
+    threshold_policy = _read_json(threshold_policy_json) if threshold_policy_json else {}
     review_report = _read_json(review_report_json) if review_report_json else {}
     review_decision_report = (
         _read_json(review_decision_report_json) if review_decision_report_json else {}
@@ -69,6 +71,7 @@ def audit_curation_policy(
     evidence: dict[str, object] = {
         "curated_report_json": str(curated_report_json),
         "threshold_proposal_jsons": [str(path) for path in threshold_proposal_jsons],
+        "threshold_policy_json": str(threshold_policy_json) if threshold_policy_json else "",
         "review_report_json": str(review_report_json) if review_report_json else "",
         "review_manifest_jsonl": str(review_manifest_jsonl) if review_manifest_jsonl else "",
         "review_decision_report_json": str(review_decision_report_json)
@@ -79,7 +82,7 @@ def audit_curation_policy(
     }
 
     _audit_curated_report(curated_report, cfg, blockers, warnings, evidence)
-    _audit_threshold_reports(threshold_reports, cfg, blockers, warnings, evidence)
+    _audit_threshold_reports(threshold_reports, threshold_policy, cfg, blockers, warnings, evidence)
     _audit_manual_review(
         review_report,
         review_items,
@@ -171,6 +174,7 @@ def _audit_curated_report(
 
 def _audit_threshold_reports(
     reports: Sequence[Mapping[str, object]],
+    policy: Mapping[str, object],
     cfg: CurationPolicyAuditConfig,
     blockers: list[str],
     warnings: list[str],
@@ -180,7 +184,8 @@ def _audit_threshold_reports(
         blockers.append("no threshold proposal files were provided")
         evidence["threshold_reports"] = []
         return
-    if not cfg.thresholds_accepted:
+    policy_accepted = _audit_threshold_policy(policy, cfg, blockers, warnings, evidence)
+    if not cfg.thresholds_accepted and not policy_accepted:
         blockers.append("threshold proposals have not been explicitly accepted as a policy")
 
     threshold_evidence = []
@@ -223,6 +228,51 @@ def _audit_threshold_reports(
             }
         )
     evidence["threshold_reports"] = threshold_evidence
+
+
+def _audit_threshold_policy(
+    policy: Mapping[str, object],
+    cfg: CurationPolicyAuditConfig,
+    blockers: list[str],
+    warnings: list[str],
+    evidence: dict[str, object],
+) -> bool:
+    if not policy:
+        evidence["threshold_policy"] = {}
+        return False
+    status = str(policy.get("status", "")).strip()
+    policy_id = str(policy.get("policy_id", "")).strip()
+    accepted_by = str(policy.get("accepted_by", "")).strip()
+    rationale = str(policy.get("rationale", "")).strip()
+    summaries = policy.get("proposal_summaries", [])
+    if not isinstance(summaries, Sequence) or isinstance(summaries, (str, bytes)):
+        summaries = []
+    evidence["threshold_policy"] = {
+        "policy_id": policy_id,
+        "status": status,
+        "accepted_by": accepted_by,
+        "representative": bool(policy.get("representative", False)),
+        "proposal_count": _as_int(policy.get("proposal_count")),
+        "total_samples": _as_int(policy.get("total_samples")),
+        "summary_count": len(summaries),
+        "git_sha": str(policy.get("git_sha", "")),
+        "git_dirty": bool(policy.get("git_dirty", False)),
+    }
+    if status != "accepted":
+        blockers.append("threshold policy artifact is not accepted")
+    if policy_id != cfg.policy_id:
+        blockers.append(f"threshold policy ID mismatch: expected {cfg.policy_id}, found {policy_id}")
+    if not accepted_by:
+        blockers.append("threshold policy artifact is missing accepted_by")
+    if not rationale:
+        blockers.append("threshold policy artifact is missing rationale")
+    if not summaries:
+        blockers.append("threshold policy artifact has no proposal summaries")
+    if cfg.require_clean_report_git and bool(policy.get("git_dirty", False)):
+        blockers.append("threshold policy artifact was generated from a dirty git tree")
+    if bool(policy.get("representative", False)) and not cfg.allow_representative:
+        warnings.append("threshold policy artifact is marked representative")
+    return status == "accepted" and policy_id == cfg.policy_id and bool(accepted_by) and bool(rationale)
 
 
 def _audit_manual_review(

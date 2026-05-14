@@ -39,6 +39,10 @@ class CurationPolicyAuditTests(unittest.TestCase):
             root = Path(tmp)
             curated = _write_curated_report(root / "curated_report.json", row_count=10, scanned=10)
             thresholds = _write_thresholds(root / "thresholds.json", sample_count=10)
+            threshold_policy = _write_threshold_policy(
+                root / "threshold_policy.json",
+                policy_id="candidate_v1",
+            )
             review_report = _write_review_report(root / "review_report.json")
             manifest = _write_review_manifest(root / "review_manifest.jsonl", complete=True)
             output = root / "audit.json"
@@ -46,13 +50,11 @@ class CurationPolicyAuditTests(unittest.TestCase):
             result = audit_curation_policy(
                 curated_report_json=curated,
                 threshold_proposal_jsons=(thresholds,),
+                threshold_policy_json=threshold_policy,
                 review_report_json=review_report,
                 review_manifest_jsonl=manifest,
                 output_json=output,
-                config=CurationPolicyAuditConfig(
-                    policy_id="candidate_v1",
-                    thresholds_accepted=True,
-                ),
+                config=CurationPolicyAuditConfig(policy_id="candidate_v1"),
             )
 
             written = json.loads(output.read_text(encoding="utf-8"))
@@ -60,6 +62,31 @@ class CurationPolicyAuditTests(unittest.TestCase):
         self.assertTrue(result.promotable)
         self.assertEqual(result.blockers, [])
         self.assertEqual(written["status"], "promotable")
+        self.assertEqual(result.evidence["threshold_policy"]["policy_id"], "candidate_v1")
+
+    def test_blocks_threshold_policy_id_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            curated = _write_curated_report(root / "curated_report.json", row_count=10, scanned=10)
+            thresholds = _write_thresholds(root / "thresholds.json", sample_count=10)
+            threshold_policy = _write_threshold_policy(
+                root / "threshold_policy.json",
+                policy_id="other_policy",
+            )
+            review_report = _write_review_report(root / "review_report.json")
+            manifest = _write_review_manifest(root / "review_manifest.jsonl", complete=True)
+
+            result = audit_curation_policy(
+                curated_report_json=curated,
+                threshold_proposal_jsons=(thresholds,),
+                threshold_policy_json=threshold_policy,
+                review_report_json=review_report,
+                review_manifest_jsonl=manifest,
+                config=CurationPolicyAuditConfig(policy_id="candidate_v1"),
+            )
+
+        self.assertFalse(result.promotable)
+        self.assertIn("threshold policy ID mismatch", "\n".join(result.blockers))
 
     def test_representative_mode_warns_instead_of_blocking_scan_coverage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -202,6 +229,30 @@ def _write_thresholds(path: Path, sample_count: int) -> Path:
         "group_by": ["category", "split"],
         "grouped_rows": {"category": sample_count, "split": sample_count},
         "lower_metrics": [],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _write_threshold_policy(path: Path, policy_id: str) -> Path:
+    payload = {
+        "policy_id": policy_id,
+        "status": "accepted",
+        "accepted_by": "unit-test",
+        "rationale": "Fixture policy acceptance.",
+        "representative": False,
+        "proposal_count": 1,
+        "total_samples": 10,
+        "proposal_summaries": [
+            {
+                "path": "thresholds.json",
+                "sample_count": 10,
+                "proposal_count": 1,
+                "group_by": ["category", "split"],
+            }
+        ],
+        "git_sha": "abc123",
+        "git_dirty": False,
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
