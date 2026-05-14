@@ -26,7 +26,7 @@ PYTHONPATH=src:. python3 scripts/train.py --config configs/baseline_mlp.yaml --d
 PYTHONPATH=src:. python3 scripts/train.py --config configs/baseline_mlp.yaml --samples-jsonl runs/supervised/train_merged-quality-action_h8_limit8/samples.jsonl --max-steps 1
 ```
 
-Latest unit-test evidence: 98 tests passed, 1 skipped with `PYTHONPATH=src:. python3 -m unittest discover -s tests`.
+Latest unit-test evidence: 106 tests passed, 1 skipped with `PYTHONPATH=src:. python3 -m unittest discover -s tests`.
 
 ## Checklist
 
@@ -65,6 +65,8 @@ Latest unit-test evidence: 98 tests passed, 1 skipped with `PYTHONPATH=src:. pyt
 - Manual review decision template command: `PYTHONPATH=src:. python3 scripts/inspect_bones_seed.py build-review-decision-template --review-manifest-jsonl <review_manifest.jsonl> --output-csv <review_decision_template.csv> --output-report-json <review_decision_template_report.json>`
 - Manual review decision ingest command: `PYTHONPATH=src:. python3 scripts/inspect_bones_seed.py merge-review-decisions --review-manifest-jsonl <review_manifest.jsonl> --decisions-file <decisions.csv|jsonl> --output-jsonl <review_manifest.reviewed.jsonl> --output-report-json <review_decision_report.json>`
 - Representative policy-promotion audit: `runs/curated/representative_source_g1_pair_limit560_by_category_split/policy_audit.json`
+- Partial balanced G1 quality review CSV/report: `runs/curated/g1_partial_quality_review/g1_partial_balanced_review.csv`, `runs/curated/g1_partial_quality_review/g1_partial_balanced_review_report.json`
+- Partial balanced G1 review clips: `runs/review_clips/g1_partial_balanced_cli_render_check/summary.csv` and per-clip `target_g1_mujoco.mp4`; the refreshed summary carries `review_family`, `max_start_end_root_speed`, contact, penetration, joint-limit, and self-collision metric columns for each demo.
 - Supervised debug samples: `runs/supervised/train_h8_limit8/samples.jsonl`
 - Curated-index supervised debug samples: `runs/supervised/train_merged-quality-action_h8_limit8/samples.jsonl`
 - Curated-index 30-body window smoke samples: `runs/supervised/train_merged-quality-action_30b_h8_limit4/samples.jsonl`
@@ -75,6 +77,8 @@ Latest unit-test evidence: 98 tests passed, 1 skipped with `PYTHONPATH=src:. pyt
 Latest G1 MJCF FK/contact/self-collision-proxy smoke result: first 100 clips scanned with `/home/user/repos/GMR/assets/unitree_g1/g1_mocap_29dof.xml`, `frame_stride=2`, `max_frames=256`; keep/downweight/quarantine = 18/36/46, flags `g1_foot_slide=70`, `g1_ground_penetration=41`, `g1_joint_limit_violation=18`, `g1_unstable_start_end=8`, `g1_foot_float=1`, `g1_self_collision_proxy=1`. The refreshed three-way curated smoke index has keep/downweight/quarantine/exclude = 71,088/71,048/83/1 and includes `source_fk:source_foot_slide=20`, `source_fk:source_low_foot_contact=38`, `g1:g1_self_collision_proxy=1`, source/G1 FK contact metrics in `worst_clips.csv`, and `diversity_loss` showing 0 lost actor/source-skeleton groups in this smoke policy.
 
 Latest representative M2Q evidence: category/split-stratified 560-row scans are available for source BVH, source FK/contact, G1 FK/contact/self-collision-proxy, and source/G1 pair provenance. The representative pair report records `g1_fps=120`, source frame time `0.008333333333333333`, 0 max frame-count delta, and 66 tiny duration mismatches over the strict 1 ms tolerance. The four-way representative curated report records keep/downweight/quarantine/exclude = 70,858/70,876/479/7, with 0 lost actor/source-skeleton/category/split groups under the current provisional action policy. These are calibration artifacts, not a formal curation policy.
+
+Latest full G1 scan progress: tmux session `m2q_g1_full` is still running. As of this audit, `runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_full/g1_quality_stats.jsonl` has 34,584 rows and `g1_quality_report.json` has not been written.
 
 ## Stop Condition
 

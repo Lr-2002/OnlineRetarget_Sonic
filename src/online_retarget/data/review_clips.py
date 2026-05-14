@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 import csv
 import json
 import math
+import os
 from pathlib import Path
 import re
 import tarfile
@@ -20,6 +21,7 @@ DEFAULT_REVIEW_CLIP_COLUMNS = (
     "quality_flags",
     "merged_quality_action",
     "merged_quality_flags",
+    "review_family",
     "row_index",
     "split",
     "category",
@@ -33,6 +35,25 @@ DEFAULT_REVIEW_CLIP_COLUMNS = (
     "abs_duration_delta_sec",
     "source_duration_sec",
     "g1_duration_sec",
+)
+
+QUALITY_METRIC_COLUMNS = (
+    "max_abs_joint_velocity",
+    "joint_jump_rate",
+    "max_abs_joint_acceleration",
+    "max_root_acceleration",
+    "max_root_jerk",
+    "max_root_speed",
+    "max_start_end_root_speed",
+    "joint_limit_violation_rate",
+    "max_joint_limit_violation",
+    "mean_foot_clearance",
+    "penetration_depth",
+    "contact_frame_ratio",
+    "contact_slide_rate",
+    "max_contact_slide_speed",
+    "self_collision_proxy_rate",
+    "min_self_collision_distance",
 )
 
 
@@ -204,6 +225,8 @@ def _metadata_for_row(
     }
     for column in DEFAULT_REVIEW_CLIP_COLUMNS:
         metadata[column] = row.get(column, "")
+    for column in QUALITY_METRIC_COLUMNS:
+        metadata[column] = row.get(column, "")
     metadata["quality_action"] = str(
         row.get("quality_action") or row.get("merged_quality_action") or ""
     )
@@ -223,6 +246,7 @@ def _write_summary_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> None
         "quality_flags",
         "merged_quality_action",
         "merged_quality_flags",
+        "review_family",
         "split",
         "category",
         "actor_uid",
@@ -240,6 +264,7 @@ def _write_summary_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> None
         "target_g1_video",
         "render_status",
         "render_message",
+        *QUALITY_METRIC_COLUMNS,
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -296,6 +321,7 @@ Each sample directory contains:
 - `metadata.json`
 
 These videos visualize the paired G1 target CSV only. They are not learned retargeter predictions and not Isaac Lab rollouts.
+When present, `review_family` and metric columns come from the input review CSV so each clip can be traced back to the specific quality flag that selected it.
 
 Config:
 
@@ -337,6 +363,7 @@ class _G1Renderer:
     def __init__(self, config: ReviewClipExportConfig) -> None:
         if config.model_xml is None:
             raise ValueError("render_g1 requires model_xml")
+        os.environ.setdefault("MUJOCO_GL", "egl")
         self._config = config
         try:
             import mujoco  # type: ignore[import-not-found]

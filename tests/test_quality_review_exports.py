@@ -120,6 +120,43 @@ class QualityReviewExportTests(unittest.TestCase):
         self.assertIn("quality_action", output_text)
         self.assertIn("review_family", output_text)
 
+    def test_unstable_start_end_uses_start_end_speed_metric(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stats = root / "g1_stats.jsonl"
+            _write_jsonl(
+                stats,
+                [
+                    _row(
+                        "1",
+                        "high_joint_velocity",
+                        "quarantine",
+                        "g1_unstable_start_end",
+                        joint_velocity=200.0,
+                        start_end_root_speed=0.21,
+                    ),
+                    _row(
+                        "2",
+                        "high_start_end_speed",
+                        "quarantine",
+                        "g1_unstable_start_end",
+                        joint_velocity=5.0,
+                        start_end_root_speed=1.2,
+                    ),
+                ],
+            )
+
+            result = export_balanced_quality_review_csv(
+                stats_jsonl=stats,
+                output_csv=root / "review.csv",
+                flags=("g1_unstable_start_end",),
+                max_per_flag=1,
+            )
+            rows = _read_csv(result.output_csv)
+
+        self.assertEqual(rows[0]["filename"], "high_start_end_speed")
+        self.assertEqual(rows[0]["max_start_end_root_speed"], "1.2")
+
 
 def _row(
     row_index: str,
@@ -130,6 +167,8 @@ def _row(
     penetration: float = 0.0,
     slide: float = 0.0,
     collision: float = 0.0,
+    joint_velocity: float = 0.0,
+    start_end_root_speed: float = 0.0,
 ) -> dict[str, object]:
     return {
         "quality_action": action,
@@ -144,6 +183,8 @@ def _row(
         "penetration_depth": penetration,
         "contact_slide_rate": slide,
         "self_collision_proxy_rate": collision,
+        "max_abs_joint_velocity": joint_velocity,
+        "max_start_end_root_speed": start_end_root_speed,
     }
 
 

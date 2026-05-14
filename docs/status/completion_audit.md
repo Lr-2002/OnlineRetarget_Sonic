@@ -4,7 +4,7 @@ Date: 2026-05-14.
 
 Objective: "start implementing M1-M7; write live logs; make work traceable."
 
-Verdict: not complete. The repo now has runnable scaffolds, real BONES-SEED smoke and representative M2Q artifacts, live logs, and traceability surfaces, but formal M1-M7 completion is blocked by missing full paper deep-read, calibrated/promoted M2Q policy, final 30-body dataset extraction, real training, real 4090 latency, and Isaac Lab simulator evaluation.
+Verdict: not complete. The repo now has runnable scaffolds, real BONES-SEED smoke and representative M2Q artifacts, live logs, review-demo traceability surfaces, and quality-gated training entry points, but formal M1-M7 completion is blocked by missing full paper deep-read, calibrated/promoted M2Q policy, final 30-body dataset extraction, real training, real 4090 latency, and Isaac Lab simulator evaluation.
 
 ## Prompt-to-Artifact Checklist
 
@@ -27,11 +27,67 @@ Verdict: not complete. The repo now has runnable scaffolds, real BONES-SEED smok
 | Implement web retarget preview | `scripts/run_web.py`, `src/online_retarget/web_app.py`, `src/online_retarget/web_pipeline.py`, `src/online_retarget/web_static/*`, `tests/test_web_pipeline.py`, `outputs/web_runs/1778729853-sample_upload-79da8236/pipeline_result.json`, `outputs/web_runs/1778730775-sample_smpl_like-3db7f515/pipeline_result.json` | Local standard-library web console implemented for BVH upload, approximate SMPL-like `.npz` preview from common pose/translation arrays, rule-based G1 preview retarget output, G1 MJCF kinematic preview, run artifacts, and explicit MuJoCo physics blocked/failed/ok status. A repo-local venv with `mujoco==3.8.1` completed real MuJoCo physics rollouts from both BVH and SMPL-like web flows against the G1 MJCF. Learned retarget checkpoints, full SMPL/SMPL-X body-model decoding, and controller-grade physical tracking remain pending. |
 | Write live logs | `docs/logs/implementation-log.md` | Satisfied for current implementation history. Keep updating during future work. |
 | Make process/status readable | `docs/milestones.md`, `docs/status/m1_m7_status.md`, this audit | Satisfied as a living tracking surface, not final completion. |
-| Verify current work | `PYTHONPATH=src:. python3 -m unittest discover -s tests` -> 91 tests OK in this pass; targeted review-template tests -> 6 tests OK; targeted web-pipeline tests -> 2 tests OK; targeted policy-audit/preflight tests -> 8 tests OK; `build-review-decision-template --help` and `preflight-curation-policy --help` -> OK; representative preflight generated blocked `policy_preflight.json` with five discovered threshold proposal files and three next actions; representative 42-item review manifest generated a `/tmp` CSV template without writing under `runs/`; web preview Playwright upload to `http://127.0.0.1:8765` generated `outputs/web_runs/1778729853-sample_upload-79da8236/retargeted_g1_preview.csv`, rendered the canvas, reported zero browser console errors, and completed MuJoCo physics with `qpos_dim=36`, `ctrl_dim=29`, `steps=3`; targeted `py_compile` -> OK; dry-run training -> OK with `samples_builder_is_formal=true` and blocked policy-audit context; `git diff --check` -> OK; source FK/contact and G1 MJCF FK/contact/self-collision-proxy smoke scans -> OK; representative 560-row scans and upper/lower-tail grouped threshold artifacts generated; four-way `merge-quality` refreshed curated representative artifacts with pair/provenance stats; manual review manifests generated; `merge-review-decisions` fixture merge reports partial completion without promotion; `accept-threshold-policy` fixture writes an accepted policy artifact without promoting the representative policy; `audit-curation-policy` generated blocked policy audits; formal non-dry-run training fails before torch import on an unpromotable policy audit; raw-debug artifact formal training check fails as intended | Current scaffold verified. Not evidence of full M1-M7 completion. |
+| Verify current work | Latest `PYTHONPATH=src:. python3 -m unittest discover -s tests` -> 106 tests OK, 1 skipped; targeted review-export `py_compile` -> OK; `git diff --check` -> OK; regenerated `runs/curated/g1_partial_quality_review/g1_partial_balanced_review.csv` and `runs/review_clips/g1_partial_balanced_cli_render_check` with 8 MuJoCo G1 videos, `render_status=ok`, `review_family`, and per-clip quality metrics in `summary.csv`/`metadata.json`; full G1 scan progress checked at 34,584 JSONL rows with no final `g1_quality_report.json` yet. Earlier verification also includes review-template tests, web-pipeline tests, policy-audit/preflight tests, blocked representative preflight, web MuJoCo smoke, dry-run training, source/G1/pair quality scans, representative 560-row scans, manual review manifests, blocked formal training on unpromotable policy audit, and raw-debug artifact rejection. | Current scaffold and review-demo traceability verified. Not evidence of full M1-M7 completion. |
 
 ## Latest Verification Evidence
 
 ```bash
+PYTHONPATH=src:. python3 -m unittest discover -s tests
+# Ran 106 tests in 0.135s, OK (skipped=1).
+
+python3 -m py_compile \
+  src/online_retarget/data/quality_review_exports.py \
+  src/online_retarget/data/review_clips.py \
+  tests/test_quality_review_exports.py \
+  tests/test_review_clips.py
+# OK
+
+git diff --check
+# OK
+
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py export-balanced-quality-review \
+  --stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_full/g1_quality_stats.jsonl \
+  --split-index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
+  --output-csv runs/curated/g1_partial_quality_review/g1_partial_balanced_review.csv \
+  --output-report-json runs/curated/g1_partial_quality_review/g1_partial_balanced_review_report.json \
+  --flag g1_foot_slide \
+  --flag g1_joint_limit_violation \
+  --flag g1_unstable_start_end \
+  --flag g1_ground_penetration \
+  --flag joint_velocity_jump \
+  --flag g1_foot_float \
+  --flag g1_self_collision_proxy \
+  --flag g1_low_foot_contact \
+  --max-per-flag 1 \
+  --include-downweight
+# Refreshed a partial, non-promotable balanced review CSV with 8 rows.
+# The CSV now includes max_start_end_root_speed and ranks
+# g1_unstable_start_end by that metric.
+
+PYTHONPATH=src outputs/web_mujoco_venv/bin/python scripts/inspect_bones_seed.py export-review-clips \
+  --data-root /home/user/data/motion_data \
+  --input-csv runs/curated/g1_partial_quality_review/g1_partial_balanced_review.csv \
+  --output-root runs/review_clips \
+  --run-name g1_partial_balanced_cli_render_check \
+  --label g1_partial_balanced \
+  --limit 8 \
+  --render-g1 \
+  --model-xml /home/user/repos/GMR/assets/unitree_g1/g1_mocap_29dof.xml \
+  --render-max-frames 90 \
+  --render-width 640 \
+  --render-height 360 \
+  --fps 120 \
+  --root-position-scale 0.01 \
+  --angle-scale 0.017453292519943295
+# Refreshed runs/review_clips/g1_partial_balanced_cli_render_check with
+# render_counts.ok=8. summary.csv and per-clip metadata.json now carry
+# review_family plus contact, penetration, joint-limit, start/end,
+# velocity, float, and self-collision proxy metrics.
+
+wc -l runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_full/g1_quality_stats.jsonl
+# 34584 .../g1_quality_stats.jsonl
+# tmux session m2q_g1_full still running; no final g1_quality_report.json yet.
+
 PYTHONPATH=src:. python3 -m unittest discover -s tests
 # Ran 54 tests in 0.054s, OK.
 

@@ -43,7 +43,11 @@ class ReviewClipExportTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["filename"], "good")
         self.assertEqual(rows[0]["render_status"], "not_requested")
+        self.assertEqual(rows[0]["review_family"], "pair_duration_mismatch")
+        self.assertEqual(rows[0]["contact_slide_rate"], "0.25")
         self.assertEqual(metadata["quality_flags"], "pair_duration_mismatch")
+        self.assertEqual(metadata["review_family"], "pair_duration_mismatch")
+        self.assertEqual(metadata["contact_slide_rate"], "0.25")
         self.assertTrue(source_exists)
         self.assertTrue(target_exists)
 
@@ -108,6 +112,9 @@ def _write_review_csv(path: Path) -> None:
         "abs_duration_delta_sec",
         "source_duration_sec",
         "g1_duration_sec",
+        "review_family",
+        "contact_slide_rate",
+        "max_contact_slide_speed",
     ]
     rows = [
         {
@@ -126,6 +133,9 @@ def _write_review_csv(path: Path) -> None:
             "abs_duration_delta_sec": "0.01",
             "source_duration_sec": "0.1",
             "g1_duration_sec": "0.11",
+            "review_family": "pair_duration_mismatch",
+            "contact_slide_rate": "0.25",
+            "max_contact_slide_speed": "0.5",
         }
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:

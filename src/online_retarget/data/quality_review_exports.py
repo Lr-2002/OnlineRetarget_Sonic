@@ -29,6 +29,7 @@ DEFAULT_METRIC_COLUMNS = (
     "max_root_acceleration",
     "max_root_jerk",
     "max_root_speed",
+    "max_start_end_root_speed",
     "joint_limit_violation_rate",
     "max_joint_limit_violation",
     "mean_foot_clearance",
@@ -196,8 +197,10 @@ def _quality_sort_key(row: Mapping[str, object], flag: str) -> tuple[float, ...]
         primary = _float(row.get("mean_foot_clearance"))
     elif flag == "g1_low_foot_contact":
         primary = 1.0 - _float(row.get("contact_frame_ratio"))
-    elif flag in {"joint_velocity_jump", "g1_unstable_start_end"}:
-        primary = _float(row.get("max_abs_joint_velocity")) + _float(row.get("max_root_speed"))
+    elif flag == "joint_velocity_jump":
+        primary = _float(row.get("max_abs_joint_velocity"))
+    elif flag == "g1_unstable_start_end":
+        primary = _float(row.get("max_start_end_root_speed"))
     else:
         primary = 0.0
     return (
