@@ -42,8 +42,10 @@ class WebPipelineTests(unittest.TestCase):
             self.assertTrue(physics["details"]["rendered_by_mujoco"])
             ground_alignment = physics["details"]["ground_alignment"]
             self.assertTrue(ground_alignment["applied"])
+            self.assertEqual(ground_alignment["mode"], "sequence_foot_geom_min_z")
             self.assertEqual(ground_alignment["frames"], 3)
             self.assertEqual(ground_alignment["post_min_foot_z"], 0.0)
+            self.assertEqual(ground_alignment["root_z_offset_delta_abs_max"], 0.0)
             self.assertTrue(physics["details"]["render"]["root_z_aligned_to_ground"])
 
     def test_smpl_like_npz_pipeline_generates_preview_when_numpy_is_available(self):

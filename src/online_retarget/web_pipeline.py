@@ -1059,7 +1059,7 @@ def _render_mujoco_g1_video(
     if not trajectory:
         return {"status": "blocked", "message": "No trajectory frames were available for MuJoCo rendering."}
 
-    fps = int(_clamp(round(1.0 / frame_time) if frame_time > 0 else 30, 1, 60))
+    fps = int(_clamp(round(1.0 / frame_time) if frame_time > 0 else 30, 1, 240))
     video_path.parent.mkdir(parents=True, exist_ok=True)
     renderer = None
     process = None
@@ -1210,39 +1210,30 @@ def _compute_mujoco_ground_alignment(
 ) -> dict[str, object]:
     foot_geom_ids = _mujoco_foot_geom_ids(mujoco, model)
     if not trajectory:
-        return {"applied": False, "mode": "per_frame_foot_geom_min_z", "reason": "empty_trajectory"}
+        return {"applied": False, "mode": "sequence_foot_geom_min_z", "reason": "empty_trajectory"}
     if not foot_geom_ids:
-        return {"applied": False, "mode": "per_frame_foot_geom_min_z", "reason": "no_foot_geoms"}
+        return {"applied": False, "mode": "sequence_foot_geom_min_z", "reason": "no_foot_geoms"}
 
     pre_heights: list[float] = []
-    root_z_offsets: list[float] = []
-    post_heights: list[float] = []
     for item in trajectory:
         _set_mujoco_state(model, data, item, lock_root_xy=ROOT_XY_LOCKED_FOR_VIS)
         mujoco.mj_forward(model, data)  # type: ignore[attr-defined]
-        pre_height = _lowest_mujoco_geom_z(mujoco, model, data, foot_geom_ids)
-        if not math.isfinite(pre_height):
-            offset = 0.0
-            post_height = pre_height
-        else:
-            offset = -pre_height
-            post_height = 0.0
-        pre_heights.append(pre_height)
-        root_z_offsets.append(offset)
-        post_heights.append(post_height)
+        pre_heights.append(_lowest_mujoco_geom_z(mujoco, model, data, foot_geom_ids))
 
     finite_pre_heights = [value for value in pre_heights if math.isfinite(value)]
-    finite_offsets = [value for value in root_z_offsets if math.isfinite(value)]
-    if not finite_pre_heights or not finite_offsets:
+    if not finite_pre_heights:
         return {
             "applied": False,
-            "mode": "per_frame_foot_geom_min_z",
+            "mode": "sequence_foot_geom_min_z",
             "reason": "non_finite_foot_heights",
             "foot_geom_count": len(foot_geom_ids),
         }
+    sequence_offset = -min(finite_pre_heights)
+    post_heights = [value + sequence_offset for value in finite_pre_heights]
+    root_z_offsets = [sequence_offset if math.isfinite(value) else 0.0 for value in pre_heights]
     return {
         "applied": True,
-        "mode": "per_frame_foot_geom_min_z",
+        "mode": "sequence_foot_geom_min_z",
         "ground_height": 0.0,
         "frames": len(root_z_offsets),
         "foot_geom_count": len(foot_geom_ids),
@@ -1250,11 +1241,13 @@ def _compute_mujoco_ground_alignment(
         "pre_min_foot_z": round(min(finite_pre_heights), 6),
         "pre_max_foot_z": round(max(finite_pre_heights), 6),
         "pre_mean_foot_z": round(sum(finite_pre_heights) / len(finite_pre_heights), 6),
-        "post_min_foot_z": 0.0,
-        "post_max_foot_z": 0.0,
-        "root_z_offset_min": round(min(finite_offsets), 6),
-        "root_z_offset_max": round(max(finite_offsets), 6),
-        "root_z_offset_mean": round(sum(finite_offsets) / len(finite_offsets), 6),
+        "post_min_foot_z": round(min(post_heights), 6),
+        "post_max_foot_z": round(max(post_heights), 6),
+        "post_mean_foot_z": round(sum(post_heights) / len(post_heights), 6),
+        "root_z_offset_min": round(sequence_offset, 6),
+        "root_z_offset_max": round(sequence_offset, 6),
+        "root_z_offset_mean": round(sequence_offset, 6),
+        "root_z_offset_delta_abs_max": 0.0,
         "_root_z_offsets": [round(value, 8) for value in root_z_offsets],
     }
 
