@@ -25,6 +25,7 @@ from online_retarget.data.review_manifest import (
     build_review_manifest,
     merge_review_decisions,
 )
+from online_retarget.data.review_clips import ReviewClipExportConfig, export_review_clips
 from online_retarget.data.source_fk_quality import (
     SourceFKQualityConfig,
     scan_source_fk_quality_from_index,
@@ -396,6 +397,30 @@ def main() -> None:
     review_decisions.add_argument("--output-jsonl", type=Path)
     review_decisions.add_argument("--output-report-json", type=Path)
 
+    review_clips = subparsers.add_parser(
+        "export-review-clips",
+        help="Export source BVH, G1 CSV, metadata, and optional G1 preview MP4s from a review CSV",
+    )
+    review_clips.add_argument("--data-root", type=Path, default=Paths.from_env().data_root)
+    review_clips.add_argument("--input-csv", type=Path, required=True)
+    review_clips.add_argument("--output-root", type=Path, default=Paths.from_env().output_root / "review_clips")
+    review_clips.add_argument("--run-name", default="review_clips")
+    review_clips.add_argument("--label", default="review")
+    review_clips.add_argument("--limit", type=int, default=8)
+    review_clips.add_argument("--render-g1", action="store_true")
+    review_clips.add_argument("--model-xml", type=Path)
+    review_clips.add_argument("--render-max-frames", type=int, default=120)
+    review_clips.add_argument("--render-width", type=int, default=640)
+    review_clips.add_argument("--render-height", type=int, default=360)
+    review_clips.add_argument("--fps", type=float, default=120.0)
+    review_clips.add_argument("--root-position-scale", type=float, default=0.01)
+    review_clips.add_argument("--angle-scale", type=float, default=0.017453292519943295)
+    review_clips.add_argument(
+        "--hide-render-frames",
+        action="store_true",
+        help="Do not overlay MuJoCo body frames in rendered videos.",
+    )
+
     policy_audit = subparsers.add_parser(
         "audit-curation-policy",
         help="Audit whether a merged quality policy is ready for formal training",
@@ -538,6 +563,8 @@ def main() -> None:
         _build_review_decision_template(args)
     elif args.command == "merge-review-decisions":
         _merge_review_decisions(args)
+    elif args.command == "export-review-clips":
+        _export_review_clips(args)
     elif args.command == "audit-curation-policy":
         _audit_curation_policy(args)
     elif args.command == "preflight-curation-policy":
@@ -836,6 +863,29 @@ def _merge_review_decisions(args: argparse.Namespace) -> None:
         decisions_file=args.decisions_file,
         output_jsonl=args.output_jsonl,
         output_report_json=args.output_report_json,
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _export_review_clips(args: argparse.Namespace) -> None:
+    result = export_review_clips(
+        data_root=args.data_root,
+        input_csv=args.input_csv,
+        output_root=args.output_root,
+        run_name=args.run_name,
+        label=args.label,
+        config=ReviewClipExportConfig(
+            limit=args.limit,
+            render_g1=args.render_g1,
+            model_xml=args.model_xml,
+            render_max_frames=args.render_max_frames,
+            render_width=args.render_width,
+            render_height=args.render_height,
+            fps=args.fps,
+            root_position_scale=args.root_position_scale,
+            angle_scale=args.angle_scale,
+            render_frames=not args.hide_render_frames,
+        ),
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 

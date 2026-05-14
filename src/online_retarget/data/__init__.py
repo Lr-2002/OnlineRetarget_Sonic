@@ -38,6 +38,11 @@ from .review_manifest import (
     build_review_manifest,
     merge_review_decisions,
 )
+from .review_clips import (
+    ReviewClipExportConfig,
+    ReviewClipExportResult,
+    export_review_clips,
+)
 from .row_sampling import scan_sampling_report, select_rows_for_scan
 from .schema import (
     MORPHOLOGY_NUMERIC_COLUMNS,
@@ -102,6 +107,8 @@ __all__ = [
     "QualityThreshold",
     "ReviewDecisionMergeResult",
     "ReviewDecisionTemplateResult",
+    "ReviewClipExportConfig",
+    "ReviewClipExportResult",
     "ReviewManifestResult",
     "SplitConfig",
     "SplitIndexResult",
@@ -121,6 +128,7 @@ __all__ = [
     "discover_threshold_proposals_for_run",
     "discover_threshold_proposals_from_report",
     "preflight_curation_policy",
+    "export_review_clips",
     "scan_bvh_quality_from_index",
     "scan_g1_quality_from_index",
     "scan_pair_quality_from_index",
