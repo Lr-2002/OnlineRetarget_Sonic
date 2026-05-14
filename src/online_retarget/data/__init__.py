@@ -21,7 +21,12 @@ from .curation import (
 from .g1_quality import G1QualityConfig, G1QualityScanResult, scan_g1_quality_from_index
 from .pair_quality import PairQualityConfig, PairQualityScanResult, scan_pair_quality_from_index
 from .quality_merge import QualityMergeResult, merge_quality_stats
-from .review_manifest import ReviewManifestResult, build_review_manifest
+from .review_manifest import (
+    ReviewDecisionMergeResult,
+    ReviewManifestResult,
+    build_review_manifest,
+    merge_review_decisions,
+)
 from .row_sampling import scan_sampling_report, select_rows_for_scan
 from .schema import (
     MORPHOLOGY_NUMERIC_COLUMNS,
@@ -76,6 +81,7 @@ __all__ = [
     "QualityMergeResult",
     "QualityPolicy",
     "QualityThreshold",
+    "ReviewDecisionMergeResult",
     "ReviewManifestResult",
     "SplitConfig",
     "SplitIndexResult",
@@ -87,6 +93,7 @@ __all__ = [
     "build_windowed_jsonl",
     "iter_motion_pair_refs",
     "merge_quality_stats",
+    "merge_review_decisions",
     "motion_pair_ref_from_index_row",
     "propose_thresholds_from_jsonl",
     "scan_bvh_quality_from_index",

@@ -11,6 +11,14 @@ import subprocess
 from typing import Mapping, Sequence
 
 
+REVIEW_FIELD_KEYS = (
+    "decision",
+    "reviewer",
+    "notes",
+    "confirmed_issue",
+    "recommended_action",
+)
+RECOMMENDED_ACTIONS = ("keep", "downweight", "quarantine", "exclude")
 FAMILY_KEYWORDS = {
     "parser": ("nonfinite", "mismatch", "missing", "decode", "parse", "empty"),
     "mirror": ("mirror_variant",),
@@ -40,6 +48,26 @@ class ReviewManifestResult:
         payload["output_dir"] = str(self.output_dir)
         payload["manifest_jsonl"] = str(self.manifest_jsonl)
         payload["manifest_md"] = str(self.manifest_md)
+        payload["report_json"] = str(self.report_json)
+        return payload
+
+
+@dataclass(frozen=True)
+class ReviewDecisionMergeResult:
+    output_jsonl: Path
+    report_json: Path
+    manifest_items: int
+    decision_rows: int
+    matched_decisions: int
+    complete_decisions: int
+    incomplete_decisions: int
+    incomplete_review_ids: list[str]
+    git_sha: str
+    git_dirty: bool
+
+    def to_dict(self) -> dict[str, object]:
+        payload = asdict(self)
+        payload["output_jsonl"] = str(self.output_jsonl)
         payload["report_json"] = str(self.report_json)
         return payload
 
@@ -87,6 +115,79 @@ def build_review_manifest(
         git_sha=report["git_sha"],
         git_dirty=report["git_dirty"],
     )
+
+
+def merge_review_decisions(
+    review_manifest_jsonl: Path,
+    decisions_file: Path,
+    output_jsonl: Path | None = None,
+    output_report_json: Path | None = None,
+) -> ReviewDecisionMergeResult:
+    """Merge reviewer decisions into a new review manifest JSONL.
+
+    The source manifest is left untouched. Decisions can be supplied as CSV or
+    JSONL rows keyed by ``review_id``. JSONL rows may contain either flat
+    review fields or a nested ``review_fields`` object.
+    """
+
+    items = _read_jsonl(review_manifest_jsonl)
+    decisions = _read_decisions(decisions_file)
+    by_review_id = _manifest_by_review_id(items)
+    decision_by_id: dict[str, dict[str, str]] = {}
+
+    for row in decisions:
+        review_id = str(row.get("review_id", "")).strip()
+        if not review_id:
+            raise ValueError("decision row is missing review_id")
+        if review_id in decision_by_id:
+            raise ValueError(f"duplicate decision for review_id: {review_id}")
+        if review_id not in by_review_id:
+            raise ValueError(f"decision references unknown review_id: {review_id}")
+        fields = _decision_fields(row)
+        decision_by_id[review_id] = fields
+
+    updated_items: list[dict[str, object]] = []
+    for item in items:
+        updated = dict(item)
+        review_id = str(updated.get("review_id", "")).strip()
+        review_fields = updated.get("review_fields", {})
+        if not isinstance(review_fields, Mapping):
+            review_fields = {}
+        merged_fields = {key: str(review_fields.get(key, "")) for key in REVIEW_FIELD_KEYS}
+        if review_id in decision_by_id:
+            merged_fields.update(decision_by_id[review_id])
+        updated["review_fields"] = merged_fields
+        updated_items.append(updated)
+
+    incomplete_ids = _incomplete_review_ids(updated_items)
+    output_path = output_jsonl or review_manifest_jsonl.with_name(
+        review_manifest_jsonl.stem + ".reviewed.jsonl"
+    )
+    report_path = output_report_json or output_path.with_name("review_decision_report.json")
+    _write_jsonl(output_path, updated_items)
+
+    result = ReviewDecisionMergeResult(
+        output_jsonl=output_path,
+        report_json=report_path,
+        manifest_items=len(items),
+        decision_rows=len(decisions),
+        matched_decisions=len(decision_by_id),
+        complete_decisions=len(items) - len(incomplete_ids),
+        incomplete_decisions=len(incomplete_ids),
+        incomplete_review_ids=incomplete_ids,
+        git_sha=_git_sha(),
+        git_dirty=_git_dirty(),
+    )
+    report = result.to_dict()
+    report.update(
+        {
+            "review_manifest_jsonl": str(review_manifest_jsonl),
+            "decisions_file": str(decisions_file),
+            "allowed_recommended_actions": list(RECOMMENDED_ACTIONS),
+        }
+    )
+    _write_json(report_path, report)
+    return result
 
 
 def _review_items(
@@ -178,6 +279,70 @@ def _review_metrics(row: Mapping[str, str]) -> dict[str, str]:
     return {key: row.get(key, "") for key in keys if row.get(key, "") != ""}
 
 
+def _read_decisions(path: Path) -> list[dict[str, object]]:
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        with path.open(newline="", encoding="utf-8") as f:
+            return [dict(row) for row in csv.DictReader(f)]
+    if suffix in {".jsonl", ".ndjson"}:
+        return _read_jsonl(path)
+    raise ValueError(f"decisions file must be CSV or JSONL: {path}")
+
+
+def _manifest_by_review_id(
+    items: Sequence[Mapping[str, object]],
+) -> dict[str, Mapping[str, object]]:
+    by_id: dict[str, Mapping[str, object]] = {}
+    for item in items:
+        review_id = str(item.get("review_id", "")).strip()
+        if not review_id:
+            raise ValueError("review manifest item is missing review_id")
+        if review_id in by_id:
+            raise ValueError(f"duplicate review_id in manifest: {review_id}")
+        by_id[review_id] = item
+    return by_id
+
+
+def _decision_fields(row: Mapping[str, object]) -> dict[str, str]:
+    nested = row.get("review_fields", {})
+    source: dict[str, object] = {}
+    if isinstance(nested, Mapping):
+        source.update(nested)
+    source.update({key: value for key, value in row.items() if key in REVIEW_FIELD_KEYS})
+    fields = {key: _text_field(source.get(key, "")) for key in REVIEW_FIELD_KEYS}
+    if not fields["decision"]:
+        raise ValueError("decision row is missing decision")
+    if not fields["recommended_action"]:
+        raise ValueError("decision row is missing recommended_action")
+    if fields["recommended_action"] not in RECOMMENDED_ACTIONS:
+        allowed = ", ".join(RECOMMENDED_ACTIONS)
+        raise ValueError(
+            f"invalid recommended_action {fields['recommended_action']!r}; "
+            f"expected one of: {allowed}"
+        )
+    return fields
+
+
+def _text_field(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _incomplete_review_ids(items: Sequence[Mapping[str, object]]) -> list[str]:
+    incomplete = []
+    for item in items:
+        fields = item.get("review_fields", {})
+        if not isinstance(fields, Mapping):
+            incomplete.append(str(item.get("review_id", "")))
+            continue
+        decision = str(fields.get("decision", "")).strip()
+        recommended_action = str(fields.get("recommended_action", "")).strip()
+        if not decision or not recommended_action:
+            incomplete.append(str(item.get("review_id", "")))
+    return incomplete
+
+
 def _families_for_row(row: Mapping[str, str], flags: Sequence[str]) -> tuple[str, ...]:
     families = []
     joined = " ".join(flags)
@@ -264,6 +429,20 @@ def _markdown_item(item: Mapping[str, object]) -> list[str]:
 def _read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
+
+
+def _read_jsonl(path: Path) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    with path.open(encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            payload = json.loads(stripped)
+            if not isinstance(payload, dict):
+                raise ValueError(f"line {line_number} must be a JSON object: {path}")
+            rows.append(payload)
+    return rows
 
 
 def _write_jsonl(path: Path, rows: Sequence[Mapping[str, object]]) -> None:

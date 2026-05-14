@@ -7,6 +7,7 @@ from online_retarget.data.policy_audit import (
     CurationPolicyAuditConfig,
     audit_curation_policy,
 )
+from online_retarget.data.review_manifest import merge_review_decisions
 
 
 class CurationPolicyAuditTests(unittest.TestCase):
@@ -82,6 +83,85 @@ class CurationPolicyAuditTests(unittest.TestCase):
 
         self.assertTrue(result.promotable)
         self.assertIn("representative scan mode is allowed", "\n".join(result.warnings))
+
+    def test_audit_accepts_manifest_after_decision_merge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            curated = _write_curated_report(root / "curated_report.json", row_count=10, scanned=10)
+            thresholds = _write_thresholds(root / "thresholds.json", sample_count=10)
+            review_report = _write_review_report(root / "review_report.json")
+            manifest = _write_review_manifest(root / "review_manifest.jsonl", complete=False)
+            decisions = root / "decisions.jsonl"
+            decisions.write_text(
+                json.dumps(
+                    {
+                        "review_id": "jump:1:fixture",
+                        "decision": "confirmed",
+                        "reviewer": "unit-test",
+                        "confirmed_issue": "yes",
+                        "recommended_action": "quarantine",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            reviewed = merge_review_decisions(
+                review_manifest_jsonl=manifest,
+                decisions_file=decisions,
+                output_jsonl=root / "review_manifest.reviewed.jsonl",
+            )
+
+            result = audit_curation_policy(
+                curated_report_json=curated,
+                threshold_proposal_jsons=(thresholds,),
+                review_report_json=review_report,
+                review_manifest_jsonl=reviewed.output_jsonl,
+                review_decision_report_json=reviewed.report_json,
+                config=CurationPolicyAuditConfig(
+                    policy_id="candidate_reviewed",
+                    thresholds_accepted=True,
+                    require_clean_report_git=False,
+                ),
+            )
+
+        self.assertTrue(result.promotable)
+        self.assertEqual(result.evidence["manual_review"]["incomplete_decisions"], 0)
+        self.assertEqual(result.evidence["manual_review"]["decision_report"]["matched_decisions"], 1)
+
+    def test_audit_blocks_invalid_review_recommended_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            curated = _write_curated_report(root / "curated_report.json", row_count=10, scanned=10)
+            thresholds = _write_thresholds(root / "thresholds.json", sample_count=10)
+            review_report = _write_review_report(root / "review_report.json")
+            manifest = root / "review_manifest.jsonl"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "review_id": "jump:1:fixture",
+                        "review_fields": {
+                            "decision": "confirmed",
+                            "recommended_action": "maybe",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = audit_curation_policy(
+                curated_report_json=curated,
+                threshold_proposal_jsons=(thresholds,),
+                review_report_json=review_report,
+                review_manifest_jsonl=manifest,
+                config=CurationPolicyAuditConfig(
+                    policy_id="candidate_bad_review",
+                    thresholds_accepted=True,
+                ),
+            )
+
+        self.assertFalse(result.promotable)
+        self.assertIn("invalid actions", "\n".join(result.blockers))
 
 
 def _write_curated_report(path: Path, row_count: int, scanned: int) -> Path:

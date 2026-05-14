@@ -15,6 +15,7 @@ SCAN_COVERAGE_FIELDS = (
     "merged_pair_rows",
 )
 RETAINED_ACTIONS = ("keep", "downweight")
+RECOMMENDED_REVIEW_ACTIONS = ("keep", "downweight", "quarantine", "exclude")
 DEFAULT_REQUIRED_GROUP_BY = ("category", "split")
 DEFAULT_DIVERSITY_DIMENSIONS = ("actor_uid", "source_skeleton", "category", "split")
 
@@ -49,6 +50,7 @@ def audit_curation_policy(
     output_json: Path | None = None,
     review_report_json: Path | None = None,
     review_manifest_jsonl: Path | None = None,
+    review_decision_report_json: Path | None = None,
     config: CurationPolicyAuditConfig | None = None,
 ) -> CurationPolicyAuditResult:
     """Audit a merged quality report before a curation policy is promoted."""
@@ -57,6 +59,9 @@ def audit_curation_policy(
     curated_report = _read_json(curated_report_json)
     threshold_reports = [_read_json(path) for path in threshold_proposal_jsons]
     review_report = _read_json(review_report_json) if review_report_json else {}
+    review_decision_report = (
+        _read_json(review_decision_report_json) if review_decision_report_json else {}
+    )
     review_items = _read_jsonl(review_manifest_jsonl) if review_manifest_jsonl else []
 
     blockers: list[str] = []
@@ -66,13 +71,24 @@ def audit_curation_policy(
         "threshold_proposal_jsons": [str(path) for path in threshold_proposal_jsons],
         "review_report_json": str(review_report_json) if review_report_json else "",
         "review_manifest_jsonl": str(review_manifest_jsonl) if review_manifest_jsonl else "",
+        "review_decision_report_json": str(review_decision_report_json)
+        if review_decision_report_json
+        else "",
         "allow_representative": cfg.allow_representative,
         "thresholds_accepted": cfg.thresholds_accepted,
     }
 
     _audit_curated_report(curated_report, cfg, blockers, warnings, evidence)
     _audit_threshold_reports(threshold_reports, cfg, blockers, warnings, evidence)
-    _audit_manual_review(review_report, review_items, cfg, blockers, warnings, evidence)
+    _audit_manual_review(
+        review_report,
+        review_items,
+        review_decision_report,
+        cfg,
+        blockers,
+        warnings,
+        evidence,
+    )
 
     promotable = not blockers
     result = CurationPolicyAuditResult(
@@ -212,6 +228,7 @@ def _audit_threshold_reports(
 def _audit_manual_review(
     report: Mapping[str, object],
     items: Sequence[Mapping[str, object]],
+    decision_report: Mapping[str, object],
     cfg: CurationPolicyAuditConfig,
     blockers: list[str],
     warnings: list[str],
@@ -230,10 +247,11 @@ def _audit_manual_review(
         "reviewed_rows": reviewed_rows,
         "family_counts": dict(family_counts),
         "manifest_items": len(items),
+        "decision_report_present": bool(decision_report),
     }
     if reviewed_rows <= 0:
         blockers.append("manual review report has no reviewed rows")
-    if bool(report.get("git_dirty", False)):
+    if cfg.require_clean_report_git and bool(report.get("git_dirty", False)):
         blockers.append("manual review report was generated from a dirty git tree")
 
     if not cfg.require_review_decisions:
@@ -246,6 +264,7 @@ def _audit_manual_review(
         return
 
     incomplete = []
+    invalid_actions = []
     for item in items:
         fields = item.get("review_fields", {})
         if not isinstance(fields, Mapping):
@@ -255,12 +274,30 @@ def _audit_manual_review(
         recommended_action = str(fields.get("recommended_action", "")).strip()
         if not decision or not recommended_action:
             incomplete.append(str(item.get("review_id", "")))
+        elif recommended_action not in RECOMMENDED_REVIEW_ACTIONS:
+            invalid_actions.append(str(item.get("review_id", "")))
     evidence["manual_review"]["complete_decisions"] = len(items) - len(incomplete)
     evidence["manual_review"]["incomplete_decisions"] = len(incomplete)
+    evidence["manual_review"]["invalid_recommended_actions"] = len(invalid_actions)
+    if decision_report:
+        evidence["manual_review"]["decision_report"] = {
+            "decision_rows": _as_int(decision_report.get("decision_rows")),
+            "matched_decisions": _as_int(decision_report.get("matched_decisions")),
+            "complete_decisions": _as_int(decision_report.get("complete_decisions")),
+            "incomplete_decisions": _as_int(decision_report.get("incomplete_decisions")),
+            "git_sha": str(decision_report.get("git_sha", "")),
+            "git_dirty": bool(decision_report.get("git_dirty", False)),
+        }
+        if cfg.require_clean_report_git and bool(decision_report.get("git_dirty", False)):
+            blockers.append("manual review decision report was generated from a dirty git tree")
     if incomplete:
         sample = ", ".join(identifier for identifier in incomplete[:5] if identifier)
         suffix = f": {sample}" if sample else ""
         blockers.append(f"{len(incomplete)} manual review items lack decisions{suffix}")
+    if invalid_actions:
+        sample = ", ".join(identifier for identifier in invalid_actions[:5] if identifier)
+        suffix = f": {sample}" if sample else ""
+        blockers.append(f"{len(invalid_actions)} manual review items have invalid actions{suffix}")
 
 
 def _read_json(path: Path | None) -> dict[str, object]:

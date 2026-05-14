@@ -17,7 +17,7 @@ from online_retarget.data.policy_audit import (
     audit_curation_policy,
 )
 from online_retarget.data.quality_merge import merge_quality_stats
-from online_retarget.data.review_manifest import build_review_manifest
+from online_retarget.data.review_manifest import build_review_manifest, merge_review_decisions
 from online_retarget.data.source_fk_quality import (
     SourceFKQualityConfig,
     scan_source_fk_quality_from_index,
@@ -302,6 +302,20 @@ def main() -> None:
     review_manifest.add_argument("--run-name", default="manual_review")
     review_manifest.add_argument("--max-per-family", type=int, default=5)
 
+    review_decisions = subparsers.add_parser(
+        "merge-review-decisions",
+        help="Merge manual review decisions into a new review manifest JSONL",
+    )
+    review_decisions.add_argument("--review-manifest-jsonl", type=Path, required=True)
+    review_decisions.add_argument(
+        "--decisions-file",
+        type=Path,
+        required=True,
+        help="CSV or JSONL rows keyed by review_id with decision and recommended_action.",
+    )
+    review_decisions.add_argument("--output-jsonl", type=Path)
+    review_decisions.add_argument("--output-report-json", type=Path)
+
     policy_audit = subparsers.add_parser(
         "audit-curation-policy",
         help="Audit whether a merged quality policy is ready for formal training",
@@ -317,6 +331,7 @@ def main() -> None:
     )
     policy_audit.add_argument("--review-report-json", type=Path)
     policy_audit.add_argument("--review-manifest-jsonl", type=Path)
+    policy_audit.add_argument("--review-decision-report-json", type=Path)
     policy_audit.add_argument("--output-json", type=Path)
     policy_audit.add_argument(
         "--allow-representative",
@@ -386,6 +401,8 @@ def main() -> None:
         _merge_quality(args)
     elif args.command == "build-review-manifest":
         _build_review_manifest(args)
+    elif args.command == "merge-review-decisions":
+        _merge_review_decisions(args)
     elif args.command == "audit-curation-policy":
         _audit_curation_policy(args)
     elif args.command == "offline-eval":
@@ -611,12 +628,23 @@ def _build_review_manifest(args: argparse.Namespace) -> None:
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 
 
+def _merge_review_decisions(args: argparse.Namespace) -> None:
+    result = merge_review_decisions(
+        review_manifest_jsonl=args.review_manifest_jsonl,
+        decisions_file=args.decisions_file,
+        output_jsonl=args.output_jsonl,
+        output_report_json=args.output_report_json,
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
 def _audit_curation_policy(args: argparse.Namespace) -> None:
     result = audit_curation_policy(
         curated_report_json=args.curated_report_json,
         threshold_proposal_jsons=tuple(args.threshold_proposal_json),
         review_report_json=args.review_report_json,
         review_manifest_jsonl=args.review_manifest_jsonl,
+        review_decision_report_json=args.review_decision_report_json,
         output_json=args.output_json,
         config=CurationPolicyAuditConfig(
             policy_id=args.policy_id,

@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from online_retarget.data.review_manifest import build_review_manifest
+from online_retarget.data.review_manifest import build_review_manifest, merge_review_decisions
 
 
 class ReviewManifestTests(unittest.TestCase):
@@ -52,6 +52,104 @@ class ReviewManifestTests(unittest.TestCase):
         )
         self.assertIn("Manual Motion Review Manifest", markdown)
         self.assertIn("Recommended action", markdown)
+
+    def test_merge_review_decisions_writes_reviewed_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worst = root / "worst_clips.csv"
+            _write_worst_clips(worst)
+            manifest = build_review_manifest(
+                worst_clips_csv=worst,
+                output_root=root / "review",
+                run_name="fixture",
+                max_per_family=1,
+            )
+            items = _read_jsonl(manifest.manifest_jsonl)
+            decisions = root / "decisions.csv"
+            _write_decisions_csv(
+                decisions,
+                rows=[
+                    {
+                        "review_id": item["review_id"],
+                        "decision": "confirmed",
+                        "reviewer": "unit-test",
+                        "notes": f"checked {item['failure_family']}",
+                        "confirmed_issue": "yes",
+                        "recommended_action": "quarantine",
+                    }
+                    for item in items
+                ],
+            )
+
+            result = merge_review_decisions(
+                review_manifest_jsonl=manifest.manifest_jsonl,
+                decisions_file=decisions,
+                output_jsonl=root / "reviewed.jsonl",
+                output_report_json=root / "decision_report.json",
+            )
+            reviewed = _read_jsonl(result.output_jsonl)
+            report = json.loads(result.report_json.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.manifest_items, len(items))
+        self.assertEqual(result.complete_decisions, len(items))
+        self.assertEqual(result.incomplete_decisions, 0)
+        self.assertEqual(result.matched_decisions, len(items))
+        self.assertEqual(reviewed[0]["review_fields"]["reviewer"], "unit-test")
+        self.assertEqual(reviewed[0]["review_fields"]["recommended_action"], "quarantine")
+        self.assertEqual(report["complete_decisions"], len(items))
+
+    def test_merge_review_decisions_rejects_unknown_review_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "review_manifest.jsonl"
+            manifest.write_text(
+                json.dumps({"review_id": "known", "review_fields": {}}) + "\n",
+                encoding="utf-8",
+            )
+            decisions = root / "decisions.csv"
+            _write_decisions_csv(
+                decisions,
+                rows=[
+                    {
+                        "review_id": "unknown",
+                        "decision": "confirmed",
+                        "recommended_action": "quarantine",
+                    }
+                ],
+            )
+
+            with self.assertRaises(ValueError) as raised:
+                merge_review_decisions(manifest, decisions)
+
+        self.assertIn("unknown review_id", str(raised.exception))
+
+    def test_merge_review_decisions_rejects_invalid_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "review_manifest.jsonl"
+            manifest.write_text(
+                json.dumps({"review_id": "known", "review_fields": {}}) + "\n",
+                encoding="utf-8",
+            )
+            decisions = root / "decisions.jsonl"
+            decisions.write_text(
+                json.dumps(
+                    {
+                        "review_id": "known",
+                        "review_fields": {
+                            "decision": "confirmed",
+                            "recommended_action": "needs_magic",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError) as raised:
+                merge_review_decisions(manifest, decisions)
+
+        self.assertIn("invalid recommended_action", str(raised.exception))
 
 
 def _write_worst_clips(path: Path) -> None:
@@ -128,6 +226,29 @@ def _write_worst_clips(path: Path) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _write_decisions_csv(path: Path, rows: list[dict[str, str]]) -> None:
+    fieldnames = [
+        "review_id",
+        "decision",
+        "reviewer",
+        "notes",
+        "confirmed_issue",
+        "recommended_action",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _read_jsonl(path: Path) -> list[dict[str, object]]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
 if __name__ == "__main__":
