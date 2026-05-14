@@ -16,7 +16,15 @@
         <form id="runForm" class="run-form">
           <label class="file-picker">
             <span>Motion file</span>
-            <input id="motionFile" name="motion" type="file" accept=".bvh,.npz,.pkl,.smpl,.smplx" />
+            <input id="motionFile" name="motion" type="file" accept=".bvh,.npz" />
+          </label>
+          <label class="toggle-field">
+            <input id="renderFrames" name="render_frames" type="checkbox" />
+            <span>Frame axes</span>
+          </label>
+          <label class="toggle-field">
+            <input id="compareRetargeters" name="compare_retargeters" type="checkbox" />
+            <span>Compare</span>
           </label>
           <button id="runButton" type="submit">Run</button>
         </form>
@@ -53,6 +61,8 @@
               <button type="button" data-view="source">Source</button>
             </div>
           </div>
+          <div id="panelGrid" class="render-grid"></div>
+          <video id="mujocoVideo" controls playsinline muted></video>
           <canvas id="previewCanvas" width="920" height="540"></canvas>
           <input id="frameSlider" type="range" min="0" max="0" value="0" />
         </div>

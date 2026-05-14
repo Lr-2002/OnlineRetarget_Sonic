@@ -23,6 +23,7 @@ class WebPipelineTests(unittest.TestCase):
             payload = result.to_dict()
             retarget_csv = Path(payload["artifacts"]["retargeted_g1_csv"])
             retarget_csv_exists = retarget_csv.exists()
+            physics = payload["stages"]["physics_sim"]
             report = json.loads((result.output_dir / "pipeline_result.json").read_text())
 
         self.assertEqual(payload["input_format"], "bvh")
@@ -34,6 +35,16 @@ class WebPipelineTests(unittest.TestCase):
         self.assertEqual(len(payload["preview"]["source"]["frames"]), 3)
         self.assertEqual(len(payload["preview"]["robot"]["frames"]), 3)
         self.assertEqual(report["run_id"], payload["run_id"])
+        if physics["status"] == "ok":
+            video_path = Path(payload["artifacts"]["mujoco_g1_render_mp4"])
+            self.assertTrue(video_path.exists())
+            self.assertGreater(video_path.stat().st_size, 0)
+            self.assertTrue(physics["details"]["rendered_by_mujoco"])
+            ground_alignment = physics["details"]["ground_alignment"]
+            self.assertTrue(ground_alignment["applied"])
+            self.assertEqual(ground_alignment["frames"], 3)
+            self.assertEqual(ground_alignment["post_min_foot_z"], 0.0)
+            self.assertTrue(physics["details"]["render"]["root_z_aligned_to_ground"])
 
     def test_smpl_like_npz_pipeline_generates_preview_when_numpy_is_available(self):
         try:
@@ -57,6 +68,7 @@ class WebPipelineTests(unittest.TestCase):
                 output_root=Path(tmp) / "web_runs",
                 model_xml=model_xml,
                 max_frames=3,
+                render_frames=True,
             )
             payload = result.to_dict()
 
@@ -66,6 +78,8 @@ class WebPipelineTests(unittest.TestCase):
         self.assertEqual(payload["stages"]["kinematic_sim"]["status"], "ok")
         self.assertEqual(payload["stages"]["load"]["details"]["pose_key"], "poses")
         self.assertEqual(len(payload["preview"]["source"]["frames"]), 3)
+        if payload["stages"]["physics_sim"]["status"] == "ok":
+            self.assertTrue(payload["stages"]["physics_sim"]["details"]["render_frames"])
 
     def test_malformed_smpl_like_upload_fails_before_retarget(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -81,7 +95,6 @@ class WebPipelineTests(unittest.TestCase):
         self.assertEqual(payload["input_format"], "smpl")
         self.assertIn(payload["stages"]["load"]["status"], {"failed", "blocked"})
         self.assertEqual(payload["stages"]["retarget"]["status"], "blocked")
-
 
 def _bvh_text() -> str:
     return """HIERARCHY

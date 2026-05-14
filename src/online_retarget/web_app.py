@@ -39,6 +39,12 @@ class RetargetWebHandler(BaseHTTPRequestHandler):
             run_id = parse_qs(parsed.query).get("run_id", [""])[0]
             self._send_result(run_id)
             return
+        if parsed.path == "/api/artifact":
+            query = parse_qs(parsed.query)
+            run_id = query.get("run_id", [""])[0]
+            artifact_name = query.get("name", [""])[0]
+            self._send_artifact(run_id, artifact_name)
+            return
         self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API.
@@ -46,7 +52,7 @@ class RetargetWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
             return
         try:
-            filename, content = self._read_motion_upload()
+            filename, content, render_frames, compare_retargeters = self._read_motion_upload()
             if not filename:
                 self._send_json({"error": "missing motion file"}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -58,6 +64,8 @@ class RetargetWebHandler(BaseHTTPRequestHandler):
                 filename,
                 output_root=self.server.output_root,  # type: ignore[attr-defined]
                 model_xml=self.server.model_xml,  # type: ignore[attr-defined]
+                render_frames=render_frames,
+                compare_retargeters=compare_retargeters,
             )
             self._send_json(result.to_dict())
         except Exception as exc:  # pragma: no cover - keeps web response debuggable.
@@ -69,12 +77,12 @@ class RetargetWebHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         print(f"{self.address_string()} - {format % args}")
 
-    def _read_motion_upload(self) -> tuple[str, bytes]:
+    def _read_motion_upload(self) -> tuple[str, bytes, bool, bool]:
         content_type = self.headers.get("Content-Type", "")
         content_length = int(self.headers.get("Content-Length", "0") or "0")
         body = self.rfile.read(content_length)
         if "multipart/form-data" not in content_type:
-            return "", b""
+            return "", b"", False, False
         message = BytesParser(policy=default).parsebytes(
             (
                 f"Content-Type: {content_type}\r\n"
@@ -83,13 +91,23 @@ class RetargetWebHandler(BaseHTTPRequestHandler):
             ).encode("utf-8")
             + body
         )
+        filename = ""
+        payload = b""
+        render_frames = False
+        compare_retargeters = False
         for part in message.iter_parts():
-            if part.get_param("name", header="content-disposition") != "motion":
+            name = part.get_param("name", header="content-disposition")
+            if name == "motion":
+                filename = part.get_filename() or ""
+                payload = part.get_payload(decode=True) or b""
                 continue
-            filename = part.get_filename() or ""
-            payload = part.get_payload(decode=True) or b""
-            return filename, payload
-        return "", b""
+            if name == "render_frames":
+                value = (part.get_payload(decode=True) or b"").decode("utf-8", errors="ignore")
+                render_frames = value.strip().lower() in {"1", "true", "yes", "on"}
+            if name == "compare_retargeters":
+                value = (part.get_payload(decode=True) or b"").decode("utf-8", errors="ignore")
+                compare_retargeters = value.strip().lower() in {"1", "true", "yes", "on"}
+        return filename, payload, render_frames, compare_retargeters
 
     def _send_file(self, path: Path, content_type: str) -> None:
         if not path.exists():
@@ -111,6 +129,34 @@ class RetargetWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "result not found"}, status=HTTPStatus.NOT_FOUND)
             return
         self._send_json(json.loads(result_path.read_text(encoding="utf-8")))
+
+    def _send_artifact(self, run_id: str, artifact_name: str) -> None:
+        if not run_id or "/" in run_id or ".." in run_id:
+            self._send_json({"error": "invalid run_id"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if not artifact_name or "/" in artifact_name or ".." in artifact_name:
+            self._send_json({"error": "invalid artifact name"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        run_dir = self.server.output_root / run_id  # type: ignore[attr-defined]
+        result_path = run_dir / "pipeline_result.json"
+        if not result_path.exists():
+            self._send_json({"error": "result not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        artifacts = result.get("artifacts", {})
+        if not isinstance(artifacts, dict) or artifact_name not in artifacts:
+            self._send_json({"error": "artifact not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        artifact_path = Path(str(artifacts[artifact_name])).resolve()
+        run_root = run_dir.resolve()
+        if run_root not in artifact_path.parents and artifact_path != run_root:
+            self._send_json({"error": "artifact outside run directory"}, status=HTTPStatus.FORBIDDEN)
+            return
+        if not artifact_path.exists() or not artifact_path.is_file():
+            self._send_json({"error": "artifact file not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        content_type = "video/mp4" if artifact_path.suffix.lower() == ".mp4" else "application/octet-stream"
+        self._send_file(artifact_path, content_type)
 
     def _send_json(self, payload: object, status: HTTPStatus = HTTPStatus.OK) -> None:
         data = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")

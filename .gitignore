@@ -8,6 +8,7 @@ __pycache__/
 .ruff_cache/
 .omx/
 .playwright-cli/
+MUJOCO_LOG.TXT
 
 # Experiment outputs stay local and are tracked through WandB/artifacts.
 runs/

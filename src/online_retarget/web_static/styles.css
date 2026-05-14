@@ -92,6 +92,25 @@ p {
   font-size: 12px;
 }
 
+.toggle-field {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.toggle-field input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
 .file-picker input {
   width: min(360px, 64vw);
   border: 1px solid var(--line);
@@ -203,7 +222,8 @@ button:disabled {
   color: white;
 }
 
-canvas {
+canvas,
+video {
   display: block;
   width: 100%;
   aspect-ratio: 16 / 9;
@@ -211,6 +231,33 @@ canvas {
   background: #eef2ed;
   border: 1px solid var(--line);
   border-radius: 7px;
+}
+
+video {
+  display: none;
+  background: #101412;
+}
+
+.render-grid {
+  display: none;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+}
+
+.render-panel {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.render-panel h3 {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.render-panel video {
+  display: block;
 }
 
 #frameSlider {

@@ -254,12 +254,13 @@ PYTHONPATH=src python3 scripts/run_web.py --host 127.0.0.1 --port 8765
 
 Open `http://127.0.0.1:8765`, upload a `.bvh` or SMPL-like `.npz`, and the app writes a per-run bundle under
 `outputs/web_runs/` with the source file, `retargeted_g1_preview.csv`, `retarget_report.json`,
-and `pipeline_result.json`. The current web path implements BVH loading, a deterministic
-rule-based G1 preview target, G1 MJCF kinematic playback, MuJoCo stepping, and approximate
-SMPL-like `.npz` preview from common `poses`/`trans` arrays. Full SMPL/SMPL-X body-model decoding
-and learned retarget inference remain explicit future work. MuJoCo physics rollout runs only when
-the Python `mujoco` package is installed; otherwise the physics stage is reported as blocked rather
-than marked successful.
+`pipeline_result.json`, and `mujoco_g1_render.mp4` when MuJoCo rendering is available. The Web path
+loads BVH/SMPL-like inputs, retargets to Unitree G1 with GMR when its dependencies are installed,
+falls back with an explicit blocker report otherwise, and renders the G1 MJCF through
+`mujoco.Renderer` rather than front-end point drawing. The upload form includes a `Frame axes`
+toggle that controls whether MuJoCo body frames are included in the rendered video. Full SMPL/SMPL-X
+body-model decoding still requires the SMPL-X dependencies; generic `.npz` files with
+`poses`/`pose_body` plus `trans` use approximate SMPL joint targets for GMR.
 
 ## Key Docs
 
