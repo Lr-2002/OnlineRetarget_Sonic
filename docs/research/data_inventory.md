@@ -76,7 +76,9 @@ Top categories:
 
 ## Skeleton Grouping
 
-Use `actor_uid` as the first skeleton/person grouping key. Each actor has one `move_soma_proportional_shape_path`, and metadata includes morphology dimensions:
+Use `actor_uid` as the first skeleton/person grouping key. The initial learning and curation path must use BONES-SEED `soma_proportional`, not `soma_uniform`: `move_soma_proportional_path` points into `soma_proportional.tar`, and `move_soma_proportional_shape_path` points to a per-actor shape under `soma_shapes/soma_proportion_fit_mhr_params/`. The `soma_uniform` path uses the shared `soma_base_fit_mhr_params.npz` standard skeleton and should only be used later as an ablation, not as the main heterogeneous-skeleton input.
+
+Each actor has one proportional shape path, and metadata includes morphology dimensions:
 
 - height
 - foot length
