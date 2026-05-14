@@ -239,6 +239,8 @@ The filtering-specific PDF/OpenAlex pass is recorded in `docs/research/papers/mo
 
 The citation/usage expansion pass is recorded in `docs/research/citation_usage_map.md`. The main finding is that OpenAlex has stable work IDs for several 2025/2026 arXiv papers but currently reports empty or sparse citation/reference metadata for them. For this project, usage evidence therefore comes from PDF text and project/code pages: NMR actually uses PHUMA-style filtering, GMR initialization, TMR clustering features, CEPR expert rollouts, AMASS tests, and BeyondMimic tracking; GMR actually uses LAFAN1 retargets and BeyondMimic robustness evaluation; PHUMA actually uses MaskedMimic/IsaacGym policies and category-aware curation; OmniTrack actually uses GMR-retargeted AMASS/LAFAN1 references and simulator-generated physics-consistent references. This distinction prevents us from treating generic citations as implementation evidence.
 
+The tracking/latent/contact deep-read is recorded in `docs/research/papers/tracking_latent_contact_deep_read.md`. It covers BeyondMimic, MaskedMimic, PHC, ProtoMotions, TMR, and Contact and Human Dynamics. The design conclusion is conservative: direct 29D G1 output remains the first online baseline; controller-style sidecars such as IMU/base twist, current joints, joint velocities, previous action, and reference body features stay in the observation contract; actor morphology remains mandatory; behavior-balanced review is needed in addition to metric-worst review; and contact formulas should default to 3 cm float, 3 cm penetration, and 2 cm contact-foot skate as proposal metrics until BONES-SEED category calibration and simulator labels justify promotion.
+
 ## Working Design Choices
 
 1. Baseline output is direct G1 joint reference, not latent.
@@ -248,6 +250,7 @@ The citation/usage expansion pass is recorded in `docs/research/citation_usage_m
 5. Diffusion and flow matching are not first-line online models unless distilled into a low-step or direct network that meets the latency budget.
 6. Data filtering should preserve diversity as well as feasibility; a strict binary filter is usually too aggressive for locomotion/dance/interactions.
 7. Formal training must record a quality policy ID and curated index path; debug training can use smoke data only when clearly labeled as debug.
+8. Latent/diffusion/control-policy branches remain second-stage ablations until the direct G1-output baseline and M2Q policy are measurable.
 
 ## Open Questions
 

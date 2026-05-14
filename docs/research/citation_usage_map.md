@@ -34,15 +34,17 @@ This distinction matters because OnlineRetarget should borrow implementation det
 
 ## Reference Expansion Priorities
 
-These are the next papers/codebases to inspect before freezing model ablations:
+These were the next papers/codebases to inspect before freezing model ablations. The
+first follow-up pass is now recorded in
+`docs/research/papers/tracking_latent_contact_deep_read.md`.
 
 | Priority | Reference | Why it matters |
 | --- | --- | --- |
-| High | BeyondMimic | Defines downstream G1 tracking evaluation, motion artifact logging, success rate, robustness, and WandB artifact discipline used by GMR/NMR. |
-| High | TMR | NMR uses it for motion clustering in CEPR. Needed if we implement behavior-clustered quality review or simulator refinement. |
-| High | PHC / ProtoMotions retargeting paths | GMR compares against them and finds concrete artifact patterns. Their failure modes should inform M2Q review families. |
-| Medium | MaskedMimic | PHUMA uses it for policy training and pelvis-only path following. Useful for M7 and possible partial-observation eval. |
-| Medium | Contact and Dynamics from Monocular Video / UNDERPRESSURE | Needed to make foot float, penetration, and skate formulas precise rather than heuristic-only. |
+| High | BeyondMimic | Deep-read complete enough for M5/M7 design: controller obs includes IMU/base, current joints, previous action, and reference body features; diffusion remains a later branch under the 1 ms target. |
+| High | TMR | Deep-read complete enough for review-sampling design: semantic clustering can reduce near-duplicate manual review, but metadata/category balancing is the current no-dependency path. |
+| High | PHC / ProtoMotions retargeting paths | PHC deep-read supports morphology/body-shape conditioning and hard-negative sampling; ProtoMotions deep-read supports ONNX export with observation computation baked in and BONES-SEED/G1 deployment provenance. |
+| Medium | MaskedMimic | Deep-read complete enough to defer it to later partial-observation/task-conditioned robustness ablations. |
+| Medium | Contact and Dynamics from Monocular Video / UNDERPRESSURE | Contact and Dynamics formulas are now mapped to M2Q/M4 defaults: 3 cm float, 3 cm penetration, 2 cm contact-foot skate. UNDERPRESSURE remains a later contact-label dataset reference. |
 | Medium | Shared latent retargeting / ImitationNet / unsupervised neural retargeting | Needed before investing in a VAE/shared-latent branch. |
 | Low until M7 | OmniH2O, ExBody2, ASAP, GMT, AnyTrack, Sonic | Useful simulator/controller comparators, but they do not block the first direct supervised retargeter. |
 
@@ -57,5 +59,5 @@ These are the next papers/codebases to inspect before freezing model ablations:
 ## Gaps Still Open
 
 - OpenAlex citation graph is not informative yet for the newest 2025/2026 arXiv papers, so future M1 passes should retry cited-by after metadata catches up.
-- BeyondMimic, TMR, MaskedMimic, PHC, and ProtoMotions need deeper per-paper/code notes before final M6 ablation choices.
-- Contact metric formulas need a dedicated note that maps foot points, ground plane, contact confidence, and category exceptions to exact M4/M2Q computations.
+- The new tracking/latent/contact note closes the first-pass gap for BeyondMimic, TMR, MaskedMimic, PHC, ProtoMotions, and Contact and Dynamics, but final M6 ablations still need actual model-latency experiments.
+- Contact metric formulas still need simulator contact/collision labels before they can be promoted from curation proposals into formal policy gates.

@@ -7,7 +7,11 @@ This file tracks source papers and where to fetch them. Binary PDFs are not comm
 | NMR | https://arxiv.org/pdf/2603.22201 | Fetched to `runs/papers/nmr-2603.22201.pdf` |
 | PDF-HR | https://arxiv.org/pdf/2602.04851 | Fetched to `runs/papers/pdfhr-2602.04851.pdf` |
 | Retargeting Matters / GMR | https://arxiv.org/pdf/2510.02252 | Fetched to `runs/papers/gmr-2510.02252.pdf` |
-| BeyondMimic | https://arxiv.org/pdf/2508.08241 | Link recorded |
+| BeyondMimic | https://arxiv.org/pdf/2508.08241 | Fetched to `runs/papers/beyondmimic-2508.08241.pdf`; text extracted to `.txt` |
+| MaskedMimic | https://arxiv.org/pdf/2409.14393 | Fetched to `runs/papers/maskedmimic-2409.14393.pdf`; text extracted to `.txt`; OpenAlex `W4404526366`, DOI `10.1145/3687951` |
+| PHC | https://arxiv.org/pdf/2305.06456 | Fetched to `runs/papers/phc-2305.06456.pdf`; text extracted to `.txt`; OpenAlex `W4390874171`, DOI `10.1109/ICCV51070.2023.01000` |
+| TMR | https://arxiv.org/pdf/2305.00976 | Fetched to `runs/papers/tmr-2305.00976.pdf`; text extracted to `.txt`; OpenAlex `W4387963302`, DOI `10.1109/ICCV51070.2023.00870` |
+| ProtoMotions3 | https://github.com/NVlabs/ProtoMotions | README fetched to `runs/papers/protomotions-readme.md`; project docs search result recorded; no stable paper work found in OpenAlex |
 | OmniTrack | https://arxiv.org/pdf/2602.23832 | Fetched to `runs/papers/omnitrack-2602.23832.pdf` |
 | ULTRA | https://arxiv.org/pdf/2603.03279 | Link recorded |
 | OmniRetarget | https://arxiv.org/pdf/2509.26633 | Fetched to `runs/papers/omniretarget-2509.26633.pdf` |

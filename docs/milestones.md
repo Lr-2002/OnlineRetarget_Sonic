@@ -23,6 +23,7 @@ Required reading coverage:
 
 - User-provided references: PDF-HR, NMR, and related/cited works.
 - Learning-based humanoid retargeting/tracking: BeyondMimic, GMR/Retargeting Matters, OmniTrack, ReActor, OmniRetarget, ProtoMotions-G1, ULTRA, shared-latent retargeting.
+- Motion control/retrieval side references needed for design choices: MaskedMimic, PHC, TMR, and contact-metric work.
 - For each paper/codebase, extract: observation, reward, loss, data, model, output, evaluation metrics, failure filtering, and implications for OnlineRetarget.
 
 Gate:
@@ -34,6 +35,12 @@ Gate:
 - Model choices in later milestones cite this matrix rather than unsupported intuition.
 
 Stop condition: enough evidence exists to choose the first baseline and the first ablations without re-reading the same papers.
+
+Current status: first-pass matrix and per-paper notes exist. The latest deep-read note
+`docs/research/papers/tracking_latent_contact_deep_read.md` closes the immediate
+BeyondMimic, MaskedMimic, PHC, ProtoMotions, TMR, and contact-formula gap for
+M2Q/M5/M7 design. M1 is still living research because final ablation choices must
+be checked against actual BONES-SEED quality results and latency experiments.
 
 ## M2 - Data Inventory, Motion Curation, and Splits
 
