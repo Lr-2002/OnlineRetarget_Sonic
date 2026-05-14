@@ -7,6 +7,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .omx/
+.playwright-cli/
 
 # Experiment outputs stay local and are tracked through WandB/artifacts.
 runs/

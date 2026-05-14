@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OnlineRetarget Console</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="toolbar" aria-label="Pipeline controls">
+        <div>
+          <h1>OnlineRetarget</h1>
+          <p id="runMeta">No run loaded</p>
+        </div>
+        <form id="runForm" class="run-form">
+          <label class="file-picker">
+            <span>Motion file</span>
+            <input id="motionFile" name="motion" type="file" accept=".bvh,.npz,.pkl,.smpl,.smplx" />
+          </label>
+          <button id="runButton" type="submit">Run</button>
+        </form>
+      </section>
+
+      <section class="stage-grid" id="stageGrid" aria-label="Pipeline stages">
+        <article class="stage" data-stage="load">
+          <strong>Load</strong>
+          <span>Idle</span>
+        </article>
+        <article class="stage" data-stage="retarget">
+          <strong>Retarget</strong>
+          <span>Idle</span>
+        </article>
+        <article class="stage" data-stage="kinematic_sim">
+          <strong>Kinematic MuJoCo</strong>
+          <span>Idle</span>
+        </article>
+        <article class="stage" data-stage="physics_sim">
+          <strong>Physics MuJoCo</strong>
+          <span>Idle</span>
+        </article>
+      </section>
+
+      <section class="workspace">
+        <div class="viewport-panel">
+          <div class="viewport-head">
+            <div>
+              <h2>Motion Preview</h2>
+              <p id="frameMeta">Frame 0</p>
+            </div>
+            <div class="segmented" role="tablist" aria-label="Preview mode">
+              <button type="button" class="active" data-view="robot">Robot</button>
+              <button type="button" data-view="source">Source</button>
+            </div>
+          </div>
+          <canvas id="previewCanvas" width="920" height="540"></canvas>
+          <input id="frameSlider" type="range" min="0" max="0" value="0" />
+        </div>
+
+        <aside class="details-panel">
+          <h2>Run Artifacts</h2>
+          <dl id="artifactList"></dl>
+          <h2>Stage Detail</h2>
+          <pre id="detailText">{}</pre>
+        </aside>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

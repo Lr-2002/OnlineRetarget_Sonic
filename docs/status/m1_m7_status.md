@@ -26,7 +26,7 @@ PYTHONPATH=src:. python3 scripts/train.py --config configs/baseline_mlp.yaml --d
 PYTHONPATH=src:. python3 scripts/train.py --config configs/baseline_mlp.yaml --samples-jsonl runs/supervised/train_merged-quality-action_h8_limit8/samples.jsonl --max-steps 1
 ```
 
-Latest unit-test evidence: 87 tests passed with `PYTHONPATH=src:. python3 -m unittest discover -s tests`.
+Latest unit-test evidence: 91 tests passed with `PYTHONPATH=src:. python3 -m unittest discover -s tests`.
 
 ## Checklist
 
@@ -40,6 +40,7 @@ Latest unit-test evidence: 87 tests passed with `PYTHONPATH=src:. python3 -m uni
 | M5 Direct supervised baseline | Partial | `scripts/train.py --dry-run` reads config, curated index, M2Q quality gate context, policy audit context, sample-manifest builder, schema, git state, DDP rank/world size, and sample refs; `scripts/train.py --samples-jsonl ...` has a PyTorch optimizer loop for supervised JSONL samples; formal non-dry-run training now refuses missing quality metadata, missing/unpromotable policy audits, and `raw_bvh_channel_debug` samples unless `--allow-debug-data`; raw-channel and 30-body window JSONL builders both exist; post-train prediction JSONL, M4 offline eval, checkpoint report, and optional WandB hooks are coded | Formal-scale 30-body dataset, promoted M2Q policy audit, real WandB run, and actual torch-environment training execution pending |
 | M6 Model ablations and latency gate | Scaffold only | `scripts/benchmark_latency.py --dry-run` writes benchmark contract with observation/output dimensions | Real torch/CUDA/4090 latency measurement and ablation comparison pending |
 | M7 Physics refinement and simulator eval | Scaffold only | `scripts/eval_isaac.py --dry-run` writes `isaac_eval_status.json` with intended metrics | Isaac Lab install, G1 replay/tracking task binding, and physics-refined target generation pending |
+| Web preview / M8 handoff surface | Debug scaffold | `scripts/run_web.py`, `src/online_retarget/web_app.py`, `src/online_retarget/web_pipeline.py`, `src/online_retarget/web_static/*`, `tests/test_web_pipeline.py`, and `online-retarget-web` entry point. The web path accepts BVH uploads, writes per-run artifacts, creates a deterministic rule-based G1 preview CSV, renders source/robot canvas previews, and reports MuJoCo physics as `blocked` when the optional `mujoco` package is absent. Playwright verified a `/tmp` upload at `http://127.0.0.1:8766`, with load/retarget/kinematic stages OK and 45,712 non-background canvas pixels. | Not a learned model, not SMPL/SMPL-X decoding, not Isaac Lab evaluation, and not controller-grade physics tracking |
 
 ## Current Artifacts
 
@@ -66,6 +67,7 @@ Latest unit-test evidence: 87 tests passed with `PYTHONPATH=src:. python3 -m uni
 - Curated-index 30-body window smoke samples: `runs/supervised/train_merged-quality-action_30b_h8_limit4/samples.jsonl`
 - Latency dry-run: `runs/benchmarks/baseline_mlp_dry_run.json`
 - Isaac dry-run status: `runs/isaac_eval/dry_run/isaac_eval_status.json`
+- Web preview command: `PYTHONPATH=src python3 scripts/run_web.py --host 127.0.0.1 --port 8765`
 
 Latest G1 MJCF FK/contact/self-collision-proxy smoke result: first 100 clips scanned with `/home/user/repos/GMR/assets/unitree_g1/g1_mocap_29dof.xml`, `frame_stride=2`, `max_frames=256`; keep/downweight/quarantine = 18/36/46, flags `g1_foot_slide=70`, `g1_ground_penetration=41`, `g1_joint_limit_violation=18`, `g1_unstable_start_end=8`, `g1_foot_float=1`, `g1_self_collision_proxy=1`. The refreshed three-way curated smoke index has keep/downweight/quarantine/exclude = 71,088/71,048/83/1 and includes `source_fk:source_foot_slide=20`, `source_fk:source_low_foot_contact=38`, `g1:g1_self_collision_proxy=1`, source/G1 FK contact metrics in `worst_clips.csv`, and `diversity_loss` showing 0 lost actor/source-skeleton groups in this smoke policy.
 

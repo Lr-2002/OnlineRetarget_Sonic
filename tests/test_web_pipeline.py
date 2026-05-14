@@ -1,0 +1,119 @@
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+from online_retarget.web_pipeline import run_web_pipeline
+
+
+class WebPipelineTests(unittest.TestCase):
+    def test_bvh_pipeline_generates_retarget_and_kinematic_preview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model_xml = Path(tmp) / "g1.xml"
+            model_xml.write_text(_minimal_g1_mjcf(), encoding="utf-8")
+            result = run_web_pipeline(
+                _bvh_text().encode("utf-8"),
+                "walk.bvh",
+                output_root=Path(tmp) / "web_runs",
+                model_xml=model_xml,
+                max_frames=3,
+            )
+
+            payload = result.to_dict()
+            retarget_csv = Path(payload["artifacts"]["retargeted_g1_csv"])
+            retarget_csv_exists = retarget_csv.exists()
+            report = json.loads((result.output_dir / "pipeline_result.json").read_text())
+
+        self.assertEqual(payload["input_format"], "bvh")
+        self.assertEqual(payload["stages"]["load"]["status"], "ok")
+        self.assertEqual(payload["stages"]["retarget"]["status"], "ok")
+        self.assertEqual(payload["stages"]["kinematic_sim"]["status"], "ok")
+        self.assertIn(payload["stages"]["physics_sim"]["status"], {"ok", "blocked", "failed"})
+        self.assertTrue(retarget_csv_exists)
+        self.assertEqual(len(payload["preview"]["source"]["frames"]), 3)
+        self.assertEqual(len(payload["preview"]["robot"]["frames"]), 3)
+        self.assertEqual(report["run_id"], payload["run_id"])
+
+    def test_smpl_like_upload_is_explicitly_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_web_pipeline(
+                b"not a decoded body model",
+                "motion.npz",
+                output_root=Path(tmp) / "web_runs",
+                model_xml=Path(tmp) / "missing.xml",
+            )
+            payload = result.to_dict()
+
+        self.assertEqual(payload["input_format"], "smpl")
+        self.assertEqual(payload["stages"]["load"]["status"], "blocked")
+        self.assertEqual(payload["stages"]["retarget"]["status"], "blocked")
+
+
+def _bvh_text() -> str:
+    return """HIERARCHY
+ROOT Root
+{
+  OFFSET 0.000000 0.000000 0.000000
+  CHANNELS 6 Xposition Yposition Zposition Zrotation Yrotation Xrotation
+  JOINT Hips
+  {
+    OFFSET 0.000000 1.000000 0.000000
+    CHANNELS 6 Xposition Yposition Zposition Zrotation Yrotation Xrotation
+    JOINT LeftFoot
+    {
+      OFFSET 0.000000 -1.000000 0.000000
+      CHANNELS 3 Zrotation Yrotation Xrotation
+    }
+    JOINT RightFoot
+    {
+      OFFSET 0.000000 -1.000000 0.000000
+      CHANNELS 3 Zrotation Yrotation Xrotation
+    }
+    JOINT LeftHand
+    {
+      OFFSET -1.000000 0.500000 0.000000
+      CHANNELS 3 Zrotation Yrotation Xrotation
+    }
+    JOINT RightHand
+    {
+      OFFSET 1.000000 0.500000 0.000000
+      CHANNELS 3 Zrotation Yrotation Xrotation
+    }
+  }
+}
+MOTION
+Frames: 3
+Frame Time: 0.100000
+0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 1.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000
+1.000000 0.000000 0.000000 0.000000 0.000000 0.000000 1.000000 1.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000
+2.000000 0.000000 0.000000 0.000000 0.000000 0.000000 2.000000 1.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000
+"""
+
+
+def _minimal_g1_mjcf() -> str:
+    return """<mujoco model="minimal_g1">
+  <worldbody>
+    <body name="pelvis" pos="0 0 0">
+      <freejoint name="pelvis"/>
+      <body name="torso_link" pos="0 0 0.5">
+        <body name="head_link" pos="0 0 0.2"/>
+      </body>
+      <body name="left_ankle_roll_link" pos="0 0.1 -0.6">
+        <joint name="left_hip_pitch_joint" axis="0 1 0" range="-1 1"/>
+        <geom pos="0 0 0"/>
+        <body name="left_toe_link" pos="0.1 0 0"/>
+      </body>
+      <body name="right_ankle_roll_link" pos="0 -0.1 -0.6">
+        <geom pos="0 0 0"/>
+        <body name="right_toe_link" pos="0.1 0 0"/>
+      </body>
+      <body name="left_rubber_hand" pos="0 0.4 0.2"/>
+      <body name="right_rubber_hand" pos="0 -0.4 0.2"/>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+
+
+if __name__ == "__main__":
+    unittest.main()

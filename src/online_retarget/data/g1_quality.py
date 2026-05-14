@@ -1046,6 +1046,24 @@ def _g1_fk_positions(
     return output
 
 
+def g1_fk_body_positions(
+    model: G1KinematicModel,
+    joints: Sequence[float],
+    root_position: Sequence[float] = (0.0, 0.0, 0.0),
+    root_euler: Sequence[float] = (0.0, 0.0, 0.0),
+    include_empty_body_origin: bool = True,
+) -> dict[str, tuple[tuple[float, float, float], ...]]:
+    """Return G1 FK body points for a single generalized pose."""
+
+    return _g1_fk_positions(
+        model,
+        joints,
+        root_position,
+        root_euler,
+        include_empty_body_origin=include_empty_body_origin,
+    )
+
+
 def _root_rotation_matrix(euler_xyz: Sequence[float]) -> list[list[float]]:
     if len(euler_xyz) < 3:
         return _identity()

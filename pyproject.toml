@@ -25,9 +25,13 @@ dev = [
 
 [project.scripts]
 online-retarget = "online_retarget.cli:main"
+online-retarget-web = "online_retarget.web_app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+online_retarget = ["web_static/*"]
 
 [tool.ruff]
 line-length = 100
