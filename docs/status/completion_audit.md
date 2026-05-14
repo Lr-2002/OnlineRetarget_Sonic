@@ -15,7 +15,7 @@ Verdict: not complete. The repo now has runnable scaffolds, real BONES-SEED smok
 | Implement M2 data inventory/split/curation | `src/online_retarget/data/curation.py`, CLI `split-index`, real index under `runs/indices/...`, tests | Partial. Actor-heldout split and metadata curation are implemented; full quality gate remains incomplete. |
 | Keep source data read-only | `.gitignore`, commands write under `runs/`, data root `/home/user/data/motion_data` only read | Satisfied for current work. |
 | Separate different actors/skeletons | real split report: 522 actors, train/val/test actor split 417/52/53 | Satisfied at metadata split level. |
-| Implement M2Q quality filtering | source/G1 scanners, source FK/contact/support/root-height scanner, G1 MJCF FK/contact/support/root-height/self-collision-proxy scanner, pair/provenance scanner, grouped upper/lower-tail threshold proposal, stratified scan support, `merge-quality`, `worst_clips.csv`, manual review manifest, train quality gate | Partial. Smoke and representative quality pipeline exists; source BVH, source FK/contact/support/root-height, G1 FK/contact/support/root-height/self-collision-proxy, and pair/provenance stats now merge into curated indexes, curated reports include diversity-loss summaries, and worst clips are exportable to JSONL/Markdown review manifests. The 560-row representative four-way merge records keep/downweight/quarantine/exclude = 70,858/70,876/479/7 after merging 560 source, 560 source-FK, 560 G1, and 560 pair rows. BONES-SEED pair timing is now recorded as 120 Hz with exact source/G1 frame-count agreement in the representative sample. Completed review decisions, formal category thresholds, and simulator-backed labels remain pending. |
+| Implement M2Q quality filtering | source/G1 scanners, source FK/contact/support/root-height scanner, G1 MJCF FK/contact/support/root-height/self-collision-proxy scanner, pair/provenance scanner, grouped upper/lower-tail threshold proposal, stratified scan support, `merge-quality`, `worst_clips.csv`, manual review manifest, train quality gate | Partial. Smoke and representative quality pipeline exists; source BVH, source FK/contact/support/root-height, G1 FK/contact/support/root-height/self-collision-proxy, and pair/provenance stats now merge into curated indexes, curated reports include diversity-loss summaries, and worst clips are exportable to JSONL/Markdown review manifests. The refreshed 560-row representative four-way merge records keep/downweight/quarantine/exclude = 70,858/70,878/477/7 after merging 560 source, 560 source-FK, 560 G1, and 560 pair rows; `worst_clips.csv` includes source/G1 root-height and support-distance columns. BONES-SEED pair timing is now recorded as 120 Hz with exact source/G1 frame-count agreement in the representative sample. Completed review decisions, formal category thresholds, and simulator-backed labels remain pending. |
 | Implement M3 schema/obs contract | `src/online_retarget/data/schema.py`, `src/online_retarget/data/windowed_builder.py`, `tests/test_schema.py`, `tests/test_windowed_builder.py`, real 30-body smoke artifact | Smoke path implemented. Formal-scale extraction, normalization policy, robot-state wiring, and online preprocessing are pending. |
 | Implement M4 independent eval | `src/online_retarget/evaluation.py`, CLI `offline-eval`, `tests/test_evaluation.py` | Scaffold implemented. Real model predictions and simulator/contact metrics are pending. |
 | Implement M5 supervised baseline | `scripts/train.py`, `src/online_retarget/data/supervised_builder.py`, `src/online_retarget/data/windowed_builder.py`, supervised JSONL artifacts | Partial. PyTorch optimizer loop exists and post-train prediction JSONL/offline-eval/WandB metadata hooks are coded, but current Python lacks torch and formal-scale 30-body training is pending. |
@@ -73,6 +73,35 @@ PYTHONPATH=src:. python3 scripts/inspect_bones_seed.py scan-pair-quality \
 # Pair quality wrote pair_quality_report.json with keep/quarantine = 494/66,
 # max frame-count delta 0, and p95 absolute duration delta 0.001768 s.
 
+PYTHONPATH=src:. python3 scripts/inspect_bones_seed.py scan-source-fk-quality \
+  --data-root /home/user/data/motion_data \
+  --index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
+  --output-root runs \
+  --limit 560 \
+  --sample-by category \
+  --sample-by split \
+  --ground-height 0.0 \
+  --frame-stride 2 \
+  --max-frames 256
+# Refreshed source FK/support report records keep/downweight/quarantine/exclude =
+# 223/235/100/2 and support/root-height metric summaries.
+
+PYTHONPATH=src:. python3 scripts/inspect_bones_seed.py scan-g1-quality \
+  --data-root /home/user/data/motion_data \
+  --index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
+  --output-root runs \
+  --limit 560 \
+  --sample-by category \
+  --sample-by split \
+  --model-xml /home/user/repos/GMR/assets/unitree_g1/g1_mocap_29dof.xml \
+  --root-position-scale 0.01 \
+  --joint-angle-scale 0.017453292519943295 \
+  --root-rotation-scale 0.017453292519943295 \
+  --frame-stride 2 \
+  --max-frames 256
+# Refreshed G1 FK/support report records keep/downweight/quarantine =
+# 37/167/356 and support/root-height metric summaries.
+
 PYTHONPATH=src:. python3 scripts/inspect_bones_seed.py merge-quality \
   --split-index-csv runs/indices/actor_split_t80_v10_x10_s17_metadata_balanced_v0/split_index.csv \
   --source-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_source_limit560_by-category-split/source_bvh_quality_stats.jsonl \
@@ -81,8 +110,8 @@ PYTHONPATH=src:. python3 scripts/inspect_bones_seed.py merge-quality \
   --pair-stats-jsonl runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_pair_limit560_by-category-split/pair_quality_stats.jsonl \
   --output-root runs \
   --run-name representative_source_g1_pair_limit560_by_category_split
-# Four-way representative curated report wrote keep/downweight/quarantine/exclude =
-# 70858/70876/479/7 with merged_source_rows=560, merged_source_fk_rows=560,
+# Refreshed four-way representative curated report wrote keep/downweight/quarantine/exclude =
+# 70858/70878/477/7 with merged_source_rows=560, merged_source_fk_rows=560,
 # merged_g1_rows=560, merged_pair_rows=560, and 0 lost actor/source-skeleton/category/split groups.
 
 PYTHONPATH=src python3 scripts/inspect_bones_seed.py build-review-manifest \
