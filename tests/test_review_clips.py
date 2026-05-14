@@ -60,6 +60,36 @@ class ReviewClipExportTests(unittest.TestCase):
 
         self.assertIn("model_xml", str(raised.exception))
 
+    def test_export_review_clips_accepts_merged_quality_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_root = root / "data"
+            data_root.mkdir()
+            _write_source_tar(data_root / "soma_proportional.tar")
+            _write_g1_tar(data_root / "g1.tar")
+            review_csv = root / "worst_clips.csv"
+            _write_merged_review_csv(review_csv)
+
+            result = export_review_clips(
+                data_root=data_root,
+                input_csv=review_csv,
+                output_root=root / "clips",
+                run_name="merged",
+                label="g1_quality",
+                config=ReviewClipExportConfig(limit=1),
+            )
+            rows = _read_csv(result.summary_csv)
+            metadata = json.loads(
+                (result.output_dir / "00_g1_quality_good" / "metadata.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(rows[0]["quality_action"], "quarantine")
+        self.assertEqual(rows[0]["quality_flags"], "g1:g1_ground_penetration")
+        self.assertEqual(metadata["merged_quality_action"], "quarantine")
+        self.assertEqual(metadata["merged_quality_flags"], "g1:g1_ground_penetration")
+
 
 def _write_review_csv(path: Path) -> None:
     fieldnames = [
@@ -96,6 +126,37 @@ def _write_review_csv(path: Path) -> None:
             "abs_duration_delta_sec": "0.01",
             "source_duration_sec": "0.1",
             "g1_duration_sec": "0.11",
+        }
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _write_merged_review_csv(path: Path) -> None:
+    fieldnames = [
+        "merged_quality_action",
+        "merged_quality_flags",
+        "row_index",
+        "split",
+        "category",
+        "actor_uid",
+        "filename",
+        "move_soma_proportional_path",
+        "move_g1_path",
+    ]
+    rows = [
+        {
+            "merged_quality_action": "quarantine",
+            "merged_quality_flags": "g1:g1_ground_penetration",
+            "row_index": "1",
+            "split": "train",
+            "category": "Baseline",
+            "actor_uid": "A001",
+            "filename": "good",
+            "move_soma_proportional_path": "soma_proportional/bvh/240101/good.bvh",
+            "move_g1_path": "g1/csv/240101/good.csv",
         }
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:

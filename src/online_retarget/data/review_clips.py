@@ -18,6 +18,8 @@ from .bones_seed import G1_JOINT_COLUMNS
 DEFAULT_REVIEW_CLIP_COLUMNS = (
     "quality_action",
     "quality_flags",
+    "merged_quality_action",
+    "merged_quality_flags",
     "row_index",
     "split",
     "category",
@@ -202,6 +204,12 @@ def _metadata_for_row(
     }
     for column in DEFAULT_REVIEW_CLIP_COLUMNS:
         metadata[column] = row.get(column, "")
+    metadata["quality_action"] = str(
+        row.get("quality_action") or row.get("merged_quality_action") or ""
+    )
+    metadata["quality_flags"] = str(
+        row.get("quality_flags") or row.get("merged_quality_flags") or ""
+    )
     metadata["render_fps"] = config.fps
     metadata["render_max_frames"] = config.render_max_frames
     return metadata
@@ -213,6 +221,8 @@ def _write_summary_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> None
         "sample_index",
         "quality_action",
         "quality_flags",
+        "merged_quality_action",
+        "merged_quality_flags",
         "split",
         "category",
         "actor_uid",
