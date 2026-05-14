@@ -66,7 +66,7 @@ Latest unit-test evidence: 106 tests passed, 1 skipped with `PYTHONPATH=src:. py
 - Manual review decision ingest command: `PYTHONPATH=src:. python3 scripts/inspect_bones_seed.py merge-review-decisions --review-manifest-jsonl <review_manifest.jsonl> --decisions-file <decisions.csv|jsonl> --output-jsonl <review_manifest.reviewed.jsonl> --output-report-json <review_decision_report.json>`
 - Representative policy-promotion audit: `runs/curated/representative_source_g1_pair_limit560_by_category_split/policy_audit.json`
 - Partial balanced G1 quality review CSV/report: `runs/curated/g1_partial_quality_review/g1_partial_balanced_review.csv`, `runs/curated/g1_partial_quality_review/g1_partial_balanced_review_report.json`
-- Partial balanced G1 review clips: `runs/review_clips/g1_partial_balanced_cli_render_check/summary.csv` and per-clip `target_g1_mujoco.mp4`; the refreshed summary carries `review_family`, `max_start_end_root_speed`, contact, penetration, joint-limit, and self-collision metric columns for each demo.
+- Partial balanced G1 review clips: `runs/review_clips/g1_partial_balanced_cli_render_check/README.md`, `runs/review_clips/g1_partial_balanced_cli_render_check/summary.csv`, and per-clip `target_g1_mujoco.mp4`; the refreshed README/summary carry `review_family`, family-specific metric summaries, `max_start_end_root_speed`, contact, penetration, joint-limit, velocity-jump, float, and self-collision metric columns for each demo.
 - Supervised debug samples: `runs/supervised/train_h8_limit8/samples.jsonl`
 - Curated-index supervised debug samples: `runs/supervised/train_merged-quality-action_h8_limit8/samples.jsonl`
 - Curated-index 30-body window smoke samples: `runs/supervised/train_merged-quality-action_30b_h8_limit4/samples.jsonl`
@@ -78,7 +78,7 @@ Latest G1 MJCF FK/contact/self-collision-proxy smoke result: first 100 clips sca
 
 Latest representative M2Q evidence: category/split-stratified 560-row scans are available for source BVH, source FK/contact, G1 FK/contact/self-collision-proxy, and source/G1 pair provenance. The representative pair report records `g1_fps=120`, source frame time `0.008333333333333333`, 0 max frame-count delta, and 66 tiny duration mismatches over the strict 1 ms tolerance. The four-way representative curated report records keep/downweight/quarantine/exclude = 70,858/70,876/479/7, with 0 lost actor/source-skeleton/category/split groups under the current provisional action policy. These are calibration artifacts, not a formal curation policy.
 
-Latest full G1 scan progress: tmux session `m2q_g1_full` is still running. As of this audit, `runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_full/g1_quality_stats.jsonl` has 34,584 rows and `g1_quality_report.json` has not been written.
+Latest full G1 scan progress: tmux session `m2q_g1_full` is still running. As of this audit, `runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_full/g1_quality_stats.jsonl` has 37,045 rows and `g1_quality_report.json` has not been written.
 
 ## Stop Condition
 

@@ -27,7 +27,7 @@ Verdict: not complete. The repo now has runnable scaffolds, real BONES-SEED smok
 | Implement web retarget preview | `scripts/run_web.py`, `src/online_retarget/web_app.py`, `src/online_retarget/web_pipeline.py`, `src/online_retarget/web_static/*`, `tests/test_web_pipeline.py`, `outputs/web_runs/1778729853-sample_upload-79da8236/pipeline_result.json`, `outputs/web_runs/1778730775-sample_smpl_like-3db7f515/pipeline_result.json` | Local standard-library web console implemented for BVH upload, approximate SMPL-like `.npz` preview from common pose/translation arrays, rule-based G1 preview retarget output, G1 MJCF kinematic preview, run artifacts, and explicit MuJoCo physics blocked/failed/ok status. A repo-local venv with `mujoco==3.8.1` completed real MuJoCo physics rollouts from both BVH and SMPL-like web flows against the G1 MJCF. Learned retarget checkpoints, full SMPL/SMPL-X body-model decoding, and controller-grade physical tracking remain pending. |
 | Write live logs | `docs/logs/implementation-log.md` | Satisfied for current implementation history. Keep updating during future work. |
 | Make process/status readable | `docs/milestones.md`, `docs/status/m1_m7_status.md`, this audit | Satisfied as a living tracking surface, not final completion. |
-| Verify current work | Latest `PYTHONPATH=src:. python3 -m unittest discover -s tests` -> 106 tests OK, 1 skipped; targeted review-export `py_compile` -> OK; `git diff --check` -> OK; regenerated `runs/curated/g1_partial_quality_review/g1_partial_balanced_review.csv` and `runs/review_clips/g1_partial_balanced_cli_render_check` with 8 MuJoCo G1 videos, `render_status=ok`, `review_family`, and per-clip quality metrics in `summary.csv`/`metadata.json`; full G1 scan progress checked at 34,584 JSONL rows with no final `g1_quality_report.json` yet. Earlier verification also includes review-template tests, web-pipeline tests, policy-audit/preflight tests, blocked representative preflight, web MuJoCo smoke, dry-run training, source/G1/pair quality scans, representative 560-row scans, manual review manifests, blocked formal training on unpromotable policy audit, and raw-debug artifact rejection. | Current scaffold and review-demo traceability verified. Not evidence of full M1-M7 completion. |
+| Verify current work | Latest `PYTHONPATH=src:. python3 -m unittest discover -s tests` -> 106 tests OK, 1 skipped; targeted review-export tests and `py_compile` -> OK; `git diff --check` -> OK; regenerated `runs/curated/g1_partial_quality_review/g1_partial_balanced_review.csv` and `runs/review_clips/g1_partial_balanced_cli_render_check` with 8 MuJoCo G1 videos, `render_status=ok`, `review_family`, per-clip quality metrics in `README.md`, `summary.csv`, and `metadata.json`; full G1 scan progress checked at 37,045 JSONL rows with no final `g1_quality_report.json` yet. Earlier verification also includes review-template tests, web-pipeline tests, policy-audit/preflight tests, blocked representative preflight, web MuJoCo smoke, dry-run training, source/G1/pair quality scans, representative 560-row scans, manual review manifests, blocked formal training on unpromotable policy audit, and raw-debug artifact rejection. | Current scaffold and review-demo traceability verified. Not evidence of full M1-M7 completion. |
 
 ## Latest Verification Evidence
 
@@ -80,12 +80,12 @@ PYTHONPATH=src outputs/web_mujoco_venv/bin/python scripts/inspect_bones_seed.py 
   --root-position-scale 0.01 \
   --angle-scale 0.017453292519943295
 # Refreshed runs/review_clips/g1_partial_balanced_cli_render_check with
-# render_counts.ok=8. summary.csv and per-clip metadata.json now carry
+# render_counts.ok=8. README.md, summary.csv, and per-clip metadata.json now carry
 # review_family plus contact, penetration, joint-limit, start/end,
 # velocity, float, and self-collision proxy metrics.
 
 wc -l runs/quality/actor_split_t80_v10_x10_s17_metadata_balanced_v0_full/g1_quality_stats.jsonl
-# 34584 .../g1_quality_stats.jsonl
+# 37045 .../g1_quality_stats.jsonl
 # tmux session m2q_g1_full still running; no final g1_quality_report.json yet.
 
 PYTHONPATH=src:. python3 -m unittest discover -s tests

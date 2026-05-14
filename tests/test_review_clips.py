@@ -35,6 +35,7 @@ class ReviewClipExportTests(unittest.TestCase):
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             source_exists = Path(metadata["source_bvh"]).exists()
             target_exists = Path(metadata["target_g1_csv"]).exists()
+            readme = result.readme_md.read_text(encoding="utf-8")
 
         self.assertEqual(result.exported_rows, 1)
         self.assertEqual(result.render_counts, {"not_requested": 1})
@@ -50,6 +51,10 @@ class ReviewClipExportTests(unittest.TestCase):
         self.assertEqual(metadata["contact_slide_rate"], "0.25")
         self.assertTrue(source_exists)
         self.assertTrue(target_exists)
+        self.assertIn("## Samples", readme)
+        self.assertIn("pair_duration_mismatch", readme)
+        self.assertIn("| index | review_family | filename | action | render | metrics | video |", readme)
+        self.assertIn("contact_slide_rate=0.25", readme)
 
     def test_render_requires_model_xml(self):
         with self.assertRaises(ValueError) as raised:

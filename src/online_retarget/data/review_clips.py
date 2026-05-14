@@ -56,6 +56,17 @@ QUALITY_METRIC_COLUMNS = (
     "min_self_collision_distance",
 )
 
+_FAMILY_METRIC_COLUMNS = {
+    "g1_foot_slide": ("contact_slide_rate", "max_contact_slide_speed"),
+    "g1_joint_limit_violation": ("joint_limit_violation_rate", "max_joint_limit_violation"),
+    "g1_unstable_start_end": ("max_start_end_root_speed",),
+    "g1_ground_penetration": ("penetration_depth",),
+    "joint_velocity_jump": ("joint_jump_rate", "max_abs_joint_velocity"),
+    "g1_foot_float": ("mean_foot_clearance",),
+    "g1_self_collision_proxy": ("self_collision_proxy_rate", "min_self_collision_distance"),
+    "g1_low_foot_contact": ("contact_frame_ratio",),
+}
+
 
 @dataclass(frozen=True)
 class ReviewClipExportConfig:
@@ -323,6 +334,10 @@ Each sample directory contains:
 These videos visualize the paired G1 target CSV only. They are not learned retargeter predictions and not Isaac Lab rollouts.
 When present, `review_family` and metric columns come from the input review CSV so each clip can be traced back to the specific quality flag that selected it.
 
+## Samples
+
+{_sample_table(rows)}
+
 Config:
 
 ```json
@@ -330,6 +345,46 @@ Config:
 ```
 """
     path.write_text(text, encoding="utf-8")
+
+
+def _sample_table(rows: Sequence[Mapping[str, object]]) -> str:
+    if not rows:
+        return "_No samples exported._"
+    headers = ("index", "review_family", "filename", "action", "render", "metrics", "video")
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    for row in rows:
+        render = row.get("render") if isinstance(row.get("render"), Mapping) else {}
+        cells = (
+            str(row.get("sample_index", "")),
+            str(row.get("review_family", "")),
+            str(row.get("filename", "")),
+            str(row.get("quality_action", "")),
+            str(render.get("status", "")),
+            _metric_summary(row),
+            str(row.get("target_g1_video", "")),
+        )
+        lines.append("| " + " | ".join(_md_cell(cell) for cell in cells) + " |")
+    return "\n".join(lines)
+
+
+def _metric_summary(row: Mapping[str, object]) -> str:
+    family = str(row.get("review_family", ""))
+    columns = _FAMILY_METRIC_COLUMNS.get(family, QUALITY_METRIC_COLUMNS)
+    parts: list[str] = []
+    for column in columns:
+        value = row.get(column, "")
+        if value in (None, ""):
+            continue
+        parts.append(f"{column}={value}")
+    return "; ".join(parts)
+
+
+def _md_cell(value: object) -> str:
+    text = str(value).replace("\n", " ").strip()
+    return text.replace("|", "\\|")
 
 
 def _clip_dir_name(index: int, label: str, row: Mapping[str, str]) -> str:
