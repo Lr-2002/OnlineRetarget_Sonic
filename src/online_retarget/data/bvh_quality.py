@@ -75,12 +75,13 @@ def scan_bvh_quality_from_index(
     scanned: list[dict[str, object]] = []
     skipped_rows = 0
     with tarfile.open(source_tar, "r:*") as tar:
+        member_by_name = {member.name: member for member in tar.getmembers()}
         for row in rows:
             source_path = row.get("move_soma_proportional_path", "")
             if not source_path:
                 skipped_rows += 1
                 continue
-            scanned.append(scan_bvh_member(tar, row, config))
+            scanned.append(scan_bvh_member(tar, row, config, member_by_name=member_by_name))
 
     _write_jsonl(stats_jsonl, scanned)
     action_counts = Counter(str(row["quality_action"]) for row in scanned)
@@ -123,6 +124,7 @@ def scan_bvh_member(
     tar: tarfile.TarFile,
     index_row: Mapping[str, str],
     config: BVHQualityConfig,
+    member_by_name: Mapping[str, tarfile.TarInfo] | None = None,
 ) -> dict[str, object]:
     """Scan one BVH member from an open tar archive."""
 
@@ -140,7 +142,7 @@ def scan_bvh_member(
         "move_soma_proportional_path": source_path,
     }
     try:
-        member = tar.getmember(source_path)
+        member = member_by_name[source_path] if member_by_name is not None else tar.getmember(source_path)
         extracted = tar.extractfile(member)
     except (KeyError, tarfile.TarError):
         return _empty_result(base, "missing_source_bvh_member")

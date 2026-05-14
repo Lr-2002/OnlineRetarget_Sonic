@@ -140,12 +140,13 @@ def scan_g1_quality_from_index(
     scanned: list[dict[str, object]] = []
     skipped_rows = 0
     with tarfile.open(g1_tar, "r:*") as tar:
+        member_by_name = {member.name: member for member in tar.getmembers()}
         for row in rows:
             target_path = row.get("move_g1_path", "")
             if not target_path:
                 skipped_rows += 1
                 continue
-            scanned.append(scan_g1_csv_member(tar, row, config, model=model))
+            scanned.append(scan_g1_csv_member(tar, row, config, model=model, member_by_name=member_by_name))
 
     _write_jsonl(stats_jsonl, scanned)
     action_counts = Counter(str(row["quality_action"]) for row in scanned)
@@ -190,6 +191,7 @@ def scan_g1_csv_member(
     index_row: Mapping[str, str],
     config: G1QualityConfig,
     model: G1KinematicModel | None = None,
+    member_by_name: Mapping[str, tarfile.TarInfo] | None = None,
 ) -> dict[str, object]:
     """Scan one G1 CSV member from an open tar archive."""
 
@@ -207,7 +209,7 @@ def scan_g1_csv_member(
         "move_g1_path": target_path,
     }
     try:
-        member = tar.getmember(target_path)
+        member = member_by_name[target_path] if member_by_name is not None else tar.getmember(target_path)
         extracted = tar.extractfile(member)
     except (KeyError, tarfile.TarError):
         return _empty_result(base, "missing_g1_csv_member", model)

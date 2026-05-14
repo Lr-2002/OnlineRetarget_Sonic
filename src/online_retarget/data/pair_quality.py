@@ -76,12 +76,32 @@ def scan_pair_quality_from_index(
     scanned: list[dict[str, object]] = []
     skipped_rows = 0
     with tarfile.open(source_tar_path, "r:*") as source_tar, tarfile.open(g1_tar_path, "r:*") as g1_tar:
+        source_member_by_name = {member.name: member for member in source_tar.getmembers()}
+        g1_member_by_name = {member.name: member for member in g1_tar.getmembers()}
         for row in rows:
             if not row.get("move_soma_proportional_path") or not row.get("move_g1_path"):
                 skipped_rows += 1
-                scanned.append(scan_pair_members(source_tar, g1_tar, row, config))
+                scanned.append(
+                    scan_pair_members(
+                        source_tar,
+                        g1_tar,
+                        row,
+                        config,
+                        source_member_by_name=source_member_by_name,
+                        g1_member_by_name=g1_member_by_name,
+                    )
+                )
                 continue
-            scanned.append(scan_pair_members(source_tar, g1_tar, row, config))
+            scanned.append(
+                scan_pair_members(
+                    source_tar,
+                    g1_tar,
+                    row,
+                    config,
+                    source_member_by_name=source_member_by_name,
+                    g1_member_by_name=g1_member_by_name,
+                )
+            )
 
     _write_jsonl(stats_jsonl, scanned)
     action_counts = Counter(str(row["quality_action"]) for row in scanned)
@@ -125,6 +145,8 @@ def scan_pair_members(
     g1_tar: tarfile.TarFile,
     index_row: Mapping[str, str],
     config: PairQualityConfig,
+    source_member_by_name: Mapping[str, tarfile.TarInfo] | None = None,
+    g1_member_by_name: Mapping[str, tarfile.TarInfo] | None = None,
 ) -> dict[str, object]:
     """Scan source BVH and target G1 CSV metadata for one row."""
 
@@ -144,8 +166,16 @@ def scan_pair_members(
         "target_provenance": config.target_provenance,
         "source_provenance": "soma_proportional_bvh",
     }
-    source_meta = _read_bvh_meta(source_tar, str(base["move_soma_proportional_path"]))
-    g1_meta = _read_g1_meta(g1_tar, str(base["move_g1_path"]))
+    source_meta = _read_bvh_meta(
+        source_tar,
+        str(base["move_soma_proportional_path"]),
+        member_by_name=source_member_by_name,
+    )
+    g1_meta = _read_g1_meta(
+        g1_tar,
+        str(base["move_g1_path"]),
+        member_by_name=g1_member_by_name,
+    )
     return summarize_pair_meta(base, source_meta, g1_meta, config)
 
 
@@ -223,11 +253,15 @@ def summarize_pair_meta(
     }
 
 
-def _read_bvh_meta(tar: tarfile.TarFile, source_path: str) -> dict[str, object]:
+def _read_bvh_meta(
+    tar: tarfile.TarFile,
+    source_path: str,
+    member_by_name: Mapping[str, tarfile.TarInfo] | None = None,
+) -> dict[str, object]:
     if not source_path:
         return {"present": False, "flags": ("missing_source_bvh_path",)}
     try:
-        member = tar.getmember(source_path)
+        member = member_by_name[source_path] if member_by_name is not None else tar.getmember(source_path)
         extracted = tar.extractfile(member)
     except (KeyError, tarfile.TarError):
         return {"present": False, "flags": ("missing_source_bvh_member",)}
@@ -265,11 +299,15 @@ def _parse_bvh_meta(text: str) -> dict[str, object]:
     }
 
 
-def _read_g1_meta(tar: tarfile.TarFile, target_path: str) -> dict[str, object]:
+def _read_g1_meta(
+    tar: tarfile.TarFile,
+    target_path: str,
+    member_by_name: Mapping[str, tarfile.TarInfo] | None = None,
+) -> dict[str, object]:
     if not target_path:
         return {"present": False, "flags": ("missing_g1_csv_path",)}
     try:
-        member = tar.getmember(target_path)
+        member = member_by_name[target_path] if member_by_name is not None else tar.getmember(target_path)
         extracted = tar.extractfile(member)
     except (KeyError, tarfile.TarError):
         return {"present": False, "flags": ("missing_g1_csv_member",)}
