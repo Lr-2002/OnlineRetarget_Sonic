@@ -15,6 +15,7 @@ from online_retarget.data.pair_quality import PairQualityConfig, scan_pair_quali
 from online_retarget.data.policy_audit import (
     CurationPolicyAuditConfig,
     audit_curation_policy,
+    preflight_curation_policy,
 )
 from online_retarget.data.quality_merge import merge_quality_stats
 from online_retarget.data.review_manifest import (
@@ -404,6 +405,48 @@ def main() -> None:
         help="Do not block promotion when reports were generated from a dirty git tree.",
     )
 
+    policy_preflight = subparsers.add_parser(
+        "preflight-curation-policy",
+        help="Run the standard curation-policy preflight from a curated run directory",
+    )
+    policy_preflight.add_argument("--curated-run-dir", type=Path, required=True)
+    policy_preflight.add_argument("--policy-id")
+    policy_preflight.add_argument("--threshold-policy-json", type=Path)
+    policy_preflight.add_argument("--review-decision-report-json", type=Path)
+    policy_preflight.add_argument("--output-json", type=Path)
+    policy_preflight.add_argument(
+        "--allow-representative",
+        action="store_true",
+        help="Allow partial scan coverage as a warning instead of a policy blocker.",
+    )
+    policy_preflight.add_argument(
+        "--thresholds-accepted",
+        action="store_true",
+        help="Declare discovered threshold proposals accepted as the named policy.",
+    )
+    policy_preflight.add_argument(
+        "--skip-review-decisions",
+        action="store_true",
+        help="Do not require filled manual review decisions in the manifest.",
+    )
+    policy_preflight.add_argument(
+        "--required-group-by",
+        action="append",
+        default=["category", "split"],
+        help="Required threshold grouping field. Defaults to category and split.",
+    )
+    policy_preflight.add_argument(
+        "--diversity-dimension",
+        action="append",
+        default=["actor_uid", "source_skeleton", "category", "split"],
+        help="Diversity-loss dimension that must retain at least one keep/downweight row.",
+    )
+    policy_preflight.add_argument(
+        "--allow-dirty-report",
+        action="store_true",
+        help="Do not block promotion when reports were generated from a dirty git tree.",
+    )
+
     offline_eval = subparsers.add_parser(
         "offline-eval",
         help="Evaluate prediction/target JSONL and write offline metric reports",
@@ -447,6 +490,8 @@ def main() -> None:
         _merge_review_decisions(args)
     elif args.command == "audit-curation-policy":
         _audit_curation_policy(args)
+    elif args.command == "preflight-curation-policy":
+        _preflight_curation_policy(args)
     elif args.command == "offline-eval":
         _offline_eval(args)
 
@@ -715,6 +760,26 @@ def _audit_curation_policy(args: argparse.Namespace) -> None:
         output_json=args.output_json,
         config=CurationPolicyAuditConfig(
             policy_id=args.policy_id,
+            allow_representative=args.allow_representative,
+            thresholds_accepted=args.thresholds_accepted,
+            require_review_decisions=not args.skip_review_decisions,
+            required_group_by=tuple(args.required_group_by),
+            diversity_dimensions=tuple(args.diversity_dimension),
+            require_clean_report_git=not args.allow_dirty_report,
+        ),
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _preflight_curation_policy(args: argparse.Namespace) -> None:
+    result = preflight_curation_policy(
+        curated_run_dir=args.curated_run_dir,
+        policy_id=args.policy_id,
+        output_json=args.output_json,
+        threshold_policy_json=args.threshold_policy_json,
+        review_decision_report_json=args.review_decision_report_json,
+        config=CurationPolicyAuditConfig(
+            policy_id=args.policy_id or args.curated_run_dir.name,
             allow_representative=args.allow_representative,
             thresholds_accepted=args.thresholds_accepted,
             require_review_decisions=not args.skip_review_decisions,

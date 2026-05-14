@@ -163,6 +163,17 @@ The merge writes:
 - `runs/curated/<run-name>/curated_report.json`
 - `runs/curated/<run-name>/worst_clips.csv`
 
+Run the M2Q promotion preflight for a curated run:
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py preflight-curation-policy \
+  --curated-run-dir runs/curated/representative_source_g1_pair_limit560_by_category_split
+```
+
+The preflight writes `policy_preflight.json`, discovers matching threshold proposal artifacts
+from the stats paths in `curated_report.json`, and reports the exact blockers before formal M5
+training can use the policy audit.
+
 Run smoke tests:
 
 ```bash

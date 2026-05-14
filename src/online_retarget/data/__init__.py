@@ -20,6 +20,13 @@ from .curation import (
 )
 from .g1_quality import G1QualityConfig, G1QualityScanResult, scan_g1_quality_from_index
 from .pair_quality import PairQualityConfig, PairQualityScanResult, scan_pair_quality_from_index
+from .policy_audit import (
+    CurationPolicyAuditConfig,
+    CurationPolicyAuditResult,
+    CurationPolicyPreflightResult,
+    audit_curation_policy,
+    preflight_curation_policy,
+)
 from .quality_merge import QualityMergeResult, merge_quality_stats
 from .review_manifest import (
     ReviewDecisionMergeResult,
@@ -83,6 +90,9 @@ __all__ = [
     "WindowedBuildConfig",
     "WindowedBuildResult",
     "ActorSkeleton",
+    "CurationPolicyAuditConfig",
+    "CurationPolicyAuditResult",
+    "CurationPolicyPreflightResult",
     "InventorySummary",
     "QualityDecision",
     "QualityMergeResult",
@@ -95,6 +105,7 @@ __all__ = [
     "SplitIndexResult",
     "assess_row_quality",
     "actor_skeletons",
+    "audit_curation_policy",
     "build_split_index",
     "build_review_decision_template",
     "build_review_manifest",
@@ -105,6 +116,7 @@ __all__ = [
     "merge_review_decisions",
     "motion_pair_ref_from_index_row",
     "propose_thresholds_from_jsonl",
+    "preflight_curation_policy",
     "scan_bvh_quality_from_index",
     "scan_g1_quality_from_index",
     "scan_pair_quality_from_index",

@@ -6,6 +6,7 @@ import unittest
 from online_retarget.data.policy_audit import (
     CurationPolicyAuditConfig,
     audit_curation_policy,
+    preflight_curation_policy,
 )
 from online_retarget.data.review_manifest import merge_review_decisions
 
@@ -190,8 +191,79 @@ class CurationPolicyAuditTests(unittest.TestCase):
         self.assertFalse(result.promotable)
         self.assertIn("invalid actions", "\n".join(result.blockers))
 
+    def test_preflight_discovers_standard_artifacts_and_reports_next_actions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "candidate_representative"
+            run_dir.mkdir()
+            stats = root / "quality" / "source_fk_quality_stats.jsonl"
+            stats.parent.mkdir()
+            stats.write_text("{}\n", encoding="utf-8")
+            _write_curated_report(
+                run_dir / "curated_report.json",
+                row_count=10,
+                scanned=3,
+                stats_jsonl=stats,
+            )
+            threshold = _write_thresholds(
+                stats.parent / "source_fk_threshold_proposals_grouped_p95.json",
+                sample_count=3,
+                stats_jsonl=stats,
+            )
+            review_dir = run_dir / "manual_review"
+            review_dir.mkdir()
+            _write_review_report(review_dir / "review_report.json")
+            _write_review_manifest(review_dir / "review_manifest.jsonl", complete=False)
 
-def _write_curated_report(path: Path, row_count: int, scanned: int) -> Path:
+            result = preflight_curation_policy(run_dir)
+            written = json.loads((run_dir / "policy_preflight.json").read_text(encoding="utf-8"))
+
+        self.assertFalse(result.audit.promotable)
+        self.assertEqual(result.discovered["threshold_proposal_jsons"], [str(threshold)])
+        self.assertEqual(written["policy_id"], "candidate_representative")
+        next_actions = "\n".join(result.next_actions)
+        self.assertIn("full", next_actions)
+        self.assertIn("threshold", next_actions)
+        self.assertIn("manual review", next_actions)
+
+    def test_preflight_promotes_complete_standard_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "candidate_v1"
+            run_dir.mkdir()
+            stats = root / "quality" / "g1_quality_stats.jsonl"
+            stats.parent.mkdir()
+            stats.write_text("{}\n", encoding="utf-8")
+            _write_curated_report(
+                run_dir / "curated_report.json",
+                row_count=10,
+                scanned=10,
+                stats_jsonl=stats,
+            )
+            _write_thresholds(
+                stats.parent / "g1_threshold_proposals_grouped_p95.json",
+                sample_count=10,
+                stats_jsonl=stats,
+            )
+            _write_threshold_policy(run_dir / "threshold_policy.json", policy_id="candidate_v1")
+            review_dir = run_dir / "manual_review"
+            review_dir.mkdir()
+            _write_review_report(review_dir / "review_report.json")
+            _write_review_manifest(review_dir / "review_manifest.jsonl", complete=True)
+
+            result = preflight_curation_policy(run_dir)
+
+        self.assertTrue(result.audit.promotable)
+        self.assertEqual(result.audit.blockers, [])
+        self.assertIn("formal M5 training", "\n".join(result.next_actions))
+
+
+def _write_curated_report(
+    path: Path,
+    row_count: int,
+    scanned: int,
+    stats_jsonl: Path | None = None,
+) -> Path:
     payload = {
         "row_count": row_count,
         "merged_source_rows": scanned,
@@ -208,11 +280,20 @@ def _write_curated_report(path: Path, row_count: int, scanned: int) -> Path:
         "git_sha": "abc123",
         "git_dirty": False,
     }
+    if stats_jsonl:
+        payload.update(
+            {
+                "source_stats_jsonl": str(stats_jsonl),
+                "source_fk_stats_jsonl": str(stats_jsonl),
+                "g1_stats_jsonl": str(stats_jsonl),
+                "pair_stats_jsonl": str(stats_jsonl),
+            }
+        )
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
 
-def _write_thresholds(path: Path, sample_count: int) -> Path:
+def _write_thresholds(path: Path, sample_count: int, stats_jsonl: Path | None = None) -> Path:
     payload = {
         "sample_count": sample_count,
         "proposals": [
@@ -230,6 +311,8 @@ def _write_thresholds(path: Path, sample_count: int) -> Path:
         "grouped_rows": {"category": sample_count, "split": sample_count},
         "lower_metrics": [],
     }
+    if stats_jsonl:
+        payload["stats_jsonl"] = str(stats_jsonl)
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 

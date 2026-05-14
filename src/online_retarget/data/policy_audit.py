@@ -44,6 +44,26 @@ class CurationPolicyAuditResult:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class CurationPolicyPreflightResult:
+    policy_id: str
+    curated_run_dir: Path
+    audit_json: Path
+    audit: CurationPolicyAuditResult
+    discovered: dict[str, object]
+    next_actions: list[str]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "policy_id": self.policy_id,
+            "curated_run_dir": str(self.curated_run_dir),
+            "audit_json": str(self.audit_json),
+            "audit": self.audit.to_dict(),
+            "discovered": self.discovered,
+            "next_actions": list(self.next_actions),
+        }
+
+
 def audit_curation_policy(
     curated_report_json: Path,
     threshold_proposal_jsons: Sequence[Path],
@@ -108,6 +128,74 @@ def audit_curation_policy(
             json.dumps(result.to_dict(), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+    return result
+
+
+def preflight_curation_policy(
+    curated_run_dir: Path,
+    policy_id: str | None = None,
+    output_json: Path | None = None,
+    threshold_policy_json: Path | None = None,
+    review_decision_report_json: Path | None = None,
+    config: CurationPolicyAuditConfig | None = None,
+) -> CurationPolicyPreflightResult:
+    """Run the standard promotion audit from a curated run directory.
+
+    The preflight is a path-discovery wrapper around ``audit_curation_policy``.
+    It does not relax the audit gates; it makes the current blockers and next
+    actions reproducible from one stable directory.
+    """
+
+    run_dir = curated_run_dir.expanduser()
+    curated_report_json = run_dir / "curated_report.json"
+    if not curated_report_json.exists():
+        raise FileNotFoundError(f"missing curated report: {curated_report_json}")
+    curated_report = _read_json(curated_report_json)
+    resolved_policy_id = policy_id or run_dir.name
+    audit_json = output_json or run_dir / "policy_preflight.json"
+
+    threshold_proposals = _discover_threshold_proposals(curated_report)
+    review_dir = run_dir / "manual_review"
+    review_report_json = _existing_path(review_dir / "review_report.json")
+    review_manifest_jsonl = _existing_path(review_dir / "review_manifest.jsonl")
+    resolved_threshold_policy_json = _existing_path(threshold_policy_json) or _existing_path(
+        run_dir / "threshold_policy.json"
+    )
+    resolved_review_decision_report_json = _existing_path(review_decision_report_json) or _existing_path(
+        review_dir / "review_decision_report.json"
+    )
+
+    base_config = config or CurationPolicyAuditConfig(policy_id=resolved_policy_id)
+    audit = audit_curation_policy(
+        curated_report_json=curated_report_json,
+        threshold_proposal_jsons=tuple(threshold_proposals),
+        threshold_policy_json=resolved_threshold_policy_json,
+        review_report_json=review_report_json,
+        review_manifest_jsonl=review_manifest_jsonl,
+        review_decision_report_json=resolved_review_decision_report_json,
+        output_json=audit_json,
+        config=base_config,
+    )
+    discovered = {
+        "curated_report_json": str(curated_report_json),
+        "threshold_proposal_jsons": [str(path) for path in threshold_proposals],
+        "threshold_policy_json": str(resolved_threshold_policy_json or ""),
+        "review_report_json": str(review_report_json or ""),
+        "review_manifest_jsonl": str(review_manifest_jsonl or ""),
+        "review_decision_report_json": str(resolved_review_decision_report_json or ""),
+    }
+    result = CurationPolicyPreflightResult(
+        policy_id=resolved_policy_id,
+        curated_run_dir=run_dir,
+        audit_json=audit_json,
+        audit=audit,
+        discovered=discovered,
+        next_actions=_next_actions_for_audit(audit),
+    )
+    audit_json.write_text(
+        json.dumps(result.to_dict(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     return result
 
 
@@ -348,6 +436,69 @@ def _audit_manual_review(
         sample = ", ".join(identifier for identifier in invalid_actions[:5] if identifier)
         suffix = f": {sample}" if sample else ""
         blockers.append(f"{len(invalid_actions)} manual review items have invalid actions{suffix}")
+
+
+def _discover_threshold_proposals(curated_report: Mapping[str, object]) -> list[Path]:
+    stats_paths = {
+        str(curated_report.get("source_stats_jsonl", "")).strip(),
+        str(curated_report.get("source_fk_stats_jsonl", "")).strip(),
+        str(curated_report.get("g1_stats_jsonl", "")).strip(),
+        str(curated_report.get("pair_stats_jsonl", "")).strip(),
+    }
+    stats_paths.discard("")
+    proposals: list[Path] = []
+    seen: set[Path] = set()
+    for stats_path in sorted(stats_paths):
+        stats = Path(stats_path)
+        if not stats.parent.exists():
+            continue
+        for candidate in sorted(stats.parent.glob("*threshold*proposals*.json")):
+            try:
+                payload = _read_json(candidate)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            if str(payload.get("stats_jsonl", "")).strip() != stats_path:
+                continue
+            resolved = candidate.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            proposals.append(candidate)
+    return proposals
+
+
+def _existing_path(path: Path | None) -> Path | None:
+    if path and path.exists():
+        return path
+    return None
+
+
+def _next_actions_for_audit(audit: CurationPolicyAuditResult) -> list[str]:
+    actions: list[str] = []
+    blocker_text = "\n".join(audit.blockers)
+    if "full scan coverage is required" in blocker_text:
+        actions.append(
+            "Run full or explicitly accepted representative source/source-FK/G1/pair quality scans."
+        )
+    if "threshold proposals" in blocker_text or "threshold policy" in blocker_text:
+        actions.append(
+            "Accept reviewed threshold proposals into a threshold_policy.json for this policy ID."
+        )
+    if "manual review" in blocker_text or "review manifest" in blocker_text:
+        actions.append(
+            "Complete manual review decisions and merge them into a reviewed manifest/report."
+        )
+    if "diversity_loss" in blocker_text or "groups without retained clips" in blocker_text:
+        actions.append(
+            "Revise the curation policy to retain actor/skeleton/category/split diversity."
+        )
+    if "dirty git tree" in blocker_text:
+        actions.append("Regenerate policy artifacts from a clean committed git state.")
+    if not actions and not audit.promotable:
+        actions.append("Inspect audit blockers and regenerate the missing policy evidence.")
+    if audit.promotable:
+        actions.append("Use this policy audit in formal M5 training config as data.quality_policy_audit.")
+    return list(dict.fromkeys(actions))
 
 
 def _read_json(path: Path | None) -> dict[str, object]:
