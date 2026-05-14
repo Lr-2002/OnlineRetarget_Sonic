@@ -180,13 +180,14 @@ Gate:
 
 - Small-subset training runs end-to-end.
 - WandB logs config, git SHA, data split ID, quality filter policy, metrics, and artifact paths.
+- Formal training refuses to optimize unless the config records a promotable M2Q policy audit in addition to the curated index, policy ID, and quality report.
 - DDP-compatible launch works on one node, even if first runs use one GPU.
 - Checkpoints include enough metadata to reproduce eval.
 - Offline eval from M4 runs automatically after training.
 
 Stop condition: baseline is worse/better by concrete metrics, not subjective visual inspection alone.
 
-Current status: training dry-run validates config, git state, DDP rank/world size, curated index, M2Q quality gate context, observation/output dimensions, and sample refs. Raw-BVH-channel and 30-body BVH-FK supervised JSONL builders exist and have produced real smoke artifacts. `scripts/train.py` has a PyTorch optimizer loop for supervised JSONL artifacts and refuses formal training without quality policy metadata. Formal-scale 30-body dataset generation, WandB logging, automatic offline eval after training, and actual torch-environment training execution are pending.
+Current status: training dry-run validates config, git state, DDP rank/world size, curated index, M2Q quality gate context, observation/output dimensions, and sample refs. Raw-BVH-channel and 30-body BVH-FK supervised JSONL builders exist and have produced real smoke artifacts. `scripts/train.py` has a PyTorch optimizer loop for supervised JSONL artifacts and refuses formal training without quality policy metadata plus a `promotable=true` policy audit. Formal-scale 30-body dataset generation, a promoted M2Q policy, WandB logging, automatic offline eval after training, and actual torch-environment training execution are pending.
 
 ## M6 - Model Design Ablations and Latency Gate
 

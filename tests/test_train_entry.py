@@ -121,6 +121,8 @@ class TrainEntryTests(unittest.TestCase):
             root = Path(tmp)
             quality_report = root / "curated_report.json"
             quality_report.write_text("{}\n", encoding="utf-8")
+            quality_audit = root / "policy_audit.json"
+            _write_policy_audit(quality_audit, policy_id="policy", promotable=True)
             sample_dir = root / "supervised"
             sample_dir.mkdir()
             samples = sample_dir / "samples.jsonl"
@@ -142,6 +144,7 @@ class TrainEntryTests(unittest.TestCase):
                     "data": {
                         "quality_policy_id": "policy",
                         "quality_report": str(quality_report),
+                        "quality_policy_audit": str(quality_audit),
                     }
                 },
                 index_csv=None,
@@ -151,14 +154,96 @@ class TrainEntryTests(unittest.TestCase):
         self.assertTrue(context["uses_curated_index"])
         self.assertTrue(context["uses_merged_action"])
         self.assertTrue(context["quality_report_exists"])
+        self.assertTrue(context["quality_policy_audit_exists"])
+        self.assertTrue(context["quality_policy_audit_promotable"])
         self.assertTrue(context["samples_builder_is_formal"])
         train_entry._validate_quality_gate(context)
+
+    def test_quality_gate_requires_policy_audit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            quality_report = root / "curated_report.json"
+            quality_report.write_text("{}\n", encoding="utf-8")
+            context = train_entry._quality_gate_context(
+                {
+                    "data": {
+                        "quality_policy_id": "policy",
+                        "quality_report": str(quality_report),
+                    }
+                },
+                index_csv=Path("runs/curated/policy/curated_index.csv"),
+                samples_jsonl=None,
+                action_column="merged_quality_action",
+            )
+
+        with self.assertRaises(SystemExit) as raised:
+            train_entry._validate_quality_gate(context)
+
+        self.assertIn("quality_policy_audit", str(raised.exception))
+
+    def test_quality_gate_blocks_unpromotable_policy_audit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            quality_report = root / "curated_report.json"
+            quality_report.write_text("{}\n", encoding="utf-8")
+            quality_audit = root / "policy_audit.json"
+            _write_policy_audit(
+                quality_audit,
+                policy_id="policy",
+                promotable=False,
+                blockers=["review decisions missing"],
+            )
+            context = train_entry._quality_gate_context(
+                {
+                    "data": {
+                        "quality_policy_id": "policy",
+                        "quality_report": str(quality_report),
+                        "quality_policy_audit": str(quality_audit),
+                    }
+                },
+                index_csv=Path("runs/curated/policy/curated_index.csv"),
+                samples_jsonl=None,
+                action_column="merged_quality_action",
+            )
+
+        with self.assertRaises(SystemExit) as raised:
+            train_entry._validate_quality_gate(context)
+
+        self.assertIn("promotable quality policy audit", str(raised.exception))
+        self.assertIn("review decisions missing", str(raised.exception))
+
+    def test_quality_gate_blocks_policy_audit_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            quality_report = root / "curated_report.json"
+            quality_report.write_text("{}\n", encoding="utf-8")
+            quality_audit = root / "policy_audit.json"
+            _write_policy_audit(quality_audit, policy_id="other_policy", promotable=True)
+            context = train_entry._quality_gate_context(
+                {
+                    "data": {
+                        "quality_policy_id": "policy",
+                        "quality_report": str(quality_report),
+                        "quality_policy_audit": str(quality_audit),
+                    }
+                },
+                index_csv=Path("runs/curated/policy/curated_index.csv"),
+                samples_jsonl=None,
+                action_column="merged_quality_action",
+            )
+
+        with self.assertRaises(SystemExit) as raised:
+            train_entry._validate_quality_gate(context)
+
+        self.assertIn("audit matching policy_id policy", str(raised.exception))
 
     def test_quality_gate_blocks_raw_debug_samples_for_formal_training(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             quality_report = root / "curated_report.json"
             quality_report.write_text("{}\n", encoding="utf-8")
+            quality_audit = root / "policy_audit.json"
+            _write_policy_audit(quality_audit, policy_id="policy", promotable=True)
             sample_dir = root / "supervised"
             sample_dir.mkdir()
             samples = sample_dir / "samples.jsonl"
@@ -180,6 +265,7 @@ class TrainEntryTests(unittest.TestCase):
                     "data": {
                         "quality_policy_id": "policy",
                         "quality_report": str(quality_report),
+                        "quality_policy_audit": str(quality_audit),
                     }
                 },
                 index_csv=None,
@@ -218,6 +304,27 @@ class TrainEntryTests(unittest.TestCase):
             )
 
         train_entry._validate_quality_gate(context)
+
+
+def _write_policy_audit(
+    path: Path,
+    *,
+    policy_id: str,
+    promotable: bool,
+    blockers: list[str] | None = None,
+) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "policy_id": policy_id,
+                "promotable": promotable,
+                "status": "promotable" if promotable else "blocked",
+                "blockers": blockers or [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__":

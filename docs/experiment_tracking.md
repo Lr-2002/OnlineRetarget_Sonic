@@ -22,6 +22,7 @@ Each training/eval run must log:
 - config file
 - dataset root and derived index path
 - actor split file or split seed
+- M2Q quality policy ID, quality report, and policy audit path
 - metric definitions/version
 - model parameter count
 - latency benchmark when applicable

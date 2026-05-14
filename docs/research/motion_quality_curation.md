@@ -82,7 +82,7 @@ This follows the pattern in recent humanoid motion work: preserve diversity when
 7. Generate diversity-loss reports by actor, source skeleton, package, category, split, mirrored status, and motion provenance.
 8. Inspect worst clips by failure family: jump, twist, float, slide, penetrate, joint-limit, unstable start/end, parser mismatch.
 9. Promote a named curation policy only after the retained/quarantined/excluded tradeoff is documented.
-10. Allow formal training only when the run config records the policy ID, curated index, quality reports, and git SHA.
+10. Allow formal training only when the run config records the policy ID, curated index, quality reports, git SHA, and a `promotable=true` policy audit.
 11. Add support-base/pelvis-height scans before promoting a policy beyond the current representative evidence. Acceleration/jerk and support-base/pelvis-root metrics now exist but still need BONES-SEED-calibrated thresholds.
 12. Review contact-mask correction candidates before any repair pass. Candidate offsets are hints for manual/simulator review, not permission to mutate BONES-SEED or silently replace labels.
 
@@ -135,6 +135,6 @@ Each artifact must record data root, git SHA, policy ID, split ID, thresholds, s
 - Representative category/split scans now exist at 560 rows each for source BVH, source FK/contact, G1 FK/contact/self-collision-proxy, and pair/provenance. The four-way representative merge `runs/curated/representative_source_g1_pair_limit560_by_category_split/curated_report.json` records keep/downweight/quarantine/exclude = 70,858/70,876/479/7 across the full split index after merging those sampled rows. It records 0 lost actor groups, 0 lost source-skeleton groups, 0 lost category groups, and 0 lost split groups. This is stronger than first-N smoke evidence, but it is still not a promoted policy because thresholds and review decisions remain provisional.
 - Lower-tail threshold proposal support is implemented for `contact_frame_ratio`. Representative source FK and G1 grouped p95 proposal artifacts record `lower_metrics=["contact_frame_ratio"]`, using p5 lower-tail contact thresholds while keeping slide, penetration, clearance, joint-limit, joint-jump, and self-collision metrics as upper-tail proposals.
 - Representative manual-review artifacts under `runs/curated/representative_source_g1_pair_limit560_by_category_split/manual_review/` contain 35 rows across float, foot-slide, joint-limit, jump, mirror, parser, and penetration families. They are review sheets, not completed reviewer decisions.
-- M5 formal training must require a curated index and policy ID. Tiny debug training may use raw or smoke data only when the output path and log state that it is a debug run.
+- M5 formal training must require a curated index, policy ID, quality report, and `promotable=true` policy audit. Tiny debug training may use raw or smoke data only when the output path and log state that it is a debug run.
 - M4 must break down metrics by quality flags, because a model can improve average loss by learning bad target artifacts.
 - M7 must keep physics-refined targets separate from kinematic G1 targets, even if both share the same source motion.

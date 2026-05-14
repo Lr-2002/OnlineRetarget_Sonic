@@ -18,15 +18,15 @@ Verdict: not complete. The repo now has runnable scaffolds, real BONES-SEED smok
 | Implement M2Q quality filtering | source/G1 scanners, source FK/contact/support/root-height/contact-correction-candidate scanner, G1 MJCF FK/contact/support/root-height/contact-correction-candidate/self-collision-proxy scanner, pair/provenance scanner, grouped upper/lower-tail threshold proposal, stratified scan support, `merge-quality`, `worst_clips.csv`, manual review manifest, policy-promotion audit, train quality gate | Partial. Smoke and representative quality pipeline exists; source BVH, source FK/contact/support/root-height/contact-correction-candidate, G1 FK/contact/support/root-height/contact-correction-candidate/self-collision-proxy, and pair/provenance stats now merge into curated indexes, curated reports include diversity-loss summaries, and worst clips are exportable to JSONL/Markdown review manifests. The refreshed 560-row representative four-way merge at commit `e9054a4` records keep/downweight/quarantine/exclude = 70,858/70,878/477/7 after merging 560 source, 560 source-FK, 560 G1, and 560 pair rows; `worst_clips.csv` includes source/G1 root-height, support-distance, and contact-correction candidate columns. The representative scans record 6 source-FK and 172 G1 contact-correction candidates; 42 of the 100 worst rows carry a candidate, and the review manifest now includes a `contact_correction` family. `audit-curation-policy` generated `policy_audit.json` with `promotable=false`, blocking formal promotion on partial scan coverage, unaccepted thresholds, and missing manual-review decisions. BONES-SEED pair timing is recorded as 120 Hz with exact source/G1 frame-count agreement in the representative sample. Completed review decisions, formal category thresholds, actual correction, and simulator-backed labels remain pending. |
 | Implement M3 schema/obs contract | `src/online_retarget/data/schema.py`, `src/online_retarget/data/windowed_builder.py`, `tests/test_schema.py`, `tests/test_windowed_builder.py`, real 30-body smoke artifact | Smoke path implemented. Formal-scale extraction, normalization policy, robot-state wiring, and online preprocessing are pending. |
 | Implement M4 independent eval | `src/online_retarget/evaluation.py`, CLI `offline-eval`, `tests/test_evaluation.py` | Scaffold implemented. Real model predictions and simulator/contact metrics are pending. |
-| Implement M5 supervised baseline | `scripts/train.py`, `src/online_retarget/data/supervised_builder.py`, `src/online_retarget/data/windowed_builder.py`, supervised JSONL artifacts | Partial. PyTorch optimizer loop exists and post-train prediction JSONL/offline-eval/WandB metadata hooks are coded, but current Python lacks torch and formal-scale 30-body training is pending. |
-| Enforce quality before formal training | `scripts/train.py` quality gate, sample-builder gate, `tests/test_train_entry.py`, dry-run output, raw-debug negative check | Implemented for current training entry. Formal non-dry-run refuses missing quality metadata and raw debug sample artifacts. |
+| Implement M5 supervised baseline | `scripts/train.py`, `src/online_retarget/data/supervised_builder.py`, `src/online_retarget/data/windowed_builder.py`, supervised JSONL artifacts | Partial. PyTorch optimizer loop exists and post-train prediction JSONL/offline-eval/WandB metadata hooks are coded, but current Python lacks torch, no policy audit is promotable yet, and formal-scale 30-body training is pending. |
+| Enforce quality before formal training | `scripts/train.py` quality gate, policy audit gate, sample-builder gate, `tests/test_train_entry.py`, dry-run output, raw-debug negative check, blocked-audit non-dry-run check | Implemented for current training entry. Formal non-dry-run refuses missing quality metadata, missing/unpromotable policy audits, and raw debug sample artifacts. |
 | DDP support | `scripts/train.py` reads `RANK`/`WORLD_SIZE` and reports them | Minimal scaffold only. Real distributed training not verified. |
 | WandB traceability | `docs/experiment_tracking.md`, config project name, `scripts/train.py` optional WandB hooks, `tracking.wandb_mode` | Implemented as optional code path with default disabled mode. Real WandB artifact logging not executed in current no-torch environment. |
 | Implement M6 latency gate | `scripts/benchmark_latency.py --dry-run` scaffold | Scaffold only. Real torch/CUDA/4090 benchmark pending. |
 | Implement M7 Isaac Lab eval | `scripts/eval_isaac.py --dry-run` scaffold | Scaffold only. Real Isaac Lab/G1 replay task pending. |
 | Write live logs | `docs/logs/implementation-log.md` | Satisfied for current implementation history. Keep updating during future work. |
 | Make process/status readable | `docs/milestones.md`, `docs/status/m1_m7_status.md`, this audit | Satisfied as a living tracking surface, not final completion. |
-| Verify current work | `PYTHONPATH=src:. python3 -m unittest discover -s tests` -> 75 tests OK; targeted `py_compile` -> OK; dry-run training -> OK with `samples_builder_is_formal=true`; `git diff --check` -> OK; source FK/contact and G1 MJCF FK/contact/self-collision-proxy smoke scans -> OK; representative 560-row scans and upper/lower-tail grouped threshold artifacts generated; four-way `merge-quality` refreshed curated representative artifacts with pair/provenance stats; manual review manifests generated; `audit-curation-policy` generated a blocked policy audit for the representative artifact; raw-debug artifact formal training check fails as intended | Current scaffold verified. Not evidence of full M1-M7 completion. |
+| Verify current work | `PYTHONPATH=src:. python3 -m unittest discover -s tests` -> 78 tests OK; targeted `py_compile` -> OK; dry-run training -> OK with `samples_builder_is_formal=true` and blocked policy-audit context; `git diff --check` -> OK; source FK/contact and G1 MJCF FK/contact/self-collision-proxy smoke scans -> OK; representative 560-row scans and upper/lower-tail grouped threshold artifacts generated; four-way `merge-quality` refreshed curated representative artifacts with pair/provenance stats; manual review manifests generated; `audit-curation-policy` generated blocked policy audits; formal non-dry-run training fails before torch import on an unpromotable policy audit; raw-debug artifact formal training check fails as intended | Current scaffold verified. Not evidence of full M1-M7 completion. |
 
 ## Latest Verification Evidence
 
@@ -149,7 +149,7 @@ PYTHONPATH=src:. python3 scripts/train.py --config configs/baseline_mlp.yaml --d
 # samples_builder_is_formal=true, and train_refs=112768.
 
 PYTHONPATH=src:. python3 -m unittest discover -s tests
-# Ran 67 tests in 0.072s, OK.
+# Ran 78 tests in 0.068s, OK.
 
 PYTHONPATH=src:. python3 -m py_compile \
   src/online_retarget/data/thresholds.py \
@@ -161,10 +161,10 @@ git diff --check
 # OK
 
 PYTHONPATH=src:. python3 scripts/train.py --config configs/baseline_mlp.yaml \
-  --samples-jsonl runs/supervised/train_merged-quality-action_h8_limit8/samples.jsonl \
+  --samples-jsonl runs/supervised/train_merged-quality-action_30b_h8_limit4/samples.jsonl \
   --max-steps 1
-# Fails as intended before torch import because raw_bvh_channel_debug is not a formal
-# bvh_fk_30body_window sample artifact.
+# Fails as intended before torch import because smoke_source_g1_limit100/policy_audit.json
+# has promotable=false.
 
 PYTHONPATH=src python3 -m py_compile scripts/train.py scripts/inspect_bones_seed.py src/online_retarget/data/quality_merge.py src/online_retarget/data/source_fk_quality.py src/online_retarget/data/windowed_builder.py src/online_retarget/data/__init__.py src/online_retarget/cli.py tests/test_quality_merge.py
 # OK
