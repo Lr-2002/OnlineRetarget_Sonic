@@ -21,6 +21,7 @@ from online_retarget.data.policy_audit import (
 from online_retarget.data.quality_merge import merge_quality_stats
 from online_retarget.data.quality_review_exports import export_balanced_quality_review_csv
 from online_retarget.data.quality_smoke import QualitySmokeConfig, run_quality_smoke
+from online_retarget.data.quality_summary import summarize_quality_jsonl
 from online_retarget.data.review_manifest import (
     build_review_decision_template,
     build_review_manifest,
@@ -450,6 +451,32 @@ def main() -> None:
         help="Allow downweight rows in addition to quarantine/exclude rows.",
     )
 
+    quality_summary = subparsers.add_parser(
+        "summarize-quality-jsonl",
+        help="Summarize a quality stats JSONL file for progress and final checkpoints",
+    )
+    quality_summary.add_argument("--stats-jsonl", type=Path, required=True)
+    quality_summary.add_argument("--output-json", type=Path, required=True)
+    quality_summary.add_argument(
+        "--metric",
+        action="append",
+        default=[],
+        help="Metric column to summarize. Defaults to common G1/source quality metrics.",
+    )
+    quality_summary.add_argument(
+        "--group-by",
+        action="append",
+        default=[],
+        help="Categorical field to count. Defaults to split and category.",
+    )
+    quality_summary.add_argument(
+        "--quantile",
+        action="append",
+        type=float,
+        default=[],
+        help="Quantile to report in [0, 1]. Defaults to 0.5, 0.9, 0.95, and 0.99.",
+    )
+
     policy_audit = subparsers.add_parser(
         "audit-curation-policy",
         help="Audit whether a merged quality policy is ready for formal training",
@@ -597,6 +624,8 @@ def main() -> None:
         _export_review_clips(args)
     elif args.command == "export-balanced-quality-review":
         _export_balanced_quality_review(args)
+    elif args.command == "summarize-quality-jsonl":
+        _summarize_quality_jsonl(args)
     elif args.command == "audit-curation-policy":
         _audit_curation_policy(args)
     elif args.command == "preflight-curation-policy":
@@ -934,6 +963,17 @@ def _export_balanced_quality_review(args: argparse.Namespace) -> None:
         max_per_flag=args.max_per_flag,
         action_min_rank=args.action_min_rank,
         include_downweight=args.include_downweight,
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _summarize_quality_jsonl(args: argparse.Namespace) -> None:
+    result = summarize_quality_jsonl(
+        stats_jsonl=args.stats_jsonl,
+        output_json=args.output_json,
+        metrics=tuple(args.metric) if args.metric else (),
+        group_by=tuple(args.group_by) if args.group_by else (),
+        quantiles=tuple(args.quantile) if args.quantile else (),
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 

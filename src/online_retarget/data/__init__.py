@@ -34,6 +34,10 @@ from .quality_review_exports import (
     BalancedReviewExportResult,
     export_balanced_quality_review_csv,
 )
+from .quality_summary import (
+    QualitySummaryResult,
+    summarize_quality_jsonl,
+)
 from .review_manifest import (
     ReviewDecisionMergeResult,
     ReviewDecisionTemplateResult,
@@ -109,6 +113,7 @@ __all__ = [
     "QualityDecision",
     "QualityMergeResult",
     "QualityPolicy",
+    "QualitySummaryResult",
     "QualityThreshold",
     "ReviewDecisionMergeResult",
     "ReviewDecisionTemplateResult",
@@ -142,6 +147,7 @@ __all__ = [
     "scan_source_fk_quality_from_index",
     "select_rows_for_scan",
     "summarize_metadata",
+    "summarize_quality_jsonl",
     "write_threshold_proposals",
     "write_accepted_threshold_policy",
 ]
