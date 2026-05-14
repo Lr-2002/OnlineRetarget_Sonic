@@ -1,0 +1,304 @@
+"""Audit whether a curated quality policy is ready for formal training."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+import json
+from pathlib import Path
+from typing import Mapping, Sequence
+
+
+SCAN_COVERAGE_FIELDS = (
+    "merged_source_rows",
+    "merged_source_fk_rows",
+    "merged_g1_rows",
+    "merged_pair_rows",
+)
+RETAINED_ACTIONS = ("keep", "downweight")
+DEFAULT_REQUIRED_GROUP_BY = ("category", "split")
+DEFAULT_DIVERSITY_DIMENSIONS = ("actor_uid", "source_skeleton", "category", "split")
+
+
+@dataclass(frozen=True)
+class CurationPolicyAuditConfig:
+    policy_id: str
+    allow_representative: bool = False
+    thresholds_accepted: bool = False
+    require_review_decisions: bool = True
+    required_group_by: tuple[str, ...] = DEFAULT_REQUIRED_GROUP_BY
+    diversity_dimensions: tuple[str, ...] = DEFAULT_DIVERSITY_DIMENSIONS
+    require_clean_report_git: bool = True
+
+
+@dataclass(frozen=True)
+class CurationPolicyAuditResult:
+    policy_id: str
+    promotable: bool
+    status: str
+    blockers: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    evidence: dict[str, object] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def audit_curation_policy(
+    curated_report_json: Path,
+    threshold_proposal_jsons: Sequence[Path],
+    output_json: Path | None = None,
+    review_report_json: Path | None = None,
+    review_manifest_jsonl: Path | None = None,
+    config: CurationPolicyAuditConfig | None = None,
+) -> CurationPolicyAuditResult:
+    """Audit a merged quality report before a curation policy is promoted."""
+
+    cfg = config or CurationPolicyAuditConfig(policy_id=curated_report_json.stem)
+    curated_report = _read_json(curated_report_json)
+    threshold_reports = [_read_json(path) for path in threshold_proposal_jsons]
+    review_report = _read_json(review_report_json) if review_report_json else {}
+    review_items = _read_jsonl(review_manifest_jsonl) if review_manifest_jsonl else []
+
+    blockers: list[str] = []
+    warnings: list[str] = []
+    evidence: dict[str, object] = {
+        "curated_report_json": str(curated_report_json),
+        "threshold_proposal_jsons": [str(path) for path in threshold_proposal_jsons],
+        "review_report_json": str(review_report_json) if review_report_json else "",
+        "review_manifest_jsonl": str(review_manifest_jsonl) if review_manifest_jsonl else "",
+        "allow_representative": cfg.allow_representative,
+        "thresholds_accepted": cfg.thresholds_accepted,
+    }
+
+    _audit_curated_report(curated_report, cfg, blockers, warnings, evidence)
+    _audit_threshold_reports(threshold_reports, cfg, blockers, warnings, evidence)
+    _audit_manual_review(review_report, review_items, cfg, blockers, warnings, evidence)
+
+    promotable = not blockers
+    result = CurationPolicyAuditResult(
+        policy_id=cfg.policy_id,
+        promotable=promotable,
+        status="promotable" if promotable else "blocked",
+        blockers=blockers,
+        warnings=warnings,
+        evidence=evidence,
+    )
+    if output_json:
+        output_json.parent.mkdir(parents=True, exist_ok=True)
+        output_json.write_text(
+            json.dumps(result.to_dict(), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    return result
+
+
+def _audit_curated_report(
+    report: Mapping[str, object],
+    cfg: CurationPolicyAuditConfig,
+    blockers: list[str],
+    warnings: list[str],
+    evidence: dict[str, object],
+) -> None:
+    row_count = _as_int(report.get("row_count"))
+    action_counts = report.get("action_counts", {})
+    if not isinstance(action_counts, Mapping):
+        action_counts = {}
+    retained_count = sum(_as_int(action_counts.get(action)) for action in RETAINED_ACTIONS)
+    evidence["row_count"] = row_count
+    evidence["action_counts"] = dict(action_counts)
+    evidence["retained_count"] = retained_count
+
+    if row_count <= 0:
+        blockers.append("curated report has no rows")
+    if retained_count <= 0:
+        blockers.append("curated report has no retained keep/downweight rows")
+
+    scan_coverage: dict[str, dict[str, object]] = {}
+    for field_name in SCAN_COVERAGE_FIELDS:
+        count = _as_int(report.get(field_name))
+        ratio = (count / row_count) if row_count else 0.0
+        scan_coverage[field_name] = {"count": count, "ratio": round(ratio, 6)}
+        if count <= 0:
+            blockers.append(f"{field_name} is missing or zero")
+        elif row_count and count < row_count:
+            message = f"{field_name} covers {count}/{row_count} rows"
+            if cfg.allow_representative:
+                warnings.append(message + " because representative scan mode is allowed")
+            else:
+                blockers.append(message + "; full scan coverage is required")
+    evidence["scan_coverage"] = scan_coverage
+
+    if cfg.require_clean_report_git and bool(report.get("git_dirty", False)):
+        blockers.append("curated report was generated from a dirty git tree")
+    evidence["curated_git_sha"] = str(report.get("git_sha", ""))
+    evidence["curated_git_dirty"] = bool(report.get("git_dirty", False))
+
+    diversity = report.get("diversity_loss", {})
+    if not isinstance(diversity, Mapping):
+        diversity = {}
+    diversity_evidence: dict[str, object] = {}
+    for dimension in cfg.diversity_dimensions:
+        dimension_report = diversity.get(dimension, {})
+        if not isinstance(dimension_report, Mapping):
+            blockers.append(f"missing diversity_loss for {dimension}")
+            continue
+        lost_groups = _as_int(dimension_report.get("groups_without_retained"))
+        total_groups = _as_int(dimension_report.get("total_groups"))
+        diversity_evidence[dimension] = {
+            "total_groups": total_groups,
+            "groups_without_retained": lost_groups,
+        }
+        if lost_groups > 0:
+            blockers.append(f"{dimension} has {lost_groups} groups without retained clips")
+    evidence["diversity_loss"] = diversity_evidence
+
+
+def _audit_threshold_reports(
+    reports: Sequence[Mapping[str, object]],
+    cfg: CurationPolicyAuditConfig,
+    blockers: list[str],
+    warnings: list[str],
+    evidence: dict[str, object],
+) -> None:
+    if not reports:
+        blockers.append("no threshold proposal files were provided")
+        evidence["threshold_reports"] = []
+        return
+    if not cfg.thresholds_accepted:
+        blockers.append("threshold proposals have not been explicitly accepted as a policy")
+
+    threshold_evidence = []
+    for index, report in enumerate(reports):
+        sample_count = _as_int(report.get("sample_count"))
+        proposals = report.get("proposals", [])
+        group_by = report.get("group_by", [])
+        grouped_rows = report.get("grouped_rows", {})
+        if not isinstance(proposals, Sequence) or isinstance(proposals, (str, bytes)):
+            proposals = []
+        if not isinstance(group_by, Sequence) or isinstance(group_by, (str, bytes)):
+            group_by = []
+        if not isinstance(grouped_rows, Mapping):
+            grouped_rows = {}
+        missing_groups = [field for field in cfg.required_group_by if field not in group_by]
+        empty_groups = [
+            field
+            for field in cfg.required_group_by
+            if field in group_by and _as_int(grouped_rows.get(field)) <= 0
+        ]
+        if sample_count <= 0:
+            blockers.append(f"threshold report {index} has no samples")
+        if not proposals:
+            blockers.append(f"threshold report {index} has no global proposals")
+        for field in missing_groups:
+            blockers.append(f"threshold report {index} is not grouped by {field}")
+        for field in empty_groups:
+            blockers.append(f"threshold report {index} has no grouped rows for {field}")
+        if sample_count > 0 and sample_count < 1000:
+            warnings.append(f"threshold report {index} is based on {sample_count} samples")
+        threshold_evidence.append(
+            {
+                "sample_count": sample_count,
+                "proposal_count": len(proposals),
+                "group_by": list(group_by),
+                "grouped_rows": dict(grouped_rows),
+                "lower_metrics": list(report.get("lower_metrics", []))
+                if isinstance(report.get("lower_metrics", []), Sequence)
+                else [],
+            }
+        )
+    evidence["threshold_reports"] = threshold_evidence
+
+
+def _audit_manual_review(
+    report: Mapping[str, object],
+    items: Sequence[Mapping[str, object]],
+    cfg: CurationPolicyAuditConfig,
+    blockers: list[str],
+    warnings: list[str],
+    evidence: dict[str, object],
+) -> None:
+    if not report:
+        blockers.append("manual review report is missing")
+        evidence["manual_review"] = {}
+        return
+
+    reviewed_rows = _as_int(report.get("reviewed_rows"))
+    family_counts = report.get("family_counts", {})
+    if not isinstance(family_counts, Mapping):
+        family_counts = {}
+    evidence["manual_review"] = {
+        "reviewed_rows": reviewed_rows,
+        "family_counts": dict(family_counts),
+        "manifest_items": len(items),
+    }
+    if reviewed_rows <= 0:
+        blockers.append("manual review report has no reviewed rows")
+    if bool(report.get("git_dirty", False)):
+        blockers.append("manual review report was generated from a dirty git tree")
+
+    if not cfg.require_review_decisions:
+        if not items:
+            warnings.append("manual review decisions were not verified because manifest is missing")
+        return
+
+    if not items:
+        blockers.append("review manifest JSONL is required to verify manual decisions")
+        return
+
+    incomplete = []
+    for item in items:
+        fields = item.get("review_fields", {})
+        if not isinstance(fields, Mapping):
+            incomplete.append(str(item.get("review_id", "")))
+            continue
+        decision = str(fields.get("decision", "")).strip()
+        recommended_action = str(fields.get("recommended_action", "")).strip()
+        if not decision or not recommended_action:
+            incomplete.append(str(item.get("review_id", "")))
+    evidence["manual_review"]["complete_decisions"] = len(items) - len(incomplete)
+    evidence["manual_review"]["incomplete_decisions"] = len(incomplete)
+    if incomplete:
+        sample = ", ".join(identifier for identifier in incomplete[:5] if identifier)
+        suffix = f": {sample}" if sample else ""
+        blockers.append(f"{len(incomplete)} manual review items lack decisions{suffix}")
+
+
+def _read_json(path: Path | None) -> dict[str, object]:
+    if not path:
+        return {}
+    with path.open(encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError(f"JSON file must contain an object: {path}")
+    return payload
+
+
+def _read_jsonl(path: Path | None) -> list[dict[str, object]]:
+    if not path:
+        return []
+    rows = []
+    with path.open(encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            payload = json.loads(stripped)
+            if not isinstance(payload, dict):
+                raise ValueError(f"line {line_number} must be a JSON object: {path}")
+            rows.append(payload)
+    return rows
+
+
+def _as_int(value: object) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value))
+        except ValueError:
+            return 0
+    return 0

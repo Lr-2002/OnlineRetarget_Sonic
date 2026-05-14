@@ -12,6 +12,10 @@ from online_retarget.data.curation import QualityPolicy, SplitConfig, build_spli
 from online_retarget.data.g1_quality import G1QualityConfig, scan_g1_quality_from_index
 from online_retarget.data.bones_seed import actor_skeletons, summarize_metadata
 from online_retarget.data.pair_quality import PairQualityConfig, scan_pair_quality_from_index
+from online_retarget.data.policy_audit import (
+    CurationPolicyAuditConfig,
+    audit_curation_policy,
+)
 from online_retarget.data.quality_merge import merge_quality_stats
 from online_retarget.data.review_manifest import build_review_manifest
 from online_retarget.data.source_fk_quality import (
@@ -298,6 +302,55 @@ def main() -> None:
     review_manifest.add_argument("--run-name", default="manual_review")
     review_manifest.add_argument("--max-per-family", type=int, default=5)
 
+    policy_audit = subparsers.add_parser(
+        "audit-curation-policy",
+        help="Audit whether a merged quality policy is ready for formal training",
+    )
+    policy_audit.add_argument("--policy-id", required=True)
+    policy_audit.add_argument("--curated-report-json", type=Path, required=True)
+    policy_audit.add_argument(
+        "--threshold-proposal-json",
+        type=Path,
+        action="append",
+        default=[],
+        help="Threshold proposal artifact. Pass once per source/G1/pair proposal file.",
+    )
+    policy_audit.add_argument("--review-report-json", type=Path)
+    policy_audit.add_argument("--review-manifest-jsonl", type=Path)
+    policy_audit.add_argument("--output-json", type=Path)
+    policy_audit.add_argument(
+        "--allow-representative",
+        action="store_true",
+        help="Allow partial scan coverage as a warning instead of a policy blocker.",
+    )
+    policy_audit.add_argument(
+        "--thresholds-accepted",
+        action="store_true",
+        help="Declare threshold proposals accepted as the named policy.",
+    )
+    policy_audit.add_argument(
+        "--skip-review-decisions",
+        action="store_true",
+        help="Do not require filled manual review decisions in the manifest.",
+    )
+    policy_audit.add_argument(
+        "--required-group-by",
+        action="append",
+        default=["category", "split"],
+        help="Required threshold grouping field. Defaults to category and split.",
+    )
+    policy_audit.add_argument(
+        "--diversity-dimension",
+        action="append",
+        default=["actor_uid", "source_skeleton", "category", "split"],
+        help="Diversity-loss dimension that must retain at least one keep/downweight row.",
+    )
+    policy_audit.add_argument(
+        "--allow-dirty-report",
+        action="store_true",
+        help="Do not block promotion when reports were generated from a dirty git tree.",
+    )
+
     offline_eval = subparsers.add_parser(
         "offline-eval",
         help="Evaluate prediction/target JSONL and write offline metric reports",
@@ -333,6 +386,8 @@ def main() -> None:
         _merge_quality(args)
     elif args.command == "build-review-manifest":
         _build_review_manifest(args)
+    elif args.command == "audit-curation-policy":
+        _audit_curation_policy(args)
     elif args.command == "offline-eval":
         _offline_eval(args)
 
@@ -552,6 +607,26 @@ def _build_review_manifest(args: argparse.Namespace) -> None:
         output_root=args.output_root,
         run_name=args.run_name,
         max_per_family=args.max_per_family,
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _audit_curation_policy(args: argparse.Namespace) -> None:
+    result = audit_curation_policy(
+        curated_report_json=args.curated_report_json,
+        threshold_proposal_jsons=tuple(args.threshold_proposal_json),
+        review_report_json=args.review_report_json,
+        review_manifest_jsonl=args.review_manifest_jsonl,
+        output_json=args.output_json,
+        config=CurationPolicyAuditConfig(
+            policy_id=args.policy_id,
+            allow_representative=args.allow_representative,
+            thresholds_accepted=args.thresholds_accepted,
+            require_review_decisions=not args.skip_review_decisions,
+            required_group_by=tuple(args.required_group_by),
+            diversity_dimensions=tuple(args.diversity_dimension),
+            require_clean_report_git=not args.allow_dirty_report,
+        ),
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 
