@@ -126,38 +126,85 @@ not a performance claim because the checkpoint was trained for only two steps.
 
 ## Remote Handoff
 
-Do not expose WandB tokens in logs. Login or environment setup should happen on
-the remote host without printing the token.
-
 SSH target supplied by the user:
 
 ```bash
 ssh -v -i /home/user/.ssh/id_aliyun root@106.14.35.26 -p 1050
 ```
 
-Suggested remote execution order after code sync:
+Verified remote host:
+
+- Hostname: `dsw-774141-65c7cbdb55-4kj85`
+- Remote repo: `/root/OnlineRetarget`
+- Commit: `0eebccaa11d6ec78e7b00da5d8cd1905b7955111`
+- Git status during verified smoke: clean
+- GPUs: 8 x NVIDIA GeForce RTX 5090, 32,607 MiB each
+- Python env: `/root/OnlineRetarget/.venv`
+- Torch: `2.11.0+cu128`, CUDA `12.8`, `torch.cuda.device_count() == 8`
+- WandB package: `0.27.0`
+
+Remote code/data sync used the current committed repo plus the debug supervised
+JSONL artifacts:
+
+- `runs/supervised/somabvh_task_train_h8_stride10_limit5000`
+- `runs/supervised/somabvh_task_val_h8_stride10_limit1000`
+- `runs/indices/bones_sonic_index_full_v0`
+
+Do not expose WandB tokens in logs. The remote host has WandB login state in
+`~/.netrc`; the environment variable `WANDB_API_KEY` was unset during the smoke.
+
+Verified remote execution:
 
 ```bash
 PYTHONPATH=src:. python scripts/pretrain_token_vaes.py \
   --config configs/bones_bvh_token_vae_debug.yaml \
   --allow-debug-data \
-  --wandb-mode online \
-  --output-dir runs/pretrain/bones_bvh_token_vae_debug_remote \
-  --max-steps 1000 \
-  --batch-size 512
+  --output-dir runs/pretrain/bones_bvh_token_vae_remote_smoke \
+  --max-steps 2 \
+  --batch-size 128
 
 torchrun --standalone --nproc_per_node=8 scripts/train.py \
   --config configs/bones_bvh_token_transformer_debug.yaml \
   --allow-debug-data \
+  --output-dir runs/train/bones_bvh_token_transformer_remote_8gpu_smoke \
+  --max-steps 2 \
+  --batch-size 128
+
+PYTHONPATH=src:. python scripts/train.py \
+  --config configs/bones_bvh_token_transformer_debug.yaml \
+  --allow-debug-data \
+  --predict-only \
+  --checkpoint runs/train/bones_bvh_token_transformer_remote_8gpu_smoke/checkpoint.pt \
+  --samples-jsonl runs/supervised/somabvh_task_val_h8_stride10_limit1000/samples.jsonl \
+  --output-dir runs/eval/bones_bvh_token_transformer_remote_8gpu_smoke_val_predict
+
+WANDB_SILENT=true torchrun --standalone --nproc_per_node=8 scripts/train.py \
+  --config configs/bones_bvh_token_transformer_debug.yaml \
+  --allow-debug-data \
   --wandb-mode online \
-  --output-dir runs/train/bones_bvh_token_transformer_debug_remote_8gpu \
-  --max-steps 1000 \
-  --batch-size 512
+  --output-dir runs/train/bones_bvh_token_transformer_remote_8gpu_wandb_smoke \
+  --max-steps 2 \
+  --batch-size 128
 ```
 
-Before reporting remote results, verify:
+Verified remote artifacts:
 
-- `train_report.json` records `world_size=8` and the expected git SHA.
-- WandB run is online or offline-synced with config, git SHA, and output paths.
-- Offline eval summary exists.
-- A validation/predict-only run exists on heldout samples, not only train eval.
+- `runs/pretrain/bones_bvh_token_vae_remote_smoke/pretrain_report.json`
+- `runs/train/bones_bvh_token_transformer_remote_8gpu_smoke/train_report.json`
+- `runs/eval/bones_bvh_token_transformer_remote_8gpu_smoke_val_predict/predict_report.json`
+- `runs/train/bones_bvh_token_transformer_remote_8gpu_wandb_smoke/train_report.json`
+
+Remote smoke metrics:
+
+| Run | Evidence |
+| --- | --- |
+| VAE skeleton | 5,000 samples, 13D input, final reconstruction MSE `0.0007338749128393829` |
+| VAE motion | 5,000 samples, 1440D input, final reconstruction MSE `0.9072296023368835` |
+| VAE action | 5,000 samples, 29D input, final reconstruction MSE `0.9985084533691406` |
+| 8-GPU train smoke | `world_size=8`, train joint RMSE `0.3701839254051629`, action similarity `0.6251943520779346` |
+| Val predict-only smoke | 1,000 samples, val joint RMSE `0.3611519039403864`, action similarity `0.549565877454652` |
+| WandB online smoke | project `online-retarget`, run name `bones_bvh_token_transformer_debug`, run id `e39lh8m4` |
+
+The remote smoke still uses debug samples and two optimization steps. It verifies
+the environment, DDP, WandB logging path, and eval plumbing; it is not a model
+quality result.
