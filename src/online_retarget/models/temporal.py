@@ -79,6 +79,159 @@ class TemporalTransformerRetargeter(nn.Module):
         return self.head(self.norm(pooled))
 
 
+class TokenizedTransformerRetargeter(nn.Module):
+    """Continuous-token cross-attention baseline for next-frame G1 prediction.
+
+    The model keeps token semantics explicit without requiring a new dataset
+    format: the current flattened observation is sliced into source motion,
+    morphology/skeleton proxy, and robot-state side-channel blocks according to
+    ``ObservationSpec`` dimensions. Auxiliary autoencoder heads make the 128D
+    skeleton, motion, and previous-state tokens trainable/debuggable before
+    richer proposal-file skeleton features are wired in.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        *,
+        history_frames: int,
+        source_feature_dim: int,
+        morphology_dim: int,
+        robot_state_dim: int,
+        latent_dim: int = 128,
+        nhead: int = 4,
+        num_encoder_layers: int = 2,
+        num_decoder_layers: int = 2,
+        dim_feedforward: int = 512,
+        dropout: float = 0.1,
+        output_mode: str = "position",
+        use_prev_state: bool = True,
+    ) -> None:
+        super().__init__()
+        if latent_dim <= 0:
+            raise ValueError("latent_dim must be positive")
+        if input_dim < source_feature_dim + morphology_dim + robot_state_dim:
+            raise ValueError("input_dim is smaller than observation slices")
+        if latent_dim % nhead != 0:
+            raise ValueError("latent_dim must be divisible by nhead")
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.history_frames = history_frames
+        self.source_feature_dim = source_feature_dim
+        self.morphology_dim = morphology_dim
+        self.robot_state_dim = robot_state_dim
+        self.latent_dim = latent_dim
+        self.output_mode = output_mode
+        self.use_prev_state = use_prev_state
+
+        self.motion_encoder = _mlp(source_feature_dim, latent_dim, hidden_dim=max(latent_dim, 256))
+        self.motion_decoder = _mlp(latent_dim, source_feature_dim, hidden_dim=max(latent_dim, 256))
+        self.skeleton_encoder = _mlp(
+            max(1, morphology_dim),
+            latent_dim,
+            hidden_dim=max(latent_dim, 128),
+        )
+        self.skeleton_decoder = _mlp(
+            latent_dim,
+            max(1, morphology_dim),
+            hidden_dim=max(latent_dim, 128),
+        )
+        self.state_encoder = _mlp(output_dim, latent_dim, hidden_dim=max(latent_dim, 128))
+        self.state_decoder = _mlp(latent_dim, output_dim, hidden_dim=max(latent_dim, 128))
+
+        self.memory_type = nn.Parameter(torch.zeros(1, 2, latent_dim))
+        self.query_token = nn.Parameter(torch.zeros(1, 1, latent_dim))
+        self.query_type = nn.Parameter(torch.zeros(1, 1, latent_dim))
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=latent_dim,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=latent_dim,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_decoder_layers)
+        self.head = nn.Sequential(
+            nn.LayerNorm(latent_dim),
+            nn.Linear(latent_dim, latent_dim),
+            nn.GELU(),
+            nn.Linear(latent_dim, output_dim),
+        )
+
+    def forward(self, observation: torch.Tensor, prev_state: torch.Tensor | None = None) -> torch.Tensor:
+        output, _ = self.forward_with_aux(observation, prev_state=prev_state)
+        return output
+
+    def forward_with_aux(
+        self,
+        observation: torch.Tensor,
+        prev_state: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        source, skeleton, side = self._split_observation(observation)
+        if prev_state is None:
+            prev_state = self._prev_state_from_side(side, observation)
+        z_motion = self.motion_encoder(source)
+        z_skeleton = self.skeleton_encoder(skeleton)
+        z_state = self.state_encoder(prev_state)
+        memory = torch.stack([z_skeleton, z_motion], dim=1) + self.memory_type
+        memory = self.encoder(memory)
+        query = self.query_token.expand(observation.shape[0], -1, -1) + self.query_type
+        if self.use_prev_state:
+            query = query + z_state.unsqueeze(1)
+        decoded = self.decoder(query, memory).squeeze(1)
+        predicted = self.head(decoded)
+        if self.output_mode == "delta":
+            predicted = prev_state + predicted
+        elif self.output_mode != "position":
+            raise ValueError(f"unsupported output_mode: {self.output_mode}")
+        aux = {
+            "source": source,
+            "skeleton": skeleton,
+            "prev_state": prev_state,
+            "motion_reconstruction": self.motion_decoder(z_motion),
+            "skeleton_reconstruction": self.skeleton_decoder(z_skeleton)[
+                :, : self.morphology_dim
+            ],
+            "state_reconstruction": self.state_decoder(z_state),
+            "z_motion": z_motion,
+            "z_skeleton": z_skeleton,
+            "z_state": z_state,
+        }
+        return predicted, aux
+
+    def _split_observation(
+        self,
+        observation: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        source = observation[:, : self.source_feature_dim]
+        start = self.source_feature_dim
+        end = start + self.morphology_dim
+        if self.morphology_dim > 0:
+            skeleton = observation[:, start:end]
+        else:
+            skeleton = observation.new_zeros((observation.shape[0], 1))
+        side_end = end + self.robot_state_dim
+        side = observation[:, end:side_end] if self.robot_state_dim > 0 else observation.new_zeros((observation.shape[0], 0))
+        return source, skeleton, side
+
+    def _prev_state_from_side(self, side: torch.Tensor, observation: torch.Tensor) -> torch.Tensor:
+        if side.shape[1] >= self.output_dim:
+            return side[:, : self.output_dim]
+        return observation.new_zeros((observation.shape[0], self.output_dim))
+
+
 class FlowMatchingRetargeter(nn.Module):
     """Conditional flow-matching baseline for G1 joint targets.
 
@@ -188,3 +341,11 @@ def _time_embedding(time: torch.Tensor, dim: int) -> torch.Tensor:
     if embedding.shape[-1] < dim:
         embedding = torch.cat([embedding, time], dim=-1)
     return embedding[:, :dim]
+
+
+def _mlp(input_dim: int, output_dim: int, *, hidden_dim: int) -> nn.Sequential:
+    return nn.Sequential(
+        nn.Linear(input_dim, hidden_dim),
+        nn.GELU(),
+        nn.Linear(hidden_dim, output_dim),
+    )

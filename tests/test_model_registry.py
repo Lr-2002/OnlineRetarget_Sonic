@@ -18,6 +18,16 @@ class ModelRegistryTests(unittest.TestCase):
             {"model": {"family": "tf", "d_model": 8, "nhead": 2, "num_layers": 1}},
             {
                 "model": {
+                    "family": "token_transformer",
+                    "latent_dim": 8,
+                    "nhead": 2,
+                    "num_encoder_layers": 1,
+                    "num_decoder_layers": 1,
+                    "dim_feedforward": 16,
+                }
+            },
+            {
+                "model": {
                     "family": "fm",
                     "hidden_dims": [8],
                     "time_embed_dim": 4,

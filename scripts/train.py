@@ -499,6 +499,10 @@ def _train_jsonl(
     device = runtime["device"]
     x = torch.tensor([sample["observation"] for sample in samples], dtype=torch.float32)
     y = torch.tensor([sample["target_joints"] for sample in samples], dtype=torch.float32)
+    prev_y = torch.tensor(
+        [_previous_target_joints(sample, output_dim) for sample in samples],
+        dtype=torch.float32,
+    )
 
     seed = int(_nested_get(config, ("experiment", "seed"), 17))
     torch.manual_seed(seed)
@@ -531,7 +535,7 @@ def _train_jsonl(
     output_dir.mkdir(parents=True, exist_ok=True)
     log_every = max(1, int(_nested_get(config, ("train", "log_every"), 100)))
     steps = min(max_steps, max_steps if max_steps > 0 else 1)
-    dataset = torch.utils.data.TensorDataset(x, y)
+    dataset = torch.utils.data.TensorDataset(x, y, prev_y)
     sampler = None
     if runtime["distributed"]:
         sampler = torch.utils.data.distributed.DistributedSampler(
@@ -554,11 +558,20 @@ def _train_jsonl(
     while step < steps:
         if sampler is not None:
             sampler.set_epoch(epoch)
-        for batch_x, batch_y in loader:
+        for batch_x, batch_y, batch_prev_y in loader:
             step += 1
             batch_x = batch_x.to(device, non_blocking=True)
             batch_y = batch_y.to(device, non_blocking=True)
-            loss = _training_loss(torch, model, model_build.family, batch_x, batch_y, config)
+            batch_prev_y = batch_prev_y.to(device, non_blocking=True)
+            loss = _training_loss(
+                torch,
+                model,
+                model_build.family,
+                batch_x,
+                batch_y,
+                config,
+                prev_target=batch_prev_y,
+            )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
@@ -585,6 +598,7 @@ def _train_jsonl(
             config=config,
             batch_size=batch_size,
             device=device,
+            prev_y=prev_y,
         )
         final_loss = float(torch.nn.functional.mse_loss(full_pred, y.to(device)).detach().cpu())
     checkpoint = output_dir / "checkpoint.pt"
@@ -655,6 +669,8 @@ def _training_loss(
     observation,
     target,
     config: dict[str, Any],
+    *,
+    prev_target=None,
 ):
     if family == "flow_matching":
         noise = torch.randn_like(target)
@@ -663,6 +679,16 @@ def _training_loss(
         target_velocity = target - noise
         pred_velocity = model(observation, state, time)
         return torch.nn.functional.mse_loss(pred_velocity, target_velocity)
+    if family == "token_transformer":
+        unwrapped = _unwrap_model(model)
+        if prev_target is None:
+            prev_target = torch.zeros_like(target)
+        prediction, aux = unwrapped.forward_with_aux(observation, prev_state=prev_target)
+        return _supervised_loss(torch, prediction, target, config) + _auxiliary_token_loss(
+            torch,
+            aux,
+            config,
+        )
     return _supervised_loss(torch, model(observation), target, config)
 
 
@@ -688,6 +714,41 @@ def _supervised_loss(torch, prediction, target, config: dict[str, Any]):
     return total
 
 
+def _auxiliary_token_loss(torch, aux: dict[str, Any], config: dict[str, Any]):
+    loss_cfg = _loss_config(config)
+    token_cfg = loss_cfg.get("token_autoencoder", {})
+    if not isinstance(token_cfg, dict):
+        token_cfg = {}
+    total = aux["source"].new_tensor(0.0)
+    weights = {
+        "skeleton": float(token_cfg.get("skeleton", 0.0)),
+        "motion": float(token_cfg.get("motion", 0.0)),
+        "state": float(token_cfg.get("state", 0.0)),
+        "latent_alignment": float(token_cfg.get("latent_alignment", 0.0)),
+    }
+    if weights["skeleton"] and aux["skeleton"].shape[-1] > 0:
+        total = total + weights["skeleton"] * torch.nn.functional.mse_loss(
+            aux["skeleton_reconstruction"],
+            aux["skeleton"],
+        )
+    if weights["motion"]:
+        total = total + weights["motion"] * torch.nn.functional.mse_loss(
+            aux["motion_reconstruction"],
+            aux["source"],
+        )
+    if weights["state"]:
+        total = total + weights["state"] * torch.nn.functional.mse_loss(
+            aux["state_reconstruction"],
+            aux["prev_state"],
+        )
+    if weights["latent_alignment"]:
+        total = total + weights["latent_alignment"] * torch.nn.functional.mse_loss(
+            aux["z_motion"],
+            aux["z_state"],
+        )
+    return total
+
+
 def _predict_tensor(
     torch,
     model,
@@ -697,6 +758,7 @@ def _predict_tensor(
     config: dict[str, Any],
     batch_size: int,
     device,
+    prev_y=None,
 ):
     model.eval()
     predictions = []
@@ -709,6 +771,17 @@ def _predict_tensor(
                 steps=int(flow_cfg.get("inference_steps", 8)),
                 start=str(flow_cfg.get("inference_start", "zeros")),
             )
+        elif family == "token_transformer":
+            if prev_y is None:
+                prev_batch = torch.zeros(
+                    batch.shape[0],
+                    _unwrap_model(model).output_dim,
+                    device=device,
+                    dtype=batch.dtype,
+                )
+            else:
+                prev_batch = prev_y[start : start + batch_size].to(device, non_blocking=True)
+            pred = _unwrap_model(model)(batch, prev_state=prev_batch)
         else:
             pred = model(batch)
         predictions.append(pred.detach())
@@ -717,6 +790,14 @@ def _predict_tensor(
 
 def _unwrap_model(model):
     return model.module if hasattr(model, "module") else model
+
+
+def _previous_target_joints(sample: dict[str, Any], output_dim: int) -> list[float]:
+    for key in ("prev_target_joints", "previous_target_joints", "prev_g1_joints"):
+        value = sample.get(key)
+        if isinstance(value, list) and len(value) == output_dim:
+            return [float(item) for item in value]
+    return [0.0] * output_dim
 
 
 def _loss_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -814,6 +895,7 @@ def _predict_jsonl(
             config=config,
             batch_size=int(_nested_get(config, ("train", "batch_size"), 64)),
             device=device,
+            prev_y=prev_y,
         )
         predictions = pred.detach().cpu().tolist()
         final_mse = float(torch.nn.functional.mse_loss(pred, y.to(device)).detach().cpu())

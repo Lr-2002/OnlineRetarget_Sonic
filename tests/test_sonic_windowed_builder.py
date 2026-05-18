@@ -72,6 +72,8 @@ class SonicWindowedBuilderTests(unittest.TestCase):
         self.assertEqual(result.input_dim, spec.flattened_dim())
         self.assertEqual(len(sample_rows[0]["observation"]), spec.flattened_dim())
         self.assertEqual(len(sample_rows[0]["target_joints"]), len(SONIC_JOINT_NAMES))
+        self.assertEqual(len(sample_rows[0]["prev_target_joints"]), len(SONIC_JOINT_NAMES))
+        self.assertEqual(sample_rows[1]["prev_target_frame"], sample_rows[1]["target_frame"] - 1)
         self.assertIn("walk_forward", sample_rows[0]["sample_id"])
         self.assertEqual(manifest["builder"], "sonic_walk_soma_bvh_to_g1_joint_window_debug")
         self.assertEqual(manifest["source_format"], "soma_bvh")

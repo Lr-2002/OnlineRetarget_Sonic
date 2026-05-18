@@ -119,6 +119,8 @@ z_state -> MLP decoder -> reconstructed q
 
 The query token is the learned "next frame" request. It is analogous to a next
 frame token in an autoregressive model, but it is continuous and task-specific.
+It does not represent an observed signal; it is the model's AMPT-style next-frame
+slot that asks the decoder to produce the next G1 frame.
 
 For deterministic Transformer prediction:
 
@@ -155,6 +157,19 @@ This is preferred over early fusion because retargeting is naturally a query ove
 source motion and skeleton context. The generated G1 state asks what source
 motion/skeleton information is relevant for the next G1 pose.
 
+The initial implementation uses a single output query. A later body-aware variant
+can move "attend to body" to one of two places:
+
+- Memory side: represent skeleton and motion as body/body-time tokens before
+  cross-attention. This lets the decoder attend directly to source body parts.
+- Output side: use one or more G1 joint/body query tokens that cross-attend the
+  source memory. This makes per-joint attention inspectable but increases model
+  size and latency.
+
+Start with the single-query decoder because the present dataset interface still
+uses a flattened motion window. Do not add body-token complexity until eval shows
+that a flat 128D motion token cannot preserve end-effector or foot tracking.
+
 ### Early Fusion Alternative
 
 ```text
@@ -188,6 +203,12 @@ E_g(G1 motion/state)       -> z
 D_h(z, human skeleton)     -> human motion
 D_g(z, G1 skeleton/state)  -> G1 motion
 ```
+
+This is plausible because the source motion token and the robot state/action token
+are both continuous descriptions of the same paired motion event under different
+bodies. If they share a latent space, the skeleton token can condition where that
+latent should decode: different actor proportions map to the same G1 action space
+without requiring a separate model per body.
 
 Possible losses:
 

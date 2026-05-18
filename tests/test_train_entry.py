@@ -329,6 +329,14 @@ class TrainEntryTests(unittest.TestCase):
 
         self.assertEqual(calls, ["l1"])
 
+    def test_previous_target_joints_prefers_sample_field(self):
+        sample = {"prev_target_joints": [1, 2, 3]}
+
+        self.assertEqual(train_entry._previous_target_joints(sample, 3), [1.0, 2.0, 3.0])
+
+    def test_previous_target_joints_falls_back_to_zeros(self):
+        self.assertEqual(train_entry._previous_target_joints({}, 2), [0.0, 0.0])
+
 
 def _write_policy_audit(
     path: Path,

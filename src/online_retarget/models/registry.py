@@ -52,6 +52,25 @@ def build_model(
             dropout=float(model_cfg.get("dropout", 0.1)),
             pooling=str(model_cfg.get("pooling", "last")),
         )
+    elif family == "token_transformer":
+        from .temporal import TokenizedTransformerRetargeter
+
+        model = TokenizedTransformerRetargeter(
+            input_dim=input_dim,
+            output_dim=output_dim,
+            history_frames=observation_spec.history_frames,
+            source_feature_dim=observation_spec.source_feature_dim(),
+            morphology_dim=observation_spec.morphology_dim(),
+            robot_state_dim=observation_spec.robot_state_dim(),
+            latent_dim=int(model_cfg.get("latent_dim", 128)),
+            nhead=int(model_cfg.get("nhead", 4)),
+            num_encoder_layers=int(model_cfg.get("num_encoder_layers", 2)),
+            num_decoder_layers=int(model_cfg.get("num_decoder_layers", 2)),
+            dim_feedforward=int(model_cfg.get("dim_feedforward", 512)),
+            dropout=float(model_cfg.get("dropout", 0.1)),
+            output_mode=str(model_cfg.get("output_mode", "position")),
+            use_prev_state=bool(model_cfg.get("use_prev_state", True)),
+        )
     elif family == "flow_matching":
         from .temporal import FlowMatchingRetargeter
 
@@ -78,6 +97,10 @@ def _canonical_family(family: str) -> str:
         "tf": "temporal_transformer",
         "transformer": "temporal_transformer",
         "temporal_transformer": "temporal_transformer",
+        "token_tf": "token_transformer",
+        "token_transformer": "token_transformer",
+        "tokenized_transformer": "token_transformer",
+        "cross_attention_transformer": "token_transformer",
         "fm": "flow_matching",
         "flow": "flow_matching",
         "flow_matching": "flow_matching",

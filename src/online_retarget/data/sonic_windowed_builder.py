@@ -234,8 +234,12 @@ def _samples_for_row(
             "source_body_names": list(config.source_body_names),
             "target_joint_names": list(SONIC_JOINT_NAMES),
             "target_frame": target_index,
+            "prev_target_frame": max(0, target_index - 1),
             "fps": fps,
             "observation": observation,
+            "prev_target_joints": [
+                float(value) for value in target_joints[max(0, target_index - 1)]
+            ],
             "target_joints": [float(value) for value in target_joints[target_index]],
         }
         samples.append(sample)
