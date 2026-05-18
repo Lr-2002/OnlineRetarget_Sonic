@@ -52,7 +52,11 @@ class EvaluationTests(unittest.TestCase):
             result = evaluate_jsonl(
                 input_jsonl=input_jsonl,
                 output_root=root / "runs",
-                config=EvaluationConfig(run_name="fixture_eval", max_failures=1),
+                config=EvaluationConfig(
+                    run_name="fixture_eval",
+                    max_failures=1,
+                    joint_jump_velocity=1.0,
+                ),
             )
 
             summary = json.loads(result.summary_json.read_text())
@@ -60,10 +64,20 @@ class EvaluationTests(unittest.TestCase):
             per_sample_rows = result.per_sample_csv.read_text().strip().splitlines()
 
         self.assertEqual(result.sample_count, 2)
+        self.assertEqual(summary["overall"]["joint_mae"], 0.25)
+        self.assertEqual(summary["overall"]["joint_mse"], 0.5)
         self.assertEqual(summary["overall"]["joint_rmse"], 0.5)
+        self.assertEqual(summary["overall"]["max_joint_abs_error"], 1.0)
         self.assertEqual(summary["by_quality_flag"]["joint_velocity_jump"]["joint_rmse"], 1.0)
+        self.assertEqual(summary["by_quality_flag"]["joint_velocity_jump"]["predicted_joint_jump_rate"], 0.5)
+        self.assertEqual(summary["by_quality_flag"]["joint_velocity_jump"]["target_joint_jump_rate"], 0.0)
+        self.assertEqual(
+            summary["by_quality_flag"]["joint_velocity_jump"]["predicted_minus_target_joint_jump_rate"],
+            0.5,
+        )
         self.assertEqual(summary["by_quality_flag"]["none"]["joint_rmse"], 0.0)
         self.assertEqual(summary["by_quality_flag"]["joint_velocity_jump"]["predicted_foot_float_rate"], 1.0)
+        self.assertIn("joint_velocity_rmse", per_sample_rows[0])
         self.assertIn("predicted_contact_slide_rate", per_sample_rows[0])
         self.assertEqual(summary["by_quality_flag"]["joint_velocity_jump"]["predicted_contact_skate_rate"], 1.0)
         self.assertIn("predicted_max_contact_skate_distance", per_sample_rows[0])

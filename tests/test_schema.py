@@ -22,6 +22,7 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(observation.morphology_dim(), len(MORPHOLOGY_NUMERIC_COLUMNS))
         self.assertEqual(observation.robot_state_dim(), len(G1_JOINT_COLUMNS) * 3 + 4 + 3)
         self.assertEqual(output.output_dim(), len(G1_JOINT_COLUMNS))
+        self.assertEqual(output.target, "g1_joint_position")
 
     def test_motion_pair_ref_from_index_row(self):
         row = _index_row()

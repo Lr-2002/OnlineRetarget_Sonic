@@ -1,13 +1,15 @@
 # OnlineRetarget
 
-Learning-based online retargeting from heterogeneous human skeleton motion to Unitree G1 robot motion.
+Learning-based online retargeting from BONES-SEED SOMA proportional human motion to Unitree G1 robot motion.
 
-The immediate goal is a compact, evaluation-first retargeter that can ingest human/SOMA skeleton data plus robot state and produce G1 motion references fast enough for online use. The first baseline is direct G1 joint output; latent, flow, and diffusion variants are tracked as later design branches after the baseline is measurable.
+The current problem definition is **SOMA proportional -> G1**: actor-specific SOMA BVH motion plus morphology/shape conditioning maps to direct 29D G1 joint targets. See `docs/problem_definition.md`. The first baseline is direct G1 joint output; latent, flow, and diffusion variants are tracked as later design branches after the baseline is measurable.
 
 ## Repository Status
 
 - Data source: `/home/user/data/motion_data` is read-only.
-- Primary dataset: BONES-SEED metadata plus SOMA and G1 motion archives.
+- Primary source lane: BONES-SEED `soma_proportional.tar`, grouped by `actor_uid`.
+- Primary target lane: `/home/user/data/motion_data/bones_sonic` BONES-SONIC NPZ files, joined to BONES-SEED metadata.
+- Ablation/debug lanes: `soma_uniform.tar`, legacy `g1.tar`, and AMASS/GMR retargeted NPZ files remain useful for comparison or parser regression, but they are not the main SOMA proportional -> G1 source/target definition.
 - Initial target: Unitree G1 29-DoF joint trajectories.
 - Simulator target: Isaac Lab, introduced after offline metrics are stable.
 
@@ -30,6 +32,33 @@ Inventory the local BONES-SEED metadata without modifying data:
 ```bash
 PYTHONPATH=src python3 scripts/inspect_bones_seed.py inventory --data-root /home/user/data/motion_data
 ```
+
+Build the active BONES-SONIC NPZ index:
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py build-sonic-index \
+  --sonic-root /home/user/data/motion_data/bones_sonic \
+  --metadata-csv /home/user/data/motion_data/metadata/seed_metadata_v003.csv \
+  --output-root runs \
+  --run-name bones_sonic_index_full_v0
+```
+
+Current full artifact: `runs/indices/bones_sonic_index_full_v0/sonic_index_report.json` reports 142,220 NPZ files, 522 actors, all 50 Hz, and schema `ok` for every file.
+
+Run a bounded SONIC-native quality smoke from the NPZ tensors:
+
+```bash
+PYTHONPATH=src /home/user/repos/GR00T-WholeBodyControl/.venv_sim/bin/python scripts/inspect_bones_seed.py scan-sonic-quality \
+  --index-csv runs/indices/bones_sonic_index_full_v0/sonic_index.csv \
+  --output-root runs \
+  --limit 512 \
+  --sample-by category \
+  --sample-by date \
+  --model-xml /home/user/repos/GMR/assets/unitree_g1/g1_mocap_29dof.xml \
+  --frame-stride 2
+```
+
+The scanner records body-origin contact, XML joint-limit, and body-origin self-collision metrics as metric-only by default; use explicit `--enable-*` flags only after calibration.
 
 Build an actor-heldout split index and metadata-level curation report under `runs/`:
 

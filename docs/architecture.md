@@ -1,6 +1,8 @@
 # Architecture
 
-Goal: a compact online retargeter that maps heterogeneous human skeleton motion to Unitree G1 motion references with sub-1 ms inference on an RTX 4090.
+Goal: a compact online retargeter that maps BONES-SEED SOMA proportional human motion to Unitree G1 motion references with sub-1 ms inference on an RTX 4090.
+
+Active problem definition: `SOMA proportional -> G1`. The source is actor-specific SOMA proportional BVH plus morphology/shape conditioning; the target is direct Unitree G1 motion, initially 29D joint position from the BONES-SONIC NPZ lane. `SOMA uniform -> G1` is an ablation, not the main task.
 
 ## Baseline Scope
 
@@ -13,8 +15,8 @@ Do not start with VAE/diffusion/flow. Those are design branches after direct out
 ```mermaid
 flowchart LR
     A[BONES-SEED metadata] --> B[actor-level split]
-    C[SOMA proportional or uniform source] --> D[source feature builder]
-    E[G1 CSV or processed G1 NPZ target] --> F[target builder]
+    C[SOMA proportional source] --> D[source feature builder]
+    E[BONES-SONIC G1 NPZ target] --> F[target builder]
     B --> D
     B --> F
     D --> G[temporal supervised dataset]
@@ -29,7 +31,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    A[live skeleton frames] --> B[normalize to source frame]
+    A[live SOMA-proportional-like skeleton frames] --> B[normalize to source frame]
     B --> C[history window]
     D[current G1 state and IMU/proprioception] --> E[observation packer]
     C --> E
@@ -43,11 +45,13 @@ flowchart LR
 Initial observation blocks:
 
 - Source skeleton history: local joint/body positions, orientations if available, velocities, and contact proxies.
-- Source morphology: actor height, foot length, shoulder/hip/knee/ankle measurements, and skeleton ID embedding only if needed.
+- Source morphology: actor height, foot length, shoulder/hip/knee/ankle measurements, SOMA shape parameters, and skeleton ID embedding only if needed.
 - Robot state: current G1 joint position, joint velocity, previous action, base orientation/IMU roll-pitch, angular velocity.
 - Optional future: short future source window if online latency permits buffering.
 
 The first model should accept a fixed-width flattened window. A more expressive tokenized transformer is only justified after the MLP baseline is measured.
+
+Mid-term design choice: add a skeleton encoder between raw source windows and the retargeter. The encoder would convert SOMA skeleton structure, bone proportions, joint topology, local motion features, contacts, and optional shape parameters into learned skeleton/motion features, then feed those features to the direct G1 retargeter. This is not part of the first baseline, but it is a likely next branch if flattened FK windows plus morphology are not enough to capture cross-person motion semantics and skeleton-specific constraints.
 
 Current schema implementation:
 
@@ -73,6 +77,7 @@ Alternatives:
 | Family | Use | Risk |
 | --- | --- | --- |
 | Temporal MLP | First baseline, easiest to deploy under 1 ms | Limited global context |
+| Mid-term skeleton encoder + retargeter | If raw flattened windows underfit cross-skeleton semantics; encodes topology/proportions/local motion into reusable features before G1 prediction | Adds another representation boundary and must prove gains on actor-heldout eval |
 | Tiny temporal transformer | If MLP cannot smooth noisy long-context inputs | Latency and overfitting |
 | VAE latent model | If direct output is unstable across skeletons | More moving parts and harder metrics |
 | Flow/diffusion | Offline refinement or distillation target | Multi-step inference likely violates 1 ms unless distilled |
@@ -103,9 +108,13 @@ Offline metrics live in `src/online_retarget/metrics.py` and must remain trainin
 Initial metrics:
 
 - `mpjpe`: body/joint position error.
+- `joint_mae`: mean absolute G1 joint-space error; this is the eval-side counterpart of the NMR-style L1 supervised baseline.
+- `joint_mse`: mean squared G1 joint-space error for comparison against older MSE smoke runs.
 - `joint_rmse`: G1 joint-space RMSE.
+- `max_joint_abs_error`: worst per-sample joint residual for catching localized mapping failures hidden by averages.
+- `joint_velocity_rmse`: velocity-space residual when sequence predictions contain at least two frames.
 - `action_similarity`: cosine similarity over predicted vs target action/delta vectors.
-- `joint_jump_rate`: thresholded velocity discontinuity rate.
+- `predicted_joint_jump_rate`, `target_joint_jump_rate`, and `predicted_minus_target_joint_jump_rate`: thresholded velocity discontinuity diagnostics for separating target-data artifacts from model-introduced artifacts.
 - `joint_limit_violation_rate`: thresholded limit violation rate.
 - `contact_artifact_metrics`: target-contact-aware foot float, contact slide, ground penetration, and clearance metrics for JSONL samples with body positions and foot body metadata.
 

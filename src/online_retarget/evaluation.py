@@ -10,11 +10,22 @@ from pathlib import Path
 import subprocess
 from typing import Iterable, Mapping, Sequence
 
-from .metrics import action_similarity, contact_artifact_metrics, joint_jump_rate, joint_rmse, mpjpe
+from .metrics import (
+    action_similarity,
+    contact_artifact_metrics,
+    joint_jump_rate,
+    joint_mae,
+    joint_mse,
+    joint_rmse,
+    joint_velocity_rmse,
+    max_joint_abs_error,
+    mpjpe,
+)
 
 
 @dataclass(frozen=True)
 class EvaluationConfig:
+    metrics: tuple[str, ...] = ()
     fps: float = 30.0
     joint_jump_velocity: float = 20.0
     ground_height: float = 0.0
@@ -105,32 +116,47 @@ def evaluate_jsonl(
 def _sample_metrics(sample: Mapping[str, object], config: EvaluationConfig) -> dict[str, object]:
     predicted_joints = _required(sample, "predicted_joints")
     target_joints = _required(sample, "target_joints")
+    fps = float(sample.get("fps", config.fps))
     row = {
         "sample_id": str(sample.get("sample_id", "")),
         "actor_uid": str(sample.get("actor_uid", "")),
         "category": str(sample.get("category", "")),
         "package": str(sample.get("package", "")),
         "quality_flags": _quality_flags_string(sample.get("quality_flags", "")),
+    }
+    predicted_joint_jump_rate = joint_jump_rate(
+        predicted_joints,
+        fps=fps,
+        max_velocity=config.joint_jump_velocity,
+    )
+    target_joint_jump_rate = joint_jump_rate(
+        target_joints,
+        fps=fps,
+        max_velocity=config.joint_jump_velocity,
+    )
+    metric_values = {
+        "joint_mae": joint_mae(predicted_joints, target_joints),
+        "joint_mse": joint_mse(predicted_joints, target_joints),
         "joint_rmse": joint_rmse(predicted_joints, target_joints),
+        "max_joint_abs_error": max_joint_abs_error(predicted_joints, target_joints),
+        "joint_velocity_rmse": joint_velocity_rmse(predicted_joints, target_joints, fps=fps),
         "action_similarity": action_similarity(predicted_joints, target_joints),
-        "predicted_joint_jump_rate": joint_jump_rate(
-            predicted_joints,
-            fps=float(sample.get("fps", config.fps)),
-            max_velocity=config.joint_jump_velocity,
-        ),
+        "predicted_joint_jump_rate": predicted_joint_jump_rate,
+        "target_joint_jump_rate": target_joint_jump_rate,
+        "predicted_minus_target_joint_jump_rate": predicted_joint_jump_rate - target_joint_jump_rate,
     }
     if sample.get("predicted_body_pos") is not None and sample.get("target_body_pos") is not None:
         predicted_body_pos = sample["predicted_body_pos"]
         target_body_pos = sample["target_body_pos"]
-        row["mpjpe"] = mpjpe(predicted_body_pos, target_body_pos)
+        metric_values["mpjpe"] = mpjpe(predicted_body_pos, target_body_pos)
         foot_indices = _foot_indices(sample)
         if foot_indices:
-            row.update(
+            metric_values.update(
                 {
                     f"predicted_{metric}": value
                     for metric, value in contact_artifact_metrics(
                         predicted_body_pos,
-                        fps=float(sample.get("fps", config.fps)),
+                        fps=fps,
                         foot_indices=foot_indices,
                         ground_height=config.ground_height,
                         up_axis=config.up_axis,
@@ -141,6 +167,11 @@ def _sample_metrics(sample: Mapping[str, object], config: EvaluationConfig) -> d
                     ).items()
                 }
             )
+    enabled = set(config.metrics)
+    if enabled:
+        row.update({name: value for name, value in metric_values.items() if name in enabled})
+    else:
+        row.update(metric_values)
     return row
 
 

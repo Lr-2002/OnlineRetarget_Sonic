@@ -116,6 +116,29 @@ Submilestones:
 - M2Q.7 Manual and simulator review: inspect worst clips by failure mode and later validate a representative subset in Isaac Lab/G1 tracking before formal training.
 - M2Q.8 Physics-refinement labels: once simulator replay/refinement exists, record refinement success/failure separately from kinematic quality and never overwrite kinematic G1 targets without provenance.
 
+## M2S - BONES-SONIC Target Lane
+
+Purpose: keep the current SONIC target data source, skeleton semantics, and visualization evidence separate from the legacy BONES-SEED archive lane.
+
+Known facts:
+
+- Current SONIC data source is `/home/user/data/motion_data/bones_sonic`.
+- The full index has 142,220 NPZ files, 522 actors, 71,088 mirrored clips, all at 50 Hz, all schema `ok`.
+- SONIC NPZ tensors contain G1 robot-state arrays: `joint_pos (T,29)`, `joint_vel (T,29)`, `body_pos_w (T,30,3)`, `body_quat_w (T,30,4)`, `body_lin_vel_w (T,30,3)`, and `body_ang_vel_w (T,30,3)`.
+- These NPZ files do not contain raw SMPL `smpl_joints` or `smpl_pose`; the SMPL lane is separate.
+- `joint_pos` and `body_pos_w` are SONIC/IsaacLab G1 order, not legacy CSV/MJCF order.
+- Corrected capsule videos must be rendered from `body_pos_w` through the G1 tree reindexed into IsaacLab order.
+
+Gate:
+
+- SONIC index and schema report exist.
+- Skeleton/order sanity check is documented.
+- Bounded SONIC quality smoke exists.
+- Corrected full-length 3D capsule review videos exist.
+- Legacy BONES-SEED archive evidence is explicitly labeled invalid for current SONIC claims.
+
+Current status: paused/deferred on 2026-05-18. The index, skeleton-order correction, bounded SONIC quality smoke, and corrected full-length capsule review are enough to stop blocking on visualization/curation. Full SONIC scan, threshold calibration, manual review, simulator validation, and promoted curation policy are deferred until after the train/test/eval path and small baseline are in place. Durable summary: `docs/status/data_experience_summary_2026-05-18.md`.
+
 ## M3 - Dataset Schema and Observation Contract
 
 Purpose: freeze the first trainable input/output contract while keeping future physics/IMU variants compatible.
@@ -194,7 +217,7 @@ Gate:
 
 Stop condition: baseline is worse/better by concrete metrics, not subjective visual inspection alone.
 
-Current status: training dry-run validates config, git state, DDP rank/world size, curated index, M2Q quality gate context, observation/output dimensions, and sample refs. Raw-BVH-channel and 30-body BVH-FK supervised JSONL builders exist and have produced real smoke artifacts. `scripts/train.py` has a PyTorch optimizer loop for supervised JSONL artifacts and refuses formal training without quality policy metadata plus a `promotable=true` policy audit. Formal-scale 30-body dataset generation, a promoted M2Q policy, WandB logging, automatic offline eval after training, and actual torch-environment training execution are pending.
+Current status: training dry-run validates config, git state, DDP rank/world size, curated index, M2Q quality gate context, observation/output dimensions, and sample refs. Raw-BVH-channel and 30-body BVH-FK supervised JSONL builders exist and have produced real smoke artifacts. `scripts/train.py` now supports config-selected temporal MLP, temporal Transformer, and flow-matching model families, configurable loss/metric settings, rank-aware DDP training via `torchrun`, automatic offline eval, and rank0-only checkpoint/report writing. A real BONES `soma_bvh -> bones_sonic joint_pos` smoke was run on 128 train windows and 64 actor-heldout val windows; Transformer/FM path checks also ran. Formal-scale 30-body dataset generation, a promoted M2Q policy, WandB-enabled tmux training, full-sequence eval, and simulator-backed target provenance are still pending.
 
 ## M6 - Model Design Ablations and Latency Gate
 

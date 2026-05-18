@@ -14,6 +14,7 @@ class OnlineRetargetMLP(nn.Module):
         input_dim: int,
         output_dim: int = 29,
         hidden_dims: tuple[int, ...] = (512, 512, 256),
+        activation: str = "silu",
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
@@ -21,7 +22,7 @@ class OnlineRetargetMLP(nn.Module):
         prev_dim = input_dim
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(prev_dim, hidden_dim))
-            layers.append(nn.SiLU())
+            layers.append(_activation(activation))
             if dropout > 0:
                 layers.append(nn.Dropout(dropout))
             prev_dim = hidden_dim
@@ -30,3 +31,16 @@ class OnlineRetargetMLP(nn.Module):
 
     def forward(self, observation: torch.Tensor) -> torch.Tensor:
         return self.net(observation)
+
+
+def _activation(name: str) -> nn.Module:
+    key = name.lower().replace("-", "_")
+    if key == "silu":
+        return nn.SiLU()
+    if key == "gelu":
+        return nn.GELU()
+    if key == "relu":
+        return nn.ReLU()
+    if key == "tanh":
+        return nn.Tanh()
+    raise ValueError(f"unsupported MLP activation: {name}")

@@ -106,7 +106,7 @@ class ObservationSpec:
 class OutputSpec:
     """First baseline output contract."""
 
-    target: str = "g1_joint_position_delta"
+    target: str = "g1_joint_position"
     joint_dim: int = len(G1_JOINT_COLUMNS)
     include_root: bool = False
 

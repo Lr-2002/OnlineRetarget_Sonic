@@ -1,5 +1,5 @@
 experiment:
-  name: bones_bvh_mlp_debug
+  name: walk_sonic_mlp_debug
   project: online-retarget
   seed: 17
   output_root: runs
@@ -7,33 +7,32 @@ experiment:
 data:
   root: /home/user/data/motion_data
   index_csv: runs/indices/bones_sonic_index_full_v0/sonic_index.csv
-  samples_jsonl: runs/supervised/somabvh_walk_train_h8_stride10_limit128/samples.jsonl
+  samples_jsonl: runs/supervised/sonicbody_walk_train_h8_stride10_limit512/samples.jsonl
   allow_debug_data: true
-  source_format: soma_proportional_bvh_fk
+  source_format: sonic_body_pos
   target_format: bones_sonic_joint_pos
   history_frames: 8
-  source_body_count: 30
   task: walk
 
 model:
   family: temporal_mlp
-  hidden_dims: [512, 512, 256]
+  hidden_dims: [256, 256]
   activation: silu
   dropout: 0.0
   output: g1_joint_position
-  temporal_context: history_window
+  latency_budget_ms_4090: 1.0
 
 loss:
   l1: 1.0
 
 train:
-  batch_size: 256
-  max_steps: 200
+  batch_size: 64
+  max_steps: 20
   learning_rate: 0.0003
   precision: fp32
-  ddp: true
-  log_every: 20
-  eval_every: 200
+  ddp: false
+  log_every: 5
+  eval_every: 20
 
 evaluation:
   metrics:

@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from online_retarget.config import Paths
+from online_retarget.data.bones_sonic import build_sonic_index
 from online_retarget.data.bvh_quality import BVHQualityConfig, scan_bvh_quality_from_index
 from online_retarget.data.curation import QualityPolicy, SplitConfig, build_split_index
 from online_retarget.data.g1_quality import G1QualityConfig, scan_g1_quality_from_index
@@ -19,6 +20,11 @@ from online_retarget.data.policy_audit import (
     preflight_curation_policy,
 )
 from online_retarget.data.quality_merge import merge_quality_stats
+from online_retarget.data.quality_readiness import (
+    DEFAULT_REQUIRED_LANES,
+    QualityLaneInput,
+    check_quality_lane_readiness,
+)
 from online_retarget.data.quality_review_exports import export_balanced_quality_review_csv
 from online_retarget.data.quality_smoke import QualitySmokeConfig, run_quality_smoke
 from online_retarget.data.quality_summary import summarize_quality_jsonl
@@ -28,6 +34,15 @@ from online_retarget.data.review_manifest import (
     merge_review_decisions,
 )
 from online_retarget.data.review_clips import ReviewClipExportConfig, export_review_clips
+from online_retarget.data.sonic_quality import SonicQualityConfig, scan_sonic_quality_from_index
+from online_retarget.data.sonic_review_clips import (
+    SonicReviewClipExportConfig,
+    export_sonic_review_clips,
+)
+from online_retarget.data.sonic_windowed_builder import (
+    SonicWindowedBuildConfig,
+    build_sonic_windowed_jsonl,
+)
 from online_retarget.data.source_fk_quality import (
     SourceFKQualityConfig,
     scan_source_fk_quality_from_index,
@@ -48,6 +63,95 @@ def main() -> None:
     inventory = subparsers.add_parser("inventory", help="Summarize BONES-SEED metadata")
     inventory.add_argument("--data-root", type=Path, default=Paths.from_env().data_root)
     inventory.add_argument("--sample-actors", type=int, default=3)
+
+    sonic_index = subparsers.add_parser(
+        "build-sonic-index",
+        help="Build a read-only BONES-SONIC NPZ index and schema report",
+    )
+    sonic_index.add_argument(
+        "--sonic-root",
+        type=Path,
+        default=Paths.from_env().data_root / "bones_sonic",
+    )
+    sonic_index.add_argument(
+        "--metadata-csv",
+        type=Path,
+        default=Paths.from_env().data_root / "metadata" / "seed_metadata_v003.csv",
+    )
+    sonic_index.add_argument("--output-root", type=Path, default=Paths.from_env().output_root)
+    sonic_index.add_argument("--run-name", default="bones_sonic_index_v0")
+    sonic_index.add_argument("--limit", type=int)
+
+    sonic_quality = subparsers.add_parser(
+        "scan-sonic-quality",
+        help="Scan BONES-SONIC NPZ targets for provisional quality stats",
+    )
+    sonic_quality.add_argument("--index-csv", type=Path, required=True)
+    sonic_quality.add_argument("--output-root", type=Path, default=Paths.from_env().output_root)
+    sonic_quality.add_argument("--limit", type=int, default=100)
+    sonic_quality.add_argument("--full", action="store_true", help="Scan all SONIC index rows")
+    sonic_quality.add_argument(
+        "--sample-by",
+        action="append",
+        default=[],
+        help="When --limit is active, stratify scan rows by this SONIC index field.",
+    )
+    sonic_quality.add_argument("--max-joint-velocity", type=float, default=20.0)
+    sonic_quality.add_argument("--max-joint-step-velocity", type=float, default=20.0)
+    sonic_quality.add_argument("--max-joint-acceleration", type=float)
+    sonic_quality.add_argument("--max-root-speed", type=float, default=8.0)
+    sonic_quality.add_argument("--max-root-step-speed", type=float, default=8.0)
+    sonic_quality.add_argument("--max-root-acceleration", type=float)
+    sonic_quality.add_argument("--frame-stride", type=int, default=1)
+    sonic_quality.add_argument("--max-frames", type=int)
+    sonic_quality.add_argument("--model-xml", type=Path)
+    sonic_quality.add_argument("--ground-height", type=float, default=0.0)
+    sonic_quality.add_argument("--contact-height-threshold", type=float, default=0.04)
+    sonic_quality.add_argument("--max-contact-slide-speed", type=float, default=0.25)
+    sonic_quality.add_argument("--max-contact-skate-distance", type=float, default=0.02)
+    sonic_quality.add_argument("--max-mean-foot-clearance", type=float, default=0.10)
+    sonic_quality.add_argument("--max-penetration-depth", type=float, default=0.03)
+    sonic_quality.add_argument("--min-contact-frame-ratio", type=float, default=0.05)
+    sonic_quality.add_argument("--max-joint-limit-violation-rate", type=float, default=0.0)
+    sonic_quality.add_argument(
+        "--enable-joint-limit-flags",
+        action="store_true",
+        help="Let XML joint-limit metrics trigger SONIC quality flags.",
+    )
+    sonic_quality.add_argument("--start-end-frames", type=int, default=10)
+    sonic_quality.add_argument("--max-start-end-root-speed", type=float, default=0.20)
+    sonic_quality.add_argument("--min-self-collision-distance", type=float, default=0.015)
+    sonic_quality.add_argument("--max-self-collision-proxy-rate", type=float, default=0.0)
+    sonic_quality.add_argument("--min-self-collision-kinematic-hops", type=int, default=4)
+    sonic_quality.add_argument(
+        "--enable-body-origin-contact-flags",
+        action="store_true",
+        help="Let SONIC body-origin foot/contact proxies trigger quality flags.",
+    )
+    sonic_quality.add_argument(
+        "--enable-body-origin-self-collision-flags",
+        action="store_true",
+        help="Let SONIC body-origin self-collision proxies trigger quality flags.",
+    )
+
+    sonic_review = subparsers.add_parser(
+        "export-sonic-review-clips",
+        help="Render full-length BONES-SONIC NPZ body_pos_w 3D capsule review videos",
+    )
+    sonic_review.add_argument("--stats-jsonl", type=Path, required=True)
+    sonic_review.add_argument("--output-root", type=Path, default=Paths.from_env().output_root)
+    sonic_review.add_argument("--run-name", default="sonic_review_clips_v0")
+    sonic_review.add_argument("--max-per-family", type=int, default=1)
+    sonic_review.add_argument("--keep-examples", type=int, default=2)
+    sonic_review.add_argument(
+        "--render-max-frames",
+        type=int,
+        default=0,
+        help="Maximum frames to render per clip; 0 means full length.",
+    )
+    sonic_review.add_argument("--render-width", type=int, default=640)
+    sonic_review.add_argument("--render-height", type=int, default=360)
+    sonic_review.add_argument("--fps", type=float)
 
     split_index = subparsers.add_parser(
         "split-index",
@@ -353,6 +457,32 @@ def main() -> None:
     windowed.add_argument("--target-frame-offset", type=int, default=0)
     windowed.add_argument("--position-scale", type=float, default=0.01)
 
+    sonic_windowed = subparsers.add_parser(
+        "build-sonic-windowed-jsonl",
+        help="Build walk source-BVH to BONES-SONIC joint-position JSONL samples",
+    )
+    sonic_windowed.add_argument("--data-root", type=Path, default=Paths.from_env().data_root)
+    sonic_windowed.add_argument("--index-csv", type=Path, required=True)
+    sonic_windowed.add_argument("--output-root", type=Path, default=Paths.from_env().output_root)
+    sonic_windowed.add_argument("--split", choices=("train", "val", "test"), default="train")
+    sonic_windowed.add_argument("--task-query", default="walk")
+    sonic_windowed.add_argument(
+        "--source-mode",
+        choices=("sonic_body_pos", "soma_bvh"),
+        default="soma_bvh",
+    )
+    sonic_windowed.add_argument("--include-mirrors", action="store_true")
+    sonic_windowed.add_argument("--limit", type=int, default=512)
+    sonic_windowed.add_argument("--clip-limit", type=int)
+    sonic_windowed.add_argument("--history-frames", type=int, default=8)
+    sonic_windowed.add_argument("--target-frame-offset", type=int, default=0)
+    sonic_windowed.add_argument("--window-stride", type=int, default=10)
+    sonic_windowed.add_argument("--max-windows-per-clip", type=int, default=8)
+    sonic_windowed.add_argument("--split-seed", type=int, default=17)
+    sonic_windowed.add_argument("--train-ratio", type=float, default=0.8)
+    sonic_windowed.add_argument("--val-ratio", type=float, default=0.1)
+    sonic_windowed.add_argument("--position-scale", type=float, default=0.01)
+
     merge_quality = subparsers.add_parser(
         "merge-quality",
         help="Merge split index, source stats, and G1 stats into a curated index",
@@ -412,12 +542,20 @@ def main() -> None:
     review_clips.add_argument("--label", default="review")
     review_clips.add_argument("--limit", type=int, default=8)
     review_clips.add_argument("--render-g1", action="store_true")
+    review_clips.add_argument("--render-source-capsules", action="store_true")
+    review_clips.add_argument("--render-g1-capsules", action="store_true")
     review_clips.add_argument("--model-xml", type=Path)
-    review_clips.add_argument("--render-max-frames", type=int, default=120)
+    review_clips.add_argument(
+        "--render-max-frames",
+        type=int,
+        default=120,
+        help="Maximum frames to render per clip; use 0 for full length.",
+    )
     review_clips.add_argument("--render-width", type=int, default=640)
     review_clips.add_argument("--render-height", type=int, default=360)
     review_clips.add_argument("--fps", type=float, default=120.0)
     review_clips.add_argument("--root-position-scale", type=float, default=0.01)
+    review_clips.add_argument("--source-position-scale", type=float, default=0.01)
     review_clips.add_argument("--angle-scale", type=float, default=0.017453292519943295)
     review_clips.add_argument(
         "--hide-render-frames",
@@ -476,6 +614,34 @@ def main() -> None:
         default=[],
         help="Quantile to report in [0, 1]. Defaults to 0.5, 0.9, 0.95, and 0.99.",
     )
+
+    quality_readiness = subparsers.add_parser(
+        "check-quality-readiness",
+        help="Check whether source/source-FK/G1/pair quality lanes are full-scan ready",
+    )
+    quality_readiness.add_argument("--index-csv", type=Path, required=True)
+    quality_readiness.add_argument("--output-json", type=Path, required=True)
+    quality_readiness.add_argument(
+        "--curation-action",
+        action="append",
+        default=[],
+        help="Index curation action to count as expected. Defaults to keep/downweight/quarantine.",
+    )
+    quality_readiness.add_argument(
+        "--required-lane",
+        action="append",
+        default=[],
+        choices=DEFAULT_REQUIRED_LANES,
+        help="Required lane. Defaults to source, source_fk, g1, and pair.",
+    )
+    quality_readiness.add_argument("--source-stats-jsonl", type=Path)
+    quality_readiness.add_argument("--source-report-json", type=Path)
+    quality_readiness.add_argument("--source-fk-stats-jsonl", type=Path)
+    quality_readiness.add_argument("--source-fk-report-json", type=Path)
+    quality_readiness.add_argument("--g1-stats-jsonl", type=Path)
+    quality_readiness.add_argument("--g1-report-json", type=Path)
+    quality_readiness.add_argument("--pair-stats-jsonl", type=Path)
+    quality_readiness.add_argument("--pair-report-json", type=Path)
 
     policy_audit = subparsers.add_parser(
         "audit-curation-policy",
@@ -590,6 +756,12 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "inventory":
         _inventory(args.data_root, args.sample_actors)
+    elif args.command == "build-sonic-index":
+        _build_sonic_index(args)
+    elif args.command == "scan-sonic-quality":
+        _scan_sonic_quality(args)
+    elif args.command == "export-sonic-review-clips":
+        _export_sonic_review_clips(args)
     elif args.command == "split-index":
         _split_index(args)
     elif args.command == "scan-g1-quality":
@@ -612,6 +784,8 @@ def main() -> None:
         _build_supervised_jsonl(args)
     elif args.command == "build-windowed-jsonl":
         _build_windowed_jsonl(args)
+    elif args.command == "build-sonic-windowed-jsonl":
+        _build_sonic_windowed_jsonl(args)
     elif args.command == "merge-quality":
         _merge_quality(args)
     elif args.command == "build-review-manifest":
@@ -626,6 +800,8 @@ def main() -> None:
         _export_balanced_quality_review(args)
     elif args.command == "summarize-quality-jsonl":
         _summarize_quality_jsonl(args)
+    elif args.command == "check-quality-readiness":
+        _check_quality_readiness(args)
     elif args.command == "audit-curation-policy":
         _audit_curation_policy(args)
     elif args.command == "preflight-curation-policy":
@@ -642,6 +818,96 @@ def _inventory(data_root: Path, sample_actors: int) -> None:
         "sample_actors": [actor.to_dict() for actor in actors[:sample_actors]],
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _build_sonic_index(args: argparse.Namespace) -> None:
+    result = build_sonic_index(
+        sonic_root=args.sonic_root,
+        metadata_csv=args.metadata_csv,
+        output_root=args.output_root,
+        run_name=args.run_name,
+        limit=args.limit,
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _scan_sonic_quality(args: argparse.Namespace) -> None:
+    result = scan_sonic_quality_from_index(
+        index_csv=args.index_csv,
+        output_root=args.output_root,
+        config=SonicQualityConfig(
+            max_joint_velocity=args.max_joint_velocity,
+            max_joint_step_velocity=args.max_joint_step_velocity,
+            max_joint_acceleration=args.max_joint_acceleration,
+            max_root_speed=args.max_root_speed,
+            max_root_step_speed=args.max_root_step_speed,
+            max_root_acceleration=args.max_root_acceleration,
+            frame_stride=args.frame_stride,
+            max_frames=args.max_frames,
+            model_xml=args.model_xml,
+            ground_height=args.ground_height,
+            contact_height_threshold=args.contact_height_threshold,
+            max_contact_slide_speed=args.max_contact_slide_speed,
+            max_contact_skate_distance=args.max_contact_skate_distance,
+            max_mean_foot_clearance=args.max_mean_foot_clearance,
+            max_penetration_depth=args.max_penetration_depth,
+            min_contact_frame_ratio=args.min_contact_frame_ratio,
+            max_joint_limit_violation_rate=args.max_joint_limit_violation_rate,
+            enable_joint_limit_flags=args.enable_joint_limit_flags,
+            start_end_frames=args.start_end_frames,
+            max_start_end_root_speed=args.max_start_end_root_speed,
+            min_self_collision_distance=args.min_self_collision_distance,
+            max_self_collision_proxy_rate=args.max_self_collision_proxy_rate,
+            min_self_collision_kinematic_hops=args.min_self_collision_kinematic_hops,
+            enable_body_origin_contact_flags=args.enable_body_origin_contact_flags,
+            enable_body_origin_self_collision_flags=args.enable_body_origin_self_collision_flags,
+        ),
+        limit=None if args.full else args.limit,
+        sample_by=args.sample_by,
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _export_sonic_review_clips(args: argparse.Namespace) -> None:
+    result = export_sonic_review_clips(
+        SonicReviewClipExportConfig(
+            stats_jsonl=args.stats_jsonl,
+            output_root=args.output_root,
+            run_name=args.run_name,
+            max_per_family=args.max_per_family,
+            keep_examples=args.keep_examples,
+            render_max_frames=args.render_max_frames,
+            render_width=args.render_width,
+            render_height=args.render_height,
+            fps=args.fps,
+        )
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _build_sonic_windowed_jsonl(args: argparse.Namespace) -> None:
+    result = build_sonic_windowed_jsonl(
+        data_root=args.data_root,
+        index_csv=args.index_csv,
+        output_root=args.output_root,
+        config=SonicWindowedBuildConfig(
+            split=args.split,
+            task_query=args.task_query,
+            source_mode=args.source_mode,
+            include_mirrors=args.include_mirrors,
+            limit=args.limit,
+            clip_limit=args.clip_limit,
+            history_frames=args.history_frames,
+            target_frame_offset=args.target_frame_offset,
+            window_stride=args.window_stride,
+            max_windows_per_clip=args.max_windows_per_clip,
+            split_seed=args.split_seed,
+            train_ratio=args.train_ratio,
+            val_ratio=args.val_ratio,
+            position_scale=args.position_scale,
+        ),
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 
 
 def _split_index(args: argparse.Namespace) -> None:
@@ -940,12 +1206,15 @@ def _export_review_clips(args: argparse.Namespace) -> None:
         config=ReviewClipExportConfig(
             limit=args.limit,
             render_g1=args.render_g1,
+            render_source_capsules=args.render_source_capsules,
+            render_g1_capsules=args.render_g1_capsules,
             model_xml=args.model_xml,
             render_max_frames=args.render_max_frames,
             render_width=args.render_width,
             render_height=args.render_height,
             fps=args.fps,
             root_position_scale=args.root_position_scale,
+            source_position_scale=args.source_position_scale,
             angle_scale=args.angle_scale,
             render_frames=not args.hide_render_frames,
         ),
@@ -974,6 +1243,42 @@ def _summarize_quality_jsonl(args: argparse.Namespace) -> None:
         metrics=tuple(args.metric) if args.metric else (),
         group_by=tuple(args.group_by) if args.group_by else (),
         quantiles=tuple(args.quantile) if args.quantile else (),
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _check_quality_readiness(args: argparse.Namespace) -> None:
+    required_lanes = set(args.required_lane or DEFAULT_REQUIRED_LANES)
+    result = check_quality_lane_readiness(
+        index_csv=args.index_csv,
+        output_json=args.output_json,
+        lanes=(
+            QualityLaneInput(
+                "source",
+                stats_jsonl=args.source_stats_jsonl,
+                report_json=args.source_report_json,
+                required="source" in required_lanes,
+            ),
+            QualityLaneInput(
+                "source_fk",
+                stats_jsonl=args.source_fk_stats_jsonl,
+                report_json=args.source_fk_report_json,
+                required="source_fk" in required_lanes,
+            ),
+            QualityLaneInput(
+                "g1",
+                stats_jsonl=args.g1_stats_jsonl,
+                report_json=args.g1_report_json,
+                required="g1" in required_lanes,
+            ),
+            QualityLaneInput(
+                "pair",
+                stats_jsonl=args.pair_stats_jsonl,
+                report_json=args.pair_report_json,
+                required="pair" in required_lanes,
+            ),
+        ),
+        actions=tuple(args.curation_action) or ("keep", "downweight", "quarantine"),
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 

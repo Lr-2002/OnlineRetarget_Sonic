@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import csv
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -41,18 +43,23 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--limit", type=int, default=1)
+    parser.add_argument(
+        "--predict-only",
+        action="store_true",
+        help="Load a checkpoint and write predictions/eval for --samples-jsonl without optimizing.",
+    )
+    parser.add_argument("--checkpoint", type=Path)
     args = parser.parse_args()
 
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     git_sha = _git_sha()
     config = _load_config(args.config)
-    observation = ObservationSpec(
-        history_frames=int(_nested_get(config, ("data", "history_frames"), 8))
-    )
-    output = OutputSpec(target=str(_nested_get(config, ("model", "output"), "g1_joint_position_delta")))
     index_csv = args.index_csv or _nested_get(config, ("data", "index_csv"), None)
     samples_jsonl = args.samples_jsonl or _nested_get(config, ("data", "samples_jsonl"), None)
+    sample_manifest = _load_sample_manifest(Path(samples_jsonl) if samples_jsonl else None)
+    observation = _observation_spec_from_config_and_manifest(config, sample_manifest)
+    output = OutputSpec(target=str(_nested_get(config, ("model", "output"), "g1_joint_position")))
     action_column = args.action_column or str(_nested_get(config, ("data", "action_column"), "curation_action"))
     quality_gate = _quality_gate_context(
         config,
@@ -73,20 +80,27 @@ def main() -> None:
     print(f"output_dim={output.output_dim()}")
     print(f"quality_gate={json.dumps(quality_gate, sort_keys=True)}")
     if index_csv:
-        ref_count = 0
-        ref_samples = []
-        for ref in iter_motion_pair_refs(
-            Path(index_csv),
-            splits=("train",),
-            actions=("keep", "downweight"),
-            action_column=action_column,
-        ):
-            ref_count += 1
-            if len(ref_samples) < args.limit:
-                ref_samples.append(ref)
-        print(f"train_refs={ref_count} index_csv={index_csv}")
-        for ref in ref_samples:
-            print(json.dumps(ref.to_dict(), sort_keys=True))
+        index_path = Path(index_csv)
+        if not _index_supports_motion_pair_refs(index_path, action_column=action_column):
+            print(
+                "train_refs=not_applicable "
+                f"index_csv={index_csv} reason=index lacks split/{action_column} motion-pair columns"
+            )
+        else:
+            ref_count = 0
+            ref_samples = []
+            for ref in iter_motion_pair_refs(
+                index_path,
+                splits=("train",),
+                actions=("keep", "downweight"),
+                action_column=action_column,
+            ):
+                ref_count += 1
+                if len(ref_samples) < args.limit:
+                    ref_samples.append(ref)
+            print(f"train_refs={ref_count} index_csv={index_csv}")
+            for ref in ref_samples:
+                print(json.dumps(ref.to_dict(), sort_keys=True))
     else:
         print("index_csv=unset")
     if samples_jsonl:
@@ -103,30 +117,73 @@ def main() -> None:
         raise SystemExit(
             "Training requires the conda environment from environment.yml with torch installed."
         ) from exc
+    runtime = _setup_torch_runtime(torch, rank=rank, world_size=world_size)
 
     if not samples_jsonl:
         raise SystemExit(
             "Set --samples-jsonl or data.samples_jsonl to train. The current training loop "
             "consumes supervised JSONL artifacts produced by build-supervised-jsonl."
         )
-
-    _train_jsonl(
-        torch=torch,
-        config=config,
-        samples_jsonl=Path(samples_jsonl),
-        output_dir=args.output_dir
-        or Path(str(_nested_get(config, ("experiment", "output_root"), "runs")))
+    output_dir = args.output_dir or (
+        Path(str(_nested_get(config, ("experiment", "output_root"), "runs")))
         / "train"
-        / str(_nested_get(config, ("experiment", "name"), "baseline_mlp_direct_g1")),
-        max_steps=args.max_steps or int(_nested_get(config, ("train", "max_steps"), 1000)),
-        batch_size=args.batch_size or int(_nested_get(config, ("train", "batch_size"), 64)),
-        learning_rate=float(_nested_get(config, ("train", "learning_rate"), 3e-4)),
-        hidden_dims=tuple(int(value) for value in _nested_get(config, ("model", "hidden_dims"), [512, 512, 256])),
-        dropout=float(_nested_get(config, ("model", "dropout"), 0.0)),
-        quality_gate=quality_gate,
-        rank=rank,
-        world_size=world_size,
+        / str(_nested_get(config, ("experiment", "name"), "baseline_mlp_direct_g1"))
     )
+    if args.predict_only:
+        if args.checkpoint is None:
+            raise SystemExit("--predict-only requires --checkpoint")
+        _predict_jsonl(
+            torch=torch,
+            config=config,
+            samples_jsonl=Path(samples_jsonl),
+            checkpoint=args.checkpoint,
+            output_dir=output_dir,
+            quality_gate=quality_gate,
+            rank=rank,
+            world_size=world_size,
+            runtime=runtime,
+        )
+        _cleanup_torch_runtime(torch, runtime)
+        return
+
+    try:
+        _train_jsonl(
+            torch=torch,
+            config=config,
+            samples_jsonl=Path(samples_jsonl),
+            output_dir=output_dir,
+            resume_checkpoint=args.checkpoint,
+            max_steps=args.max_steps or int(_nested_get(config, ("train", "max_steps"), 1000)),
+            batch_size=args.batch_size or int(_nested_get(config, ("train", "batch_size"), 64)),
+            learning_rate=float(_nested_get(config, ("train", "learning_rate"), 3e-4)),
+            quality_gate=quality_gate,
+            rank=rank,
+            world_size=world_size,
+            runtime=runtime,
+        )
+    finally:
+        _cleanup_torch_runtime(torch, runtime)
+
+
+def _index_supports_motion_pair_refs(index_csv: Path, *, action_column: str) -> bool:
+    if not index_csv.exists():
+        return False
+    with index_csv.open(newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return False
+    columns = set(header)
+    required = {
+        "split",
+        "actor_uid",
+        "filename",
+        "move_soma_proportional_path",
+        "move_g1_path",
+        action_column,
+    }
+    return required.issubset(columns)
 
 
 def _load_config(path: Path) -> dict[str, Any]:
@@ -307,42 +364,163 @@ def _path_or_none(value: str) -> Path | None:
     return Path(value) if value else None
 
 
+def _observation_spec_from_config_and_manifest(
+    config: dict[str, Any],
+    manifest: dict[str, Any],
+    *,
+    input_dim: int | None = None,
+) -> ObservationSpec:
+    spec_payload = manifest.get("observation_spec", {})
+    if not isinstance(spec_payload, dict):
+        spec_payload = {}
+    robot_payload = spec_payload.get("robot_state", {})
+    robot_state = ObservationSpec().robot_state
+    if isinstance(robot_payload, dict):
+        robot_state = replace(
+            robot_state,
+            joint_dim=int(robot_payload.get("joint_dim", robot_state.joint_dim)),
+            include_joint_position=bool(
+                robot_payload.get("include_joint_position", robot_state.include_joint_position)
+            ),
+            include_joint_velocity=bool(
+                robot_payload.get("include_joint_velocity", robot_state.include_joint_velocity)
+            ),
+            include_previous_action=bool(
+                robot_payload.get("include_previous_action", robot_state.include_previous_action)
+            ),
+            include_imu_orientation=bool(
+                robot_payload.get("include_imu_orientation", robot_state.include_imu_orientation)
+            ),
+            include_base_angular_velocity=bool(
+                robot_payload.get(
+                    "include_base_angular_velocity",
+                    robot_state.include_base_angular_velocity,
+                )
+            ),
+        )
+    spec = ObservationSpec(
+        history_frames=int(
+            spec_payload.get(
+                "history_frames",
+                _nested_get(config, ("data", "history_frames"), 8),
+            )
+        ),
+        source_body_count=int(
+            spec_payload.get(
+                "source_body_count",
+                _nested_get(config, ("data", "source_body_count"), 30),
+            )
+        ),
+        source_position_dim=int(spec_payload.get("source_position_dim", 3)),
+        include_source_velocity=bool(spec_payload.get("include_source_velocity", True)),
+        include_morphology=bool(spec_payload.get("include_morphology", True)),
+        robot_state=robot_state,
+    )
+    if input_dim is None or spec.flattened_dim() == input_dim:
+        return spec
+    inferred = _infer_source_body_count(spec, input_dim)
+    return replace(spec, source_body_count=inferred) if inferred else spec
+
+
+def _infer_source_body_count(spec: ObservationSpec, input_dim: int) -> int | None:
+    side_dim = spec.morphology_dim() + spec.robot_state_dim()
+    source_dim = input_dim - side_dim
+    per_body_per_frame = spec.source_position_dim * (2 if spec.include_source_velocity else 1)
+    denom = spec.history_frames * per_body_per_frame
+    if source_dim <= 0 or denom <= 0 or source_dim % denom != 0:
+        return None
+    return source_dim // denom
+
+
+def _setup_torch_runtime(torch, *, rank: int, world_size: int) -> dict[str, Any]:
+    local_rank = int(os.environ.get("LOCAL_RANK", rank))
+    distributed = world_size > 1
+    device_type = "cuda" if torch.cuda.is_available() else "cpu"
+    if device_type == "cuda":
+        torch.cuda.set_device(local_rank if distributed else 0)
+        device = torch.device("cuda", local_rank if distributed else 0)
+    else:
+        device = torch.device("cpu")
+    if distributed and not torch.distributed.is_initialized():
+        backend = "nccl" if device_type == "cuda" else "gloo"
+        torch.distributed.init_process_group(backend=backend)
+    return {
+        "distributed": distributed,
+        "rank": rank,
+        "world_size": world_size,
+        "local_rank": local_rank,
+        "device": device,
+        "device_type": device_type,
+    }
+
+
+def _cleanup_torch_runtime(torch, runtime: dict[str, Any]) -> None:
+    if runtime.get("distributed") and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
+
+
+def _runtime_report(runtime: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "distributed": bool(runtime.get("distributed")),
+        "rank": int(runtime.get("rank", 0)),
+        "world_size": int(runtime.get("world_size", 1)),
+        "local_rank": int(runtime.get("local_rank", 0)),
+        "device_type": str(runtime.get("device_type", "cpu")),
+    }
+
+
 def _train_jsonl(
     *,
     torch,
     config: dict[str, Any],
     samples_jsonl: Path,
     output_dir: Path,
+    resume_checkpoint: Path | None,
     max_steps: int,
     batch_size: int,
     learning_rate: float,
-    hidden_dims: tuple[int, ...],
-    dropout: float,
     quality_gate: dict[str, Any],
     rank: int,
     world_size: int,
+    runtime: dict[str, Any],
 ) -> None:
-    from online_retarget.models.mlp import OnlineRetargetMLP
+    from online_retarget.models.registry import build_model
 
     samples = _load_supervised_samples(samples_jsonl)
     if not samples:
         raise SystemExit(f"no supervised samples found in {samples_jsonl}")
     input_dim = len(samples[0]["observation"])
     output_dim = len(samples[0]["target_joints"])
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    x = torch.tensor([sample["observation"] for sample in samples], dtype=torch.float32, device=device)
-    y = torch.tensor([sample["target_joints"] for sample in samples], dtype=torch.float32, device=device)
+    observation_spec = _observation_spec_from_config_and_manifest(
+        config,
+        _load_sample_manifest(samples_jsonl),
+        input_dim=input_dim,
+    )
+    device = runtime["device"]
+    x = torch.tensor([sample["observation"] for sample in samples], dtype=torch.float32)
+    y = torch.tensor([sample["target_joints"] for sample in samples], dtype=torch.float32)
 
     seed = int(_nested_get(config, ("experiment", "seed"), 17))
     torch.manual_seed(seed)
-    model = OnlineRetargetMLP(
+    model_build = build_model(
+        config,
         input_dim=input_dim,
         output_dim=output_dim,
-        hidden_dims=hidden_dims,
-        dropout=dropout,
-    ).to(device)
+        observation_spec=observation_spec,
+    )
+    model = model_build.model.to(device)
+    if resume_checkpoint is not None:
+        payload = torch.load(resume_checkpoint, map_location=device)
+        state_dict = payload.get("model_state_dict") if isinstance(payload, dict) else None
+        if state_dict is None:
+            raise SystemExit(f"checkpoint lacks model_state_dict: {resume_checkpoint}")
+        model.load_state_dict(state_dict)
+    if runtime["distributed"]:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[runtime["local_rank"]] if runtime["device_type"] == "cuda" else None,
+        )
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-    loss_fn = torch.nn.MSELoss()
     wandb_run = _init_wandb(
         config=config,
         quality_gate=quality_gate,
@@ -353,21 +531,62 @@ def _train_jsonl(
     output_dir.mkdir(parents=True, exist_ok=True)
     log_every = max(1, int(_nested_get(config, ("train", "log_every"), 100)))
     steps = min(max_steps, max_steps if max_steps > 0 else 1)
-    for step in range(1, steps + 1):
-        indices = torch.randint(0, x.shape[0], (min(batch_size, x.shape[0]),), device=device)
-        pred = model(x[indices])
-        loss = loss_fn(pred, y[indices])
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
-        if rank == 0 and (step == 1 or step == steps or step % log_every == 0):
-            step_log = {"step": step, "loss": float(loss.detach().cpu())}
-            print(json.dumps(step_log, sort_keys=True))
-            _wandb_log(wandb_run, step_log, step=step)
+    dataset = torch.utils.data.TensorDataset(x, y)
+    sampler = None
+    if runtime["distributed"]:
+        sampler = torch.utils.data.distributed.DistributedSampler(
+            dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True,
+            seed=seed,
+            drop_last=False,
+        )
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=min(batch_size, len(dataset)),
+        sampler=sampler,
+        shuffle=sampler is None,
+        pin_memory=runtime["device_type"] == "cuda",
+    )
+    step = 0
+    epoch = 0
+    while step < steps:
+        if sampler is not None:
+            sampler.set_epoch(epoch)
+        for batch_x, batch_y in loader:
+            step += 1
+            batch_x = batch_x.to(device, non_blocking=True)
+            batch_y = batch_y.to(device, non_blocking=True)
+            loss = _training_loss(torch, model, model_build.family, batch_x, batch_y, config)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            if rank == 0 and (step == 1 or step == steps or step % log_every == 0):
+                step_log = {"step": step, "loss": float(loss.detach().cpu())}
+                print(json.dumps(step_log, sort_keys=True))
+                _wandb_log(wandb_run, step_log, step=step)
+            if step >= steps:
+                break
+        epoch += 1
+
+    if runtime["distributed"]:
+        torch.distributed.barrier()
+    if rank != 0:
+        _wandb_finish(wandb_run)
+        return
 
     with torch.no_grad():
-        full_pred = model(x)
-        final_loss = float(loss_fn(full_pred, y).detach().cpu())
+        full_pred = _predict_tensor(
+            torch,
+            model,
+            x,
+            family=model_build.family,
+            config=config,
+            batch_size=batch_size,
+            device=device,
+        )
+        final_loss = float(torch.nn.functional.mse_loss(full_pred, y.to(device)).detach().cpu())
     checkpoint = output_dir / "checkpoint.pt"
     predictions_jsonl = output_dir / "train_predictions.jsonl"
     _write_prediction_jsonl(
@@ -380,7 +599,7 @@ def _train_jsonl(
         eval_result = evaluate_jsonl(
             input_jsonl=predictions_jsonl,
             output_root=output_dir,
-            config=EvaluationConfig(run_name="train_offline_eval"),
+            config=_evaluation_config(config, run_name="train_offline_eval"),
         )
     report = _build_train_report(
         samples_jsonl=samples_jsonl,
@@ -394,18 +613,24 @@ def _train_jsonl(
         max_steps=steps,
         batch_size=batch_size,
         learning_rate=learning_rate,
-        hidden_dims=hidden_dims,
-        dropout=dropout,
+        hidden_dims=tuple(int(value) for value in model_build.config.get("hidden_dims", [])),
+        dropout=float(model_build.config.get("dropout", 0.0)),
         quality_gate=quality_gate,
         device=str(device),
         world_size=world_size,
         rank=rank,
         final_train_mse=final_loss,
         wandb_summary=_wandb_summary(wandb_run),
+        model_family=model_build.family,
+        model_config=model_build.config,
+        loss_config=_loss_config(config),
+        evaluation_config=_evaluation_config(config, run_name="train_offline_eval").to_dict(),
+        distributed_runtime=_runtime_report(runtime),
+        resume_checkpoint=str(resume_checkpoint) if resume_checkpoint is not None else "",
     )
     torch.save(
         {
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": _unwrap_model(model).state_dict(),
             "report": report,
         },
         checkpoint,
@@ -423,6 +648,106 @@ def _train_jsonl(
     print(json.dumps(report, indent=2, sort_keys=True))
 
 
+def _training_loss(
+    torch,
+    model,
+    family: str,
+    observation,
+    target,
+    config: dict[str, Any],
+):
+    if family == "flow_matching":
+        noise = torch.randn_like(target)
+        time = torch.rand(target.shape[0], 1, device=target.device, dtype=target.dtype)
+        state = (1.0 - time) * noise + time * target
+        target_velocity = target - noise
+        pred_velocity = model(observation, state, time)
+        return torch.nn.functional.mse_loss(pred_velocity, target_velocity)
+    return _supervised_loss(torch, model(observation), target, config)
+
+
+def _supervised_loss(torch, prediction, target, config: dict[str, Any]):
+    loss_cfg = _loss_config(config)
+    total = prediction.new_tensor(0.0)
+    total_weight = 0.0
+    has_explicit_loss = any(key in loss_cfg for key in ("mse", "joint_position", "l1", "smooth_l1"))
+    mse_weight = float(loss_cfg.get("mse", loss_cfg.get("joint_position", 0.0 if has_explicit_loss else 1.0)))
+    if mse_weight:
+        total = total + mse_weight * torch.nn.functional.mse_loss(prediction, target)
+        total_weight += abs(mse_weight)
+    l1_weight = float(loss_cfg.get("l1", 0.0))
+    if l1_weight:
+        total = total + l1_weight * torch.nn.functional.l1_loss(prediction, target)
+        total_weight += abs(l1_weight)
+    smooth_l1_weight = float(loss_cfg.get("smooth_l1", 0.0))
+    if smooth_l1_weight:
+        total = total + smooth_l1_weight * torch.nn.functional.smooth_l1_loss(prediction, target)
+        total_weight += abs(smooth_l1_weight)
+    if total_weight == 0.0:
+        raise ValueError("loss config must enable at least one of mse, l1, smooth_l1")
+    return total
+
+
+def _predict_tensor(
+    torch,
+    model,
+    x,
+    *,
+    family: str,
+    config: dict[str, Any],
+    batch_size: int,
+    device,
+):
+    model.eval()
+    predictions = []
+    for start in range(0, x.shape[0], max(1, batch_size)):
+        batch = x[start : start + batch_size].to(device, non_blocking=True)
+        if family == "flow_matching":
+            flow_cfg = config.get("model", {}) if isinstance(config.get("model", {}), dict) else {}
+            pred = _unwrap_model(model).sample(
+                batch,
+                steps=int(flow_cfg.get("inference_steps", 8)),
+                start=str(flow_cfg.get("inference_start", "zeros")),
+            )
+        else:
+            pred = model(batch)
+        predictions.append(pred.detach())
+    return torch.cat(predictions, dim=0)
+
+
+def _unwrap_model(model):
+    return model.module if hasattr(model, "module") else model
+
+
+def _loss_config(config: dict[str, Any]) -> dict[str, Any]:
+    payload = config.get("loss", {})
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _evaluation_config(config: dict[str, Any], *, run_name: str) -> EvaluationConfig:
+    payload = config.get("evaluation", {})
+    if not isinstance(payload, dict):
+        payload = {}
+    metrics = payload.get("metrics", ())
+    if isinstance(metrics, str):
+        metric_tuple = (metrics,)
+    else:
+        metric_tuple = tuple(str(metric) for metric in metrics)
+    return EvaluationConfig(
+        metrics=metric_tuple,
+        fps=float(payload.get("fps", 30.0)),
+        joint_jump_velocity=float(payload.get("joint_jump_velocity", 20.0)),
+        ground_height=float(payload.get("ground_height", 0.0)),
+        up_axis=payload.get("up_axis", 2),
+        contact_height_threshold=float(payload.get("contact_height_threshold", 0.04)),
+        max_contact_slide_speed=float(payload.get("max_contact_slide_speed", 0.25)),
+        max_contact_skate_distance=float(payload.get("max_contact_skate_distance", 0.02)),
+        failure_metric=str(payload.get("failure_metric", "joint_rmse")),
+        max_failures=int(payload.get("max_failures", 50)),
+        run_name=run_name,
+    )
+
+
 def _load_supervised_samples(samples_jsonl: Path) -> list[dict[str, Any]]:
     samples = []
     with samples_jsonl.open(encoding="utf-8") as f:
@@ -435,6 +760,99 @@ def _load_supervised_samples(samples_jsonl: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"sample on line {line_number} lacks observation/target_joints")
             samples.append(sample)
     return samples
+
+
+def _predict_jsonl(
+    *,
+    torch,
+    config: dict[str, Any],
+    samples_jsonl: Path,
+    checkpoint: Path,
+    output_dir: Path,
+    quality_gate: dict[str, Any],
+    rank: int,
+    world_size: int,
+    runtime: dict[str, Any],
+) -> None:
+    from online_retarget.models.registry import build_model
+
+    if rank != 0:
+        return
+    samples = _load_supervised_samples(samples_jsonl)
+    if not samples:
+        raise SystemExit(f"no supervised samples found in {samples_jsonl}")
+    input_dim = len(samples[0]["observation"])
+    output_dim = len(samples[0]["target_joints"])
+    observation_spec = _observation_spec_from_config_and_manifest(
+        config,
+        _load_sample_manifest(samples_jsonl),
+        input_dim=input_dim,
+    )
+    device = runtime["device"]
+    model_build = build_model(
+        config,
+        input_dim=input_dim,
+        output_dim=output_dim,
+        observation_spec=observation_spec,
+    )
+    model = model_build.model.to(device)
+    payload = torch.load(checkpoint, map_location=device)
+    state_dict = payload.get("model_state_dict") if isinstance(payload, dict) else None
+    if state_dict is None:
+        raise SystemExit(f"checkpoint lacks model_state_dict: {checkpoint}")
+    model.load_state_dict(state_dict)
+    model.eval()
+    x = torch.tensor([sample["observation"] for sample in samples], dtype=torch.float32)
+    y = torch.tensor([sample["target_joints"] for sample in samples], dtype=torch.float32)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with torch.no_grad():
+        pred = _predict_tensor(
+            torch,
+            model,
+            x,
+            family=model_build.family,
+            config=config,
+            batch_size=int(_nested_get(config, ("train", "batch_size"), 64)),
+            device=device,
+        )
+        predictions = pred.detach().cpu().tolist()
+        final_mse = float(torch.nn.functional.mse_loss(pred, y.to(device)).detach().cpu())
+    predictions_jsonl = output_dir / "predictions.jsonl"
+    _write_prediction_jsonl(predictions_jsonl, samples=samples, predictions=predictions)
+    eval_result = None
+    if bool(_nested_get(config, ("tracking", "auto_offline_eval"), True)):
+        eval_result = evaluate_jsonl(
+            input_jsonl=predictions_jsonl,
+            output_root=output_dir,
+            config=_evaluation_config(config, run_name="offline_eval"),
+        )
+    report = {
+        "mode": "predict_only",
+        "samples_jsonl": str(samples_jsonl),
+        "checkpoint": str(checkpoint),
+        "output_dir": str(output_dir),
+        "predictions_jsonl": str(predictions_jsonl),
+        "offline_eval": eval_result.to_dict() if eval_result is not None else {},
+        "sample_count": len(samples),
+        "input_dim": input_dim,
+        "output_dim": output_dim,
+        "model_family": model_build.family,
+        "model_config": model_build.config,
+        "loss_config": _loss_config(config),
+        "evaluation_config": _evaluation_config(config, run_name="offline_eval").to_dict(),
+        "quality_gate": quality_gate,
+        "device": str(device),
+        "world_size": world_size,
+        "rank": rank,
+        "mse": final_mse,
+        "git_sha": _git_sha(),
+        "git_dirty": _git_dirty(),
+    }
+    (output_dir / "predict_report.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(report, indent=2, sort_keys=True))
 
 
 def _write_prediction_jsonl(
@@ -455,6 +873,22 @@ def _write_prediction_jsonl(
                 "predicted_joints": [prediction],
                 "target_joints": [sample["target_joints"]],
             }
+            for key in (
+                "fps",
+                "target_frame",
+                "source_motion_path",
+                "target_g1_path",
+                "sonic_relative_path",
+                "target_joint_names",
+            ):
+                if key in sample:
+                    payload[key] = sample[key]
+            payload["sequence_id"] = str(
+                sample.get(
+                    "target_g1_path",
+                    sample.get("sonic_relative_path", sample.get("source_motion_path", "")),
+                )
+            )
             f.write(json.dumps(payload, sort_keys=True))
             f.write("\n")
 
@@ -480,6 +914,12 @@ def _build_train_report(
     rank: int,
     final_train_mse: float,
     wandb_summary: dict[str, Any],
+    model_family: str = "temporal_mlp",
+    model_config: dict[str, Any] | None = None,
+    loss_config: dict[str, Any] | None = None,
+    evaluation_config: dict[str, Any] | None = None,
+    distributed_runtime: dict[str, Any] | None = None,
+    resume_checkpoint: str = "",
 ) -> dict[str, Any]:
     return {
         "samples_jsonl": str(samples_jsonl),
@@ -495,10 +935,16 @@ def _build_train_report(
         "learning_rate": learning_rate,
         "hidden_dims": list(hidden_dims),
         "dropout": dropout,
+        "model_family": model_family,
+        "model_config": model_config or {},
+        "loss_config": loss_config or {},
+        "evaluation_config": evaluation_config or {},
         "quality_gate": quality_gate,
         "device": device,
         "world_size": world_size,
         "rank": rank,
+        "distributed_runtime": distributed_runtime or {},
+        "resume_checkpoint": resume_checkpoint,
         "final_train_mse": final_train_mse,
         "git_sha": _git_sha(),
         "git_dirty": _git_dirty(),

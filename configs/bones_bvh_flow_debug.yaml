@@ -1,5 +1,5 @@
 experiment:
-  name: bones_bvh_mlp_debug
+  name: bones_bvh_flow_debug
   project: online-retarget
   seed: 17
   output_root: runs
@@ -16,15 +16,17 @@ data:
   task: walk
 
 model:
-  family: temporal_mlp
+  family: flow_matching
   hidden_dims: [512, 512, 256]
   activation: silu
   dropout: 0.0
+  time_embed_dim: 32
+  inference_steps: 8
+  inference_start: zeros
   output: g1_joint_position
-  temporal_context: history_window
 
 loss:
-  l1: 1.0
+  flow_matching: 1.0
 
 train:
   batch_size: 256

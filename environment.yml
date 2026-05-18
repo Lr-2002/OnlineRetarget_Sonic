@@ -12,5 +12,6 @@ dependencies:
   - pyyaml
   - tqdm
   - pip:
+      - hydra-core>=1.3
       - wandb
       - -e .[dev]

@@ -31,14 +31,77 @@ def mpjpe(predicted: Motion3D, target: Motion3D) -> float:
     return _safe_mean(total, count)
 
 
-def joint_rmse(predicted: Motion1D, target: Motion1D) -> float:
-    """Root mean squared error for joint vectors shaped T x D."""
+def joint_mae(predicted: Motion1D, target: Motion1D) -> float:
+    """Mean absolute error for joint vectors shaped T x D."""
+
+    total = 0.0
+    count = 0
+    for pred_frame, target_frame in _zip_equal(predicted, target, "frames"):
+        for pred_value, target_value in _zip_equal(pred_frame, target_frame, "joint dimensions"):
+            total += abs(pred_value - target_value)
+            count += 1
+    return _safe_mean(total, count)
+
+
+def joint_mse(predicted: Motion1D, target: Motion1D) -> float:
+    """Mean squared error for joint vectors shaped T x D."""
 
     total = 0.0
     count = 0
     for pred_frame, target_frame in _zip_equal(predicted, target, "frames"):
         for pred_value, target_value in _zip_equal(pred_frame, target_frame, "joint dimensions"):
             total += (pred_value - target_value) ** 2
+            count += 1
+    return _safe_mean(total, count)
+
+
+def joint_rmse(predicted: Motion1D, target: Motion1D) -> float:
+    """Root mean squared error for joint vectors shaped T x D."""
+
+    return math.sqrt(joint_mse(predicted, target))
+
+
+def max_joint_abs_error(predicted: Motion1D, target: Motion1D) -> float:
+    """Maximum absolute joint error over a motion shaped T x D."""
+
+    max_error = 0.0
+    count = 0
+    for pred_frame, target_frame in _zip_equal(predicted, target, "frames"):
+        for pred_value, target_value in _zip_equal(pred_frame, target_frame, "joint dimensions"):
+            max_error = max(max_error, abs(pred_value - target_value))
+            count += 1
+    if count == 0:
+        raise ValueError("metric received no samples")
+    return max_error
+
+
+def joint_velocity_rmse(predicted: Motion1D, target: Motion1D, fps: float) -> float:
+    """RMSE between predicted and target joint velocities."""
+
+    if fps <= 0:
+        raise ValueError("fps must be positive")
+    if len(predicted) != len(target):
+        raise ValueError(f"mismatched frames: {len(predicted)} != {len(target)}")
+    if len(predicted) < 2:
+        return 0.0
+    total = 0.0
+    count = 0
+    for pred_prev, pred_cur, target_prev, target_cur in zip(
+        predicted,
+        predicted[1:],
+        target,
+        target[1:],
+    ):
+        for pred_prev_value, pred_cur_value, target_prev_value, target_cur_value in zip(
+            pred_prev,
+            pred_cur,
+            target_prev,
+            target_cur,
+            strict=True,
+        ):
+            pred_velocity = (pred_cur_value - pred_prev_value) * fps
+            target_velocity = (target_cur_value - target_prev_value) * fps
+            total += (pred_velocity - target_velocity) ** 2
             count += 1
     return math.sqrt(_safe_mean(total, count))
 
@@ -61,6 +124,8 @@ def joint_jump_rate(joint_positions: Motion1D, fps: float, max_velocity: float) 
         raise ValueError("fps must be positive")
     if max_velocity <= 0:
         raise ValueError("max_velocity must be positive")
+    if len(joint_positions) < 2:
+        return 0.0
     jumps = 0
     total = 0
     for prev, cur in zip(joint_positions, joint_positions[1:]):

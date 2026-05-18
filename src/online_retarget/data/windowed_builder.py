@@ -190,7 +190,7 @@ def build_windowed_jsonl(
     )
 
 
-def parse_bvh_motion(text: str) -> BVHMotion:
+def parse_bvh_motion(text: str, max_frames: int | None = None) -> BVHMotion:
     """Parse BVH hierarchy and motion frames needed for FK."""
 
     raw_lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -251,10 +251,13 @@ def parse_bvh_motion(text: str) -> BVHMotion:
     frame_time = _parse_header_value(raw_lines[motion_idx + 2], "Frame Time")
     frames: list[tuple[float, ...]] = []
     for line in raw_lines[motion_idx + 3 :]:
+        if max_frames is not None and len(frames) >= max_frames:
+            break
         values = tuple(float(item) for item in line.split())
         if len(values) == channel_count:
             frames.append(values)
-    if len(frames) != declared_frames:
+    expected_frames = min(declared_frames, max_frames) if max_frames is not None else declared_frames
+    if len(frames) != expected_frames:
         raise ValueError("BVH frame count or channel width mismatch")
     return BVHMotion(
         joints=tuple(joints),

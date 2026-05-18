@@ -39,11 +39,16 @@ class ReviewClipExportTests(unittest.TestCase):
 
         self.assertEqual(result.exported_rows, 1)
         self.assertEqual(result.render_counts, {"not_requested": 1})
+        self.assertEqual(result.g1_capsule_render_counts, {"not_requested": 1})
         self.assertEqual(summary["sample_count"], 1)
         self.assertEqual(summary["render_status"], {"not_requested": 1})
+        self.assertEqual(summary["source_render_status"], {"not_requested": 1})
+        self.assertEqual(summary["g1_capsule_render_status"], {"not_requested": 1})
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["filename"], "good")
         self.assertEqual(rows[0]["render_status"], "not_requested")
+        self.assertEqual(rows[0]["source_render_status"], "not_requested")
+        self.assertEqual(rows[0]["g1_capsule_render_status"], "not_requested")
         self.assertEqual(rows[0]["review_family"], "pair_duration_mismatch")
         self.assertEqual(rows[0]["contact_slide_rate"], "0.25")
         self.assertEqual(metadata["quality_flags"], "pair_duration_mismatch")
@@ -53,8 +58,108 @@ class ReviewClipExportTests(unittest.TestCase):
         self.assertTrue(target_exists)
         self.assertIn("## Samples", readme)
         self.assertIn("pair_duration_mismatch", readme)
-        self.assertIn("| index | review_family | filename | action | render | metrics | video |", readme)
+        self.assertIn(
+            "| index | review_family | filename | action | source_render | g1_render | g1_capsule | metrics | source_video | g1_video | g1_capsule_video |",
+            readme,
+        )
         self.assertIn("contact_slide_rate=0.25", readme)
+
+    def test_export_review_clips_can_render_source_capsule_video(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_root = root / "data"
+            data_root.mkdir()
+            _write_source_tar(data_root / "soma_proportional.tar")
+            _write_g1_tar(data_root / "g1.tar")
+            review_csv = root / "review.csv"
+            _write_review_csv(review_csv)
+
+            result = export_review_clips(
+                data_root=data_root,
+                input_csv=review_csv,
+                output_root=root / "clips",
+                run_name="source_capsules",
+                label="review",
+                config=ReviewClipExportConfig(
+                    limit=1,
+                    render_source_capsules=True,
+                    render_max_frames=0,
+                    render_width=160,
+                    render_height=120,
+                    fps=30.0,
+                ),
+            )
+            rows = _read_csv(result.summary_csv)
+            metadata = json.loads(
+                (result.output_dir / "00_review_good" / "metadata.json").read_text(encoding="utf-8")
+            )
+            video_path = Path(metadata["source_bvh_capsule_video"])
+            video_exists = video_path.exists()
+            video_size = video_path.stat().st_size if video_exists else 0
+
+        self.assertEqual(result.source_render_counts, {"ok": 1})
+        self.assertEqual(rows[0]["source_render_status"], "ok")
+        self.assertTrue(video_exists)
+        self.assertGreater(video_size, 0)
+        self.assertEqual(metadata["source_render"]["frames"], 3)
+        self.assertIn("Chest->LeftArm", metadata["source_render"]["capsule_edge_pairs"])
+        self.assertIn("LeftArm->LeftHand", metadata["source_render"]["capsule_edge_pairs"])
+        self.assertNotIn("Chest->LeftHand", metadata["source_render"]["capsule_edge_pairs"])
+
+    def test_export_review_clips_can_render_g1_capsule_video(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_root = root / "data"
+            data_root.mkdir()
+            _write_source_tar(data_root / "soma_proportional.tar")
+            _write_g1_tar(data_root / "g1.tar")
+            model_xml = root / "g1_fixture.xml"
+            _write_g1_model_xml(model_xml)
+            review_csv = root / "review.csv"
+            _write_review_csv(review_csv)
+
+            result = export_review_clips(
+                data_root=data_root,
+                input_csv=review_csv,
+                output_root=root / "clips",
+                run_name="g1_capsules",
+                label="review",
+                config=ReviewClipExportConfig(
+                    limit=1,
+                    render_g1_capsules=True,
+                    model_xml=model_xml,
+                    render_max_frames=0,
+                    render_width=160,
+                    render_height=120,
+                    fps=30.0,
+                ),
+            )
+            rows = _read_csv(result.summary_csv)
+            metadata = json.loads(
+                (result.output_dir / "00_review_good" / "metadata.json").read_text(encoding="utf-8")
+            )
+            video_path = Path(metadata["target_g1_capsule_video"])
+            video_exists = video_path.exists()
+            video_size = video_path.stat().st_size if video_exists else 0
+
+        self.assertEqual(result.g1_capsule_render_counts, {"ok": 1})
+        self.assertEqual(rows[0]["g1_capsule_render_status"], "ok")
+        self.assertTrue(video_exists)
+        self.assertGreater(video_size, 0)
+        self.assertEqual(metadata["g1_capsule_render"]["frames"], 3)
+
+    def test_render_rejects_negative_max_frames(self):
+        with self.assertRaises(ValueError) as raised:
+            export_review_clips(
+                data_root=Path("/tmp"),
+                input_csv=Path("/tmp/missing.csv"),
+                output_root=Path("/tmp/out"),
+                run_name="bad",
+                label="review",
+                config=ReviewClipExportConfig(render_max_frames=-1),
+            )
+
+        self.assertIn("full length", str(raised.exception))
 
     def test_render_requires_model_xml(self):
         with self.assertRaises(ValueError) as raised:
@@ -65,6 +170,19 @@ class ReviewClipExportTests(unittest.TestCase):
                 run_name="bad",
                 label="review",
                 config=ReviewClipExportConfig(render_g1=True),
+            )
+
+        self.assertIn("model_xml", str(raised.exception))
+
+    def test_g1_capsule_render_requires_model_xml(self):
+        with self.assertRaises(ValueError) as raised:
+            export_review_clips(
+                data_root=Path("/tmp"),
+                input_csv=Path("/tmp/missing.csv"),
+                output_root=Path("/tmp/out"),
+                run_name="bad",
+                label="review",
+                config=ReviewClipExportConfig(render_g1_capsules=True),
             )
 
         self.assertIn("model_xml", str(raised.exception))
@@ -199,17 +317,72 @@ def _add_member(tar: tarfile.TarFile, name: str, text: str) -> None:
 
 def _bvh_text() -> str:
     return """HIERARCHY
-ROOT Root
+ROOT Hips
 {
   OFFSET 0.000000 0.000000 0.000000
   CHANNELS 6 Xposition Yposition Zposition Zrotation Yrotation Xrotation
+  JOINT Spine1
+  {
+    OFFSET 0.000000 30.000000 0.000000
+    CHANNELS 3 Zrotation Yrotation Xrotation
+    JOINT Chest
+    {
+      OFFSET 0.000000 30.000000 0.000000
+      CHANNELS 3 Zrotation Yrotation Xrotation
+      JOINT Head
+      {
+        OFFSET 0.000000 20.000000 0.000000
+        CHANNELS 3 Zrotation Yrotation Xrotation
+      }
+      JOINT LeftArm
+      {
+        OFFSET -20.000000 5.000000 0.000000
+        CHANNELS 3 Zrotation Yrotation Xrotation
+        JOINT LeftHand
+        {
+          OFFSET -25.000000 0.000000 0.000000
+          CHANNELS 3 Zrotation Yrotation Xrotation
+        }
+      }
+      JOINT RightArm
+      {
+        OFFSET 20.000000 5.000000 0.000000
+        CHANNELS 3 Zrotation Yrotation Xrotation
+        JOINT RightHand
+        {
+          OFFSET 25.000000 0.000000 0.000000
+          CHANNELS 3 Zrotation Yrotation Xrotation
+        }
+      }
+    }
+  }
+  JOINT LeftLeg
+  {
+    OFFSET -10.000000 -40.000000 0.000000
+    CHANNELS 3 Zrotation Yrotation Xrotation
+    JOINT LeftFoot
+    {
+      OFFSET 0.000000 -35.000000 10.000000
+      CHANNELS 3 Zrotation Yrotation Xrotation
+    }
+  }
+  JOINT RightLeg
+  {
+    OFFSET 10.000000 -40.000000 0.000000
+    CHANNELS 3 Zrotation Yrotation Xrotation
+    JOINT RightFoot
+    {
+      OFFSET 0.000000 -35.000000 10.000000
+      CHANNELS 3 Zrotation Yrotation Xrotation
+    }
+  }
 }
 MOTION
 Frames: 3
 Frame Time: 0.03333333333333333
-0.0 0.0 0.0 0.0 0.0 0.0
-0.0 0.0 0.0 0.0 0.0 0.0
-0.0 0.0 0.0 0.0 0.0 0.0
+0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0
+5.0 0.0 0.0 0.0 0.0 5.0 0.0 0.0 0.0 0.0 0.0 8.0 0.0 0.0 0.0 20.0 0.0 0.0 -15.0 0.0 0.0 -20.0 0.0 0.0 15.0 0.0 0.0 20.0 0.0 0.0 -10.0 0.0 0.0 10.0 0.0 0.0 0.0 0.0 0.0
+10.0 0.0 0.0 0.0 0.0 10.0 0.0 0.0 0.0 0.0 0.0 16.0 0.0 0.0 0.0 30.0 0.0 0.0 -25.0 0.0 0.0 -30.0 0.0 0.0 25.0 0.0 0.0 30.0 0.0 0.0 -20.0 0.0 0.0 20.0 0.0 0.0 0.0 0.0 0.0
 """
 
 
@@ -222,6 +395,38 @@ def _g1_csv() -> str:
         row["Frame"] = str(frame)
         writer.writerow(row)
     return output.getvalue()
+
+
+def _write_g1_model_xml(path: Path) -> None:
+    path.write_text(
+        """<mujoco>
+  <worldbody>
+    <body name="pelvis" pos="0 0 0">
+      <freejoint/>
+      <geom type="sphere" size="0.04" pos="0 0 0"/>
+      <body name="left_ankle_roll_link" pos="-0.12 0 -0.45">
+        <joint name="left_ankle_roll_joint" axis="0 0 1" range="-1 1"/>
+        <geom type="sphere" size="0.03" pos="0 0 0"/>
+        <body name="left_toe_link" pos="0.10 0.06 -0.02">
+          <geom type="sphere" size="0.02" pos="0 0 0"/>
+        </body>
+      </body>
+      <body name="right_ankle_roll_link" pos="0.12 0 -0.45">
+        <joint name="right_ankle_roll_joint" axis="0 0 1" range="-1 1"/>
+        <geom type="sphere" size="0.03" pos="0 0 0"/>
+        <body name="right_toe_link" pos="0.10 -0.06 -0.02">
+          <geom type="sphere" size="0.02" pos="0 0 0"/>
+        </body>
+      </body>
+      <body name="torso_link" pos="0 0 0.45">
+        <geom type="sphere" size="0.04" pos="0 0 0"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>
+""",
+        encoding="utf-8",
+    )
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:

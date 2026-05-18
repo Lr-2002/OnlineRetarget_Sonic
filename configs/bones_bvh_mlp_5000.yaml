@@ -1,5 +1,5 @@
 experiment:
-  name: bones_bvh_mlp_debug
+  name: bones_bvh_mlp_5000traj_4090
   project: online-retarget
   seed: 17
   output_root: runs
@@ -7,33 +7,38 @@ experiment:
 data:
   root: /home/user/data/motion_data
   index_csv: runs/indices/bones_sonic_index_full_v0/sonic_index.csv
-  samples_jsonl: runs/supervised/somabvh_walk_train_h8_stride10_limit128/samples.jsonl
+  train_samples_jsonl: runs/supervised/somabvh_task_train_h8_stride10_limit5000/samples.jsonl
+  val_samples_jsonl: runs/supervised/somabvh_task_val_h8_stride10_limit1000/samples.jsonl
+  samples_jsonl: runs/supervised/somabvh_task_train_h8_stride10_limit5000/samples.jsonl
   allow_debug_data: true
   source_format: soma_proportional_bvh_fk
   target_format: bones_sonic_joint_pos
+  split_group_by: actor_uid
+  task_query: ""
   history_frames: 8
   source_body_count: 30
-  task: walk
+  window_stride: 10
+  max_windows_per_clip: 1
 
 model:
   family: temporal_mlp
-  hidden_dims: [512, 512, 256]
+  hidden_dims: [2048, 2048, 1024, 512]
   activation: silu
-  dropout: 0.0
+  dropout: 0.02
   output: g1_joint_position
-  temporal_context: history_window
+  temporal_context: flattened_history_window
 
 loss:
   l1: 1.0
 
 train:
-  batch_size: 256
-  max_steps: 200
+  batch_size: 4096
+  max_steps: 250000
   learning_rate: 0.0003
   precision: fp32
   ddp: true
-  log_every: 20
-  eval_every: 200
+  log_every: 100
+  eval_every: 0
 
 evaluation:
   metrics:
@@ -48,8 +53,16 @@ evaluation:
     - predicted_minus_target_joint_jump_rate
   failure_metric: joint_rmse
   joint_jump_velocity: 20.0
-  max_failures: 50
+  max_failures: 100
 
 tracking:
-  wandb_mode: disabled
+  wandb_mode: offline
   auto_offline_eval: true
+
+run:
+  dry_run: false
+  allow_debug_data: true
+  output_dir: ""
+  predict_only: false
+  checkpoint: ""
+  limit: 1

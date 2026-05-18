@@ -1,5 +1,15 @@
 """Data inventory and loading helpers."""
 
+from .bones_sonic import (
+    SONIC_BODY_NAMES,
+    SONIC_JOINT_NAMES,
+    SONIC_ORDER_NOTE,
+    SONIC_REQUIRED_KEYS,
+    NpyHeader,
+    SonicIndexResult,
+    build_sonic_index,
+    inspect_sonic_npz,
+)
 from .bones_seed import (
     G1_CSV_COLUMNS,
     G1_JOINT_COLUMNS,
@@ -34,6 +44,13 @@ from .quality_review_exports import (
     BalancedReviewExportResult,
     export_balanced_quality_review_csv,
 )
+from .quality_readiness import (
+    DEFAULT_REQUIRED_LANES,
+    QualityLaneInput,
+    QualityLaneStatus,
+    QualityReadinessResult,
+    check_quality_lane_readiness,
+)
 from .quality_summary import (
     QualitySummaryResult,
     summarize_quality_jsonl,
@@ -52,6 +69,21 @@ from .review_clips import (
     export_review_clips,
 )
 from .row_sampling import scan_sampling_report, select_rows_for_scan
+from .sonic_quality import (
+    SonicQualityConfig,
+    SonicQualityScanResult,
+    scan_sonic_quality_from_index,
+)
+from .sonic_review_clips import (
+    SonicReviewClipExportConfig,
+    SonicReviewClipExportResult,
+    export_sonic_review_clips,
+)
+from .sonic_windowed_builder import (
+    SonicWindowedBuildConfig,
+    SonicWindowedBuildResult,
+    build_sonic_windowed_jsonl,
+)
 from .schema import (
     MORPHOLOGY_NUMERIC_COLUMNS,
     MotionPairRef,
@@ -109,10 +141,14 @@ __all__ = [
     "CurationPolicyAuditConfig",
     "CurationPolicyAuditResult",
     "CurationPolicyPreflightResult",
+    "DEFAULT_REQUIRED_LANES",
     "InventorySummary",
+    "QualityLaneInput",
+    "QualityLaneStatus",
     "QualityDecision",
     "QualityMergeResult",
     "QualityPolicy",
+    "QualityReadinessResult",
     "QualitySummaryResult",
     "QualityThreshold",
     "ReviewDecisionMergeResult",
@@ -120,16 +156,31 @@ __all__ = [
     "ReviewClipExportConfig",
     "ReviewClipExportResult",
     "ReviewManifestResult",
+    "SONIC_BODY_NAMES",
+    "SONIC_JOINT_NAMES",
+    "SONIC_ORDER_NOTE",
+    "SONIC_REQUIRED_KEYS",
+    "NpyHeader",
+    "SonicIndexResult",
+    "SonicQualityConfig",
+    "SonicQualityScanResult",
+    "SonicReviewClipExportConfig",
+    "SonicReviewClipExportResult",
+    "SonicWindowedBuildConfig",
+    "SonicWindowedBuildResult",
     "SplitConfig",
     "SplitIndexResult",
     "assess_row_quality",
     "actor_skeletons",
     "audit_curation_policy",
     "build_split_index",
+    "build_sonic_index",
     "build_review_decision_template",
     "build_review_manifest",
+    "build_sonic_windowed_jsonl",
     "build_supervised_jsonl",
     "build_windowed_jsonl",
+    "check_quality_lane_readiness",
     "iter_motion_pair_refs",
     "merge_quality_stats",
     "merge_review_decisions",
@@ -140,14 +191,17 @@ __all__ = [
     "export_balanced_quality_review_csv",
     "preflight_curation_policy",
     "export_review_clips",
+    "export_sonic_review_clips",
     "scan_bvh_quality_from_index",
     "scan_g1_quality_from_index",
     "scan_pair_quality_from_index",
     "scan_sampling_report",
+    "scan_sonic_quality_from_index",
     "scan_source_fk_quality_from_index",
     "select_rows_for_scan",
     "summarize_metadata",
     "summarize_quality_jsonl",
+    "inspect_sonic_npz",
     "write_threshold_proposals",
     "write_accepted_threshold_policy",
 ]

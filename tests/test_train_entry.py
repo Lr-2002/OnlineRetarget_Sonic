@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import scripts.train as train_entry
 
@@ -41,6 +42,9 @@ class TrainEntryTests(unittest.TestCase):
                         "category": "Baseline",
                         "package": "Locomotion",
                         "quality_flags": ["source_foot_slide"],
+                        "fps": 50.0,
+                        "target_frame": 17,
+                        "target_g1_path": "bones_sonic/clip.npz",
                         "target_joints": [0.0, 1.0],
                     }
                 ],
@@ -52,6 +56,9 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(payload["predicted_joints"], [[0.5, 1.5]])
         self.assertEqual(payload["target_joints"], [[0.0, 1.0]])
         self.assertEqual(payload["quality_flags"], ["source_foot_slide"])
+        self.assertEqual(payload["fps"], 50.0)
+        self.assertEqual(payload["target_frame"], 17)
+        self.assertEqual(payload["sequence_id"], "bones_sonic/clip.npz")
 
     def test_wandb_disabled_by_default(self):
         run = train_entry._init_wandb(
@@ -84,6 +91,7 @@ class TrainEntryTests(unittest.TestCase):
             rank=0,
             final_train_mse=0.1,
             wandb_summary={"enabled": False},
+            resume_checkpoint="runs/train/prev/checkpoint.pt",
         )
 
         self.assertEqual(report["predictions_jsonl"], "runs/train/run/train_predictions.jsonl")
@@ -92,6 +100,7 @@ class TrainEntryTests(unittest.TestCase):
             "runs/train/run/eval/train_offline_eval/eval_summary.json",
         )
         self.assertEqual(report["quality_gate"]["policy_id"], "policy")
+        self.assertEqual(report["resume_checkpoint"], "runs/train/prev/checkpoint.pt")
         self.assertFalse(report["wandb"]["enabled"])
 
     def test_quality_gate_blocks_formal_training_without_policy(self):
@@ -305,6 +314,21 @@ class TrainEntryTests(unittest.TestCase):
 
         train_entry._validate_quality_gate(context)
 
+    def test_supervised_loss_uses_explicit_l1_without_implicit_mse(self):
+        prediction = _FakeTensor()
+        target = object()
+        calls = []
+        torch = mock.Mock()
+        torch.nn.functional.l1_loss.side_effect = lambda pred, tgt: calls.append("l1") or _FakeTensor()
+        torch.nn.functional.mse_loss.side_effect = lambda pred, tgt: calls.append("mse") or _FakeTensor()
+        torch.nn.functional.smooth_l1_loss.side_effect = (
+            lambda pred, tgt: calls.append("smooth_l1") or _FakeTensor()
+        )
+
+        train_entry._supervised_loss(torch, prediction, target, {"loss": {"l1": 1.0}})
+
+        self.assertEqual(calls, ["l1"])
+
 
 def _write_policy_audit(
     path: Path,
@@ -325,6 +349,23 @@ def _write_policy_audit(
         + "\n",
         encoding="utf-8",
     )
+
+
+class _FakeTensor:
+    def new_tensor(self, value):
+        return self
+
+    def __add__(self, other):
+        return self
+
+    def __radd__(self, other):
+        return self
+
+    def __mul__(self, other):
+        return self
+
+    def __rmul__(self, other):
+        return self
 
 
 if __name__ == "__main__":

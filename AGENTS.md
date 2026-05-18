@@ -18,6 +18,21 @@ This repository targets a learning-based online retargeter from heterogeneous hu
 - First metrics: MPJPE/body position error, G1 joint RMSE, action similarity, joint jump rate, joint limit violation rate, and downstream tracking success once Isaac Lab integration exists.
 - Latent/VAE, flow matching, and diffusion are research branches, not the baseline path, unless evaluation shows the compact direct model is insufficient.
 
+## Web Retargeting / GMR / MuJoCo Lessons
+
+- Validate the real end-to-end path before claiming success: upload input (`BVH` or `SMPL`) -> GMR retarget -> Unitree G1 qpos -> MuJoCo `Renderer` -> MP4. Do not rely on frontend point previews as proof of retarget or render correctness.
+- Never use mock data or mock environments for user-facing retarget validation. Use the real local virtual environment, real GMR install, real G1 MJCF, real MuJoCo renderer, and the user's actual motion file.
+- Preserve source frame count in the Web/API path. For BVH, process and render exactly the number of source frames by default; do not silently cap to 120 or any other debug limit.
+- Preserve source timing as well as frame count. Read BVH `Frame Time` and encode the MuJoCo video at the corresponding FPS when feasible, so a 120 FPS motion does not become a slow 60 FPS video.
+- Do not silently hide GMR failures behind a fallback. Reports must expose `selected_retargeter`, `src_human`, GMR status/details when relevant, `render_backend`, and whether the video was rendered by MuJoCo.
+- Detect BVH source kind from skeleton joints, not just filename. For example, `LeftToeBase`/`RightToeBase` indicate the Nokov-style GMR BVH path even when the filename does not include `nokov`.
+- For G1 ground/foot checks, use actual MuJoCo foot geoms and mesh vertices under the foot/ankle subtree. Do not infer foot contact from ankle or toe body centers; the G1 toe bodies may have no geoms.
+- Keep retarget output and visualization correction separate. Ground alignment or root locking used for MuJoCo playback should not rewrite the raw GMR CSV unless that is explicitly requested.
+- Avoid per-frame hard foot grounding for jogging/running motions. It can inject visible vertical jitter by pulling root Z up and down every frame. Prefer a sequence-level ground calibration for visualization, allowing natural flight phases.
+- For kinematic playback of retargeted qpos in MuJoCo, set qpos and call `mj_forward` for validation/rendering. Do not add uncontrolled `mj_step` unless a real controller/physics rollout is part of the task.
+- Quantify visual fixes with evidence: `load_frames`, `retarget_frames`, rendered frame count, `changed_frames`, `ffprobe` FPS/duration/frame count, foot geom min/max/mean height, and root-Z offset jump metrics.
+- Keep debug-only controls out of the product path when they conflict with expected behavior. Internal test hooks may cap frames, but user-facing Web/API uploads should follow the source data by default.
+
 ## Documentation Discipline
 
 - Update `docs/research/literature_review.md` when new papers materially change architecture or evaluation choices.

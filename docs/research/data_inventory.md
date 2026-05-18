@@ -2,9 +2,31 @@
 
 Scan date: 2026-05-13.
 
+Correction on 2026-05-15: the current SONIC lane must use `/home/user/data/motion_data/bones_sonic` as the target data source. Earlier `soma_proportional.tar + g1.tar` archive scans remain legacy BONES-SEED evidence and must not be used as SONIC quality or video evidence. See `docs/status/sonic_data_source.md`.
+
 Local data root: `/home/user/data/motion_data`.
 
 Rule: this path is read-only. Do not unpack archives, write caches, or create derived datasets under this directory.
+
+## SMPL-Family Availability
+
+AMASS in its original release is a SMPL-family motion dataset: the official AMASS project describes MoSh++ fitting mocap into a common rigged body-model parameterization, and the AMASS loader documents SMPL+H with compatibility to SMPL and SMPL-X.
+
+That is not what the local `/home/user/data/motion_data/AMASS/GMR_retarget_data` directory contains. Local scans found G1/robot-retargeted schemas there, not raw AMASS SMPL/SMPL-H/SMPL-X motion parameters. In particular, the observed local files do not expose NMR-style human input keys such as `trans`, `root_orient`, `pose_body`, `transl`, `global_orient`, or `body_pose`.
+
+The official BONES-SEED public dataset is also not distributed as SMPL/SMPL-X motion parameters. Its documented release formats are:
+
+- SOMA Uniform BVH
+- SOMA Proportional BVH plus actor shape metadata
+- Unitree G1 MuJoCo-compatible trajectories
+
+Public documentation from BONES/Hugging Face and NVIDIA Kimodo describes BONES-SEED as SOMA/G1 data, including SOMA 77-joint BVH. This means official NMR-on-BONES still requires an adapter:
+
+```text
+BONES SOMA BVH + SOMA actor shape metadata -> SMPL-X/AMASS-style npz -> NMR
+```
+
+Search note, 2026-05-18: a third-party Hugging Face dataset `zirobtc/bone` appears to contain a `bones-seed-smplx.tar.gz` WebDataset with visible `betas`-like fields. It has no dataset card and is not the official `bones-studio/seed` release, so it must be treated as unverified provenance until we inspect samples, keys, frame alignment, license compatibility, and correspondence to official BONES metadata/G1 targets.
 
 ## Top-Level Layout
 
@@ -78,6 +100,8 @@ Top categories:
 
 Use `actor_uid` as the first skeleton/person grouping key. The initial learning and curation path must use BONES-SEED `soma_proportional`, not `soma_uniform`: `move_soma_proportional_path` points into `soma_proportional.tar`, and `move_soma_proportional_shape_path` points to a per-actor shape under `soma_shapes/soma_proportion_fit_mhr_params/`. The `soma_uniform` path uses the shared `soma_base_fit_mhr_params.npz` standard skeleton and should only be used later as an ablation, not as the main heterogeneous-skeleton input.
 
+Current learning target definition: **SOMA proportional -> G1**. Source samples must be built from `move_soma_proportional_path` and actor morphology/shape metadata; target samples must be built from the matched G1 target lane, currently `bones_sonic` NPZ files joined from metadata. `SOMA uniform`, AMASS/GMR retargeted NPZ, and G1 body-state reconstruction are not valid substitutes for this main mapping unless the experiment is explicitly labeled as an ablation/debug lane.
+
 Each actor has one proportional shape path, and metadata includes morphology dimensions:
 
 - height
@@ -90,6 +114,35 @@ Each actor has one proportional shape path, and metadata includes morphology dim
 - knee height
 - ankle height
 - weight, age, gender
+
+Raw shape files under `soma_shapes/soma_proportion_fit_mhr_params/{actor_id}.npz`
+provide a richer per-actor SOMA shape parameterization. A spot check of actors
+such as `A001`, `A002`, `A548`, and `A551` found these keys:
+
+- `identity_params`: `(1, 45)` float32
+- `scale_params`: `(1, 68)` float32
+- `pose_params`: `(1, 136)` float32
+- `face_expr_params`: `(1, 72)` float32, currently all zeros in checked files
+
+The local directory has 529 proportional shape files, while metadata references
+522 actor shape paths; all 522 referenced paths exist. The extra local shape
+files are not referenced by `seed_metadata_v003.csv` and should not be sampled
+unless a later provenance check explains them.
+
+The SOMA BVH skeleton topology is stable across base and proportional samples:
+the checked base rig and `A001` proportional sample both expose 78 named joints.
+The heterogeneity comes from per-actor offsets/limb lengths and per-actor shape
+parameters, not from a different joint-name topology. For example, the checked
+`A001` proportional sample has shorter arm/leg offsets than the base rig, while
+preserving names such as `Hips`, `Spine1`, `Chest`, `LeftArm`, `LeftForeArm`,
+`LeftHand`, `LeftLeg`, `LeftShin`, `LeftFoot`, and `LeftToeBase`.
+
+Current trainable samples use a reduced 30-body source subset from SOMA BVH FK,
+not all 78 joints. That subset keeps trunk, neck/head, arms, legs, toes, and a
+few first finger joints; it does not include face/eye/jaw/end-site clutter. The
+current morphology side channel uses the 11 metadata measurements plus weight
+and age, for 13 numeric dimensions. It does not yet consume the raw 45/68/136
+SOMA shape parameters.
 
 First split policy: split by `actor_uid`, not by clip, to measure cross-person/cross-skeleton generalization.
 
@@ -135,7 +188,7 @@ Sample CSV header has 36 columns:
   - `right_wrist_pitch_joint_dof`
   - `right_wrist_yaw_joint_dof`
 
-### Existing G1 NPZ Targets
+### BONES-SONIC NPZ Targets
 
 `bones_sonic` contains 142,220 `npz` files. Sample files contain:
 
@@ -149,7 +202,19 @@ Sample CSV header has 36 columns:
 
 `AMASS/GMR_retarget_data` contains 25,379 `npz` files with the same observed key schema.
 
-These `npz` targets are useful for first offline supervised learning because they already include body-space physical state features. The open question is whether they are canonical BONES-SEED outputs, GMR outputs, or a downstream processed version; do not assume provenance without tracing filenames and scripts.
+These `npz` targets are the active SONIC target lane. The full read-only index at `runs/indices/bones_sonic_index_full_v0` found 142,220 files, 142,220 metadata matches, 522 actors, 71,088 mirrored files, all at 50 Hz, and all with schema status `ok`.
+
+The `joint_pos` and `body_pos_w` arrays use SONIC/IsaacLab G1 order, not legacy G1 CSV/MJCF pre-order. See `docs/status/sonic_skeleton_semantics.md` for the FK verification and canonical index examples.
+
+Metadata provenance is joined by converting each metadata `move_g1_path`:
+
+```text
+g1/csv/<date>/<name>.csv -> bones_sonic/<date>/<name>.npz
+```
+
+The legacy G1 CSV path is retained only as provenance in the SONIC index. New SONIC quality scans, review videos, and supervised target extraction must read the NPZ tensors directly.
+
+`AMASS/GMR_retarget_data` contains 25,379 `npz` files with the same observed key schema. That path is not the current SONIC lane.
 
 ## Reproducible Inventory Command
 

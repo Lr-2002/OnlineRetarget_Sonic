@@ -6,7 +6,11 @@ from online_retarget.metrics import (
     contact_artifact_metrics,
     joint_jump_rate,
     joint_limit_violation_rate,
+    joint_mae,
+    joint_mse,
     joint_rmse,
+    joint_velocity_rmse,
+    max_joint_abs_error,
     mpjpe,
 )
 
@@ -20,12 +24,32 @@ class MetricTests(unittest.TestCase):
     def test_joint_rmse(self):
         self.assertTrue(math.isclose(joint_rmse([[1.0, 3.0]], [[1.0, 1.0]]), math.sqrt(2.0)))
 
+    def test_joint_loss_metrics(self):
+        predicted = [[1.0, 3.0], [2.0, -1.0]]
+        target = [[0.0, 1.0], [2.5, 1.0]]
+
+        self.assertEqual(joint_mae(predicted, target), 1.375)
+        self.assertEqual(joint_mse(predicted, target), 2.3125)
+        self.assertEqual(max_joint_abs_error(predicted, target), 2.0)
+
+    def test_joint_velocity_rmse(self):
+        predicted = [[0.0, 0.0], [0.2, 0.0]]
+        target = [[0.0, 0.0], [0.0, 0.1]]
+
+        self.assertTrue(math.isclose(joint_velocity_rmse(predicted, target, fps=10.0), 1.5811388300841898))
+
+    def test_joint_velocity_rmse_single_frame_is_zero(self):
+        self.assertEqual(joint_velocity_rmse([[0.0, 0.0]], [[1.0, 1.0]], fps=10.0), 0.0)
+
     def test_action_similarity(self):
         self.assertEqual(action_similarity([[1.0, 0.0], [0.0, 0.0]], [[1.0, 0.0], [0.0, 0.0]]), 1.0)
 
     def test_joint_jump_rate(self):
         positions = [[0.0, 0.0], [0.2, 0.01]]
         self.assertEqual(joint_jump_rate(positions, fps=10.0, max_velocity=1.0), 0.5)
+
+    def test_joint_jump_rate_single_frame_is_zero(self):
+        self.assertEqual(joint_jump_rate([[0.0, 0.0]], fps=10.0, max_velocity=1.0), 0.0)
 
     def test_joint_limit_violation_rate(self):
         positions = [[0.0, 2.0], [-2.0, 0.0]]
