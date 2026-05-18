@@ -208,3 +208,59 @@ Remote smoke metrics:
 The remote smoke still uses debug samples and two optimization steps. It verifies
 the environment, DDP, WandB logging path, and eval plumbing; it is not a model
 quality result.
+
+## Remote 20-Step Debug Run
+
+After the smoke checks, a slightly longer debug run was executed on the same
+remote host. This is still not a formal training result because it uses
+`--allow-debug-data`, but it is a better sanity check than the 2-step smoke.
+
+VAE debug command:
+
+```bash
+WANDB_SILENT=true PYTHONPATH=src:. python scripts/pretrain_token_vaes.py \
+  --config configs/bones_bvh_token_vae_debug.yaml \
+  --allow-debug-data \
+  --wandb-mode online \
+  --output-dir runs/pretrain/bones_bvh_token_vae_remote_debug20 \
+  --max-steps 20 \
+  --batch-size 256
+```
+
+Transformer debug command:
+
+```bash
+WANDB_SILENT=true PYTHONPATH=src:. torchrun --standalone --nproc_per_node=8 \
+  scripts/train.py \
+  --config configs/bones_bvh_token_transformer_debug.yaml \
+  --allow-debug-data \
+  --wandb-mode online \
+  --output-dir runs/train/bones_bvh_token_transformer_remote_8gpu_debug20 \
+  --max-steps 20 \
+  --batch-size 256
+
+PYTHONPATH=src:. python scripts/train.py \
+  --config configs/bones_bvh_token_transformer_debug.yaml \
+  --allow-debug-data \
+  --predict-only \
+  --checkpoint runs/train/bones_bvh_token_transformer_remote_8gpu_debug20/checkpoint.pt \
+  --samples-jsonl runs/supervised/somabvh_task_val_h8_stride10_limit1000/samples.jsonl \
+  --output-dir runs/eval/bones_bvh_token_transformer_remote_8gpu_debug20_val_predict
+```
+
+20-step debug artifacts and metrics:
+
+| Run | Evidence |
+| --- | --- |
+| VAE debug20 | `runs/pretrain/bones_bvh_token_vae_remote_debug20/pretrain_report.json`, WandB run id `7q0y54pe` |
+| VAE skeleton | final reconstruction MSE `0.0005726575618609786` |
+| VAE motion | final reconstruction MSE `0.8236638903617859` |
+| VAE action | final reconstruction MSE `0.9001629948616028` |
+| Transformer debug20 train | `runs/train/bones_bvh_token_transformer_remote_8gpu_debug20/train_report.json`, `world_size=8`, WandB run id `jy8iwi4d` |
+| Transformer debug20 train metrics | train joint RMSE `0.2169950214829504`, action similarity `0.8785401649227097` |
+| Transformer debug20 val | `runs/eval/bones_bvh_token_transformer_remote_8gpu_debug20_val_predict/predict_report.json` |
+| Transformer debug20 val metrics | val joint RMSE `0.24261821616915846`, action similarity `0.8313662842096382` |
+
+These 20-step metrics show the pipeline can learn on the debug split. They should
+not be compared to the MLP baseline as a final result until the dataset gate,
+longer training schedule, rollout eval, FK-MPJPE, and latency benchmark are run.
