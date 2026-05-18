@@ -1,0 +1,140 @@
+title: BONES Sonic TXT Filtered Training Pipeline
+summary: >
+  Current online retargeting baseline pipeline for soma_proportional BVH source
+  motion to Unitree G1 joint positions using a tokenized transformer.
+nodes:
+  - id: bones_sonic_txt
+    type: dataset_filter
+    label: bones_sonic/data.txt
+    summary: 112,723 filtered SONIC/BONES paths from collaborator-provided txt.
+  - id: curated_index
+    type: data_artifact
+    label: curated_index.csv
+    ports:
+      output:
+        shape: 112723 rows
+        dtype: csv
+    summary: Actor split plus merged quality action; train/val/test are kept traceable.
+  - id: windowed_builder
+    type: data_builder
+    label: bvh_fk_30body_window
+    summary: Parses SOMA proportional BVH, computes FK body positions/velocities, joins G1 CSV targets.
+  - id: train_jsonl
+    type: training_data
+    label: train samples.jsonl
+    ports:
+      observation:
+        shape: 87393 x 1547
+        dtype: float32 JSON arrays
+      target:
+        shape: 87393 x 29
+        dtype: float32 JSON arrays
+    summary: Derived supervised train data, read-only source data is untouched.
+  - id: finite_filter
+    type: runtime_guard
+    label: finite sample filter
+    summary: Drops NaN/Inf observation, target, or previous-state rows before optimization.
+    evidence: dropped 7 observation_nonfinite rows; trained on 87,386 samples.
+  - id: motion_encoder
+    type: encoder
+    label: motion MLP encoder
+    ports:
+      input:
+        shape: B x source_feature_dim
+        dtype: float32
+      output:
+        shape: B x 128
+        dtype: float32
+  - id: skeleton_encoder
+    type: encoder
+    label: skeleton/morphology MLP encoder
+    ports:
+      input:
+        shape: B x morphology_dim
+        dtype: float32
+      output:
+        shape: B x 128
+        dtype: float32
+  - id: state_encoder
+    type: encoder
+    label: previous G1 state encoder
+    ports:
+      input:
+        shape: B x 29
+        dtype: float32
+      output:
+        shape: B x 128
+        dtype: float32
+  - id: transformer_memory
+    type: transformer_encoder
+    label: memory encoder
+    summary: Encodes skeleton and motion tokens.
+  - id: query_decoder
+    type: transformer_decoder
+    label: next-frame query decoder
+    summary: Learned query token plus previous-state token attends to encoded memory.
+  - id: g1_head
+    type: decoder
+    label: G1 pose head
+    ports:
+      output:
+        shape: B x 29
+        dtype: float32
+  - id: losses
+    type: objective
+    label: training losses
+    formula: L = L1(q_pred, q_g1) + 0.05 L_skel_rec + 0.01 L_motion_rec + 0.05 L_state_rec
+  - id: eval
+    type: evaluation
+    label: offline JSONL eval
+    summary: joint MAE/MSE/RMSE, max joint error, action similarity, jump rates; MPJPE/contact only when body positions are present.
+edges:
+  - from: bones_sonic_txt
+    to: curated_index
+    label: stem-matched filtered paths
+  - from: curated_index
+    to: windowed_builder
+    label: train split keep/downweight rows
+  - from: windowed_builder
+    to: train_jsonl
+    label: supervised windows
+  - from: train_jsonl
+    to: finite_filter
+    label: tensorize and finite-mask
+  - from: finite_filter
+    to: motion_encoder
+    label: source motion window
+  - from: finite_filter
+    to: skeleton_encoder
+    label: actor morphology
+  - from: finite_filter
+    to: state_encoder
+    label: prev_target_joints
+  - from: motion_encoder
+    to: transformer_memory
+    label: motion token
+  - from: skeleton_encoder
+    to: transformer_memory
+    label: skeleton token
+  - from: state_encoder
+    to: query_decoder
+    label: previous-state token
+  - from: transformer_memory
+    to: query_decoder
+    label: cross-attended memory
+  - from: query_decoder
+    to: g1_head
+    label: next-frame latent
+  - from: g1_head
+    to: losses
+    label: q_pred
+  - from: g1_head
+    to: eval
+    label: train_predictions.jsonl
+evidence:
+  git_sha: 4db2e51b2cb64f5d55efde127d8598d703f1c24c
+  world_size: 8
+  wandb_project: online-retarget
+  wandb_run_id: vua8pqzo
+  final_train_mse: 13.984659194946289
+  train_joint_rmse: 2.2011191881506864
