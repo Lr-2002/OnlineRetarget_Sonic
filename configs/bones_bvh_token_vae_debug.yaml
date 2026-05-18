@@ -1,0 +1,45 @@
+experiment:
+  name: bones_bvh_token_vae_debug
+  project: online-retarget
+  seed: 17
+  output_root: runs
+
+data:
+  root: /home/user/data/motion_data
+  index_csv: runs/indices/bones_sonic_index_full_v0/sonic_index.csv
+  samples_jsonl: runs/supervised/somabvh_task_train_h8_stride10_limit5000/samples.jsonl
+  allow_debug_data: true
+  source_format: soma_proportional_bvh_fk
+  target_format: bones_sonic_joint_pos
+  history_frames: 8
+  source_body_count: 30
+  task: token_vae_debug
+
+model:
+  family: token_vae
+  latent_dim: 128
+  hidden_dims: [256, 256]
+  activation: gelu
+  dropout: 0.0
+
+pretrain:
+  components:
+    - skeleton
+    - motion
+    - action
+
+train:
+  batch_size: 256
+  max_steps: 20
+  learning_rate: 0.0003
+  weight_decay: 0.0
+  kl_beta: 0.0001
+  std_epsilon: 0.000001
+  log_every: 5
+
+tracking:
+  wandb_mode: disabled
+
+run:
+  allow_debug_data: true
+  output_dir: ""

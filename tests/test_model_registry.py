@@ -2,6 +2,7 @@ import unittest
 
 from online_retarget.data.schema import ObservationSpec
 from online_retarget.models.registry import build_model
+from online_retarget.models.token_vae import MLPTokenVAE, vae_loss
 
 
 class ModelRegistryTests(unittest.TestCase):
@@ -48,6 +49,25 @@ class ModelRegistryTests(unittest.TestCase):
             else:
                 y = built.model(x)
             self.assertEqual(tuple(y.shape), (4, output_dim))
+
+    def test_token_vae_forward_and_loss(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+        model = MLPTokenVAE(input_dim=5, latent_dim=3, hidden_dims=(7,))
+        x = torch.zeros(4, 5)
+
+        reconstruction, mu, logvar, latent = model(x, sample=False)
+        loss, reconstruction_mse, kl = vae_loss(reconstruction, x, mu, logvar, beta=1.0e-4)
+
+        self.assertEqual(tuple(reconstruction.shape), (4, 5))
+        self.assertEqual(tuple(mu.shape), (4, 3))
+        self.assertEqual(tuple(logvar.shape), (4, 3))
+        self.assertEqual(tuple(latent.shape), (4, 3))
+        self.assertEqual(tuple(loss.shape), ())
+        self.assertEqual(tuple(reconstruction_mse.shape), ())
+        self.assertEqual(tuple(kl.shape), ())
 
 
 if __name__ == "__main__":

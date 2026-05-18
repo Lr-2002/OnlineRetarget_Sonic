@@ -42,6 +42,10 @@ def main() -> None:
     )
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument(
+        "--wandb-mode",
+        help="Override tracking.wandb_mode, e.g. disabled, offline, or online.",
+    )
     parser.add_argument("--limit", type=int, default=1)
     parser.add_argument(
         "--predict-only",
@@ -54,7 +58,7 @@ def main() -> None:
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     git_sha = _git_sha()
-    config = _load_config(args.config)
+    config = _apply_wandb_mode_override(_load_config(args.config), args.wandb_mode)
     index_csv = args.index_csv or _nested_get(config, ("data", "index_csv"), None)
     samples_jsonl = args.samples_jsonl or _nested_get(config, ("data", "samples_jsonl"), None)
     sample_manifest = _load_sample_manifest(Path(samples_jsonl) if samples_jsonl else None)
@@ -203,6 +207,17 @@ def _nested_get(mapping: dict[str, Any], path: tuple[str, ...], default: Any) ->
             return default
         current = current[key]
     return current
+
+
+def _apply_wandb_mode_override(config: dict[str, Any], wandb_mode: str | None) -> dict[str, Any]:
+    if not wandb_mode:
+        return config
+    updated = dict(config)
+    tracking = updated.get("tracking", {})
+    tracking = dict(tracking) if isinstance(tracking, dict) else {}
+    tracking["wandb_mode"] = wandb_mode
+    updated["tracking"] = tracking
+    return updated
 
 
 def _quality_gate_context(
@@ -885,6 +900,10 @@ def _predict_jsonl(
     model.eval()
     x = torch.tensor([sample["observation"] for sample in samples], dtype=torch.float32)
     y = torch.tensor([sample["target_joints"] for sample in samples], dtype=torch.float32)
+    prev_y = torch.tensor(
+        [_previous_target_joints(sample, output_dim) for sample in samples],
+        dtype=torch.float32,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     with torch.no_grad():
         pred = _predict_tensor(

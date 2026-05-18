@@ -70,6 +70,14 @@ class TrainEntryTests(unittest.TestCase):
 
         self.assertIsNone(run)
 
+    def test_apply_wandb_mode_override(self):
+        config = {"tracking": {"wandb_mode": "disabled"}}
+
+        updated = train_entry._apply_wandb_mode_override(config, "offline")
+
+        self.assertEqual(updated["tracking"]["wandb_mode"], "offline")
+        self.assertEqual(config["tracking"]["wandb_mode"], "disabled")
+
     def test_build_train_report_records_trace_artifacts(self):
         report = train_entry._build_train_report(
             samples_jsonl=Path("runs/samples.jsonl"),
