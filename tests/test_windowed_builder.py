@@ -86,6 +86,39 @@ class WindowedBuilderTests(unittest.TestCase):
 
         self.assertEqual(result.sample_count, 0)
 
+    def test_build_windowed_jsonl_can_emit_multiple_windows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "data"
+            output = Path(tmp) / "runs"
+            root.mkdir()
+            _write_source_tar(root / "soma_proportional.tar")
+            _write_g1_tar(root / "g1.tar")
+            index_csv = Path(tmp) / "curated_index.csv"
+            _write_index(index_csv)
+
+            result = build_windowed_jsonl(
+                data_root=root,
+                index_csv=index_csv,
+                output_root=output,
+                config=WindowedBuildConfig(
+                    limit=2,
+                    history_frames=2,
+                    window_stride=1,
+                    max_windows_per_clip=2,
+                    source_body_names=("Hips", "LeftFoot"),
+                ),
+            )
+            samples = [
+                json.loads(line)
+                for line in result.samples_jsonl.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(result.sample_count, 2)
+        self.assertEqual([sample["window_start"] for sample in samples], [0, 1])
+        self.assertEqual(samples[1]["target_frame"], 2)
+        self.assertEqual(samples[1]["prev_target_joints"][0], 1.0)
+        self.assertEqual(samples[1]["target_joints"][0], 2.0)
+
 
 def _write_index(path: Path, merged_action: str = "keep") -> None:
     row = {

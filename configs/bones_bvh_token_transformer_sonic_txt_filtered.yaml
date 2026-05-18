@@ -1,0 +1,77 @@
+experiment:
+  name: bones_bvh_token_transformer_sonic_txt_filtered
+  project: online-retarget
+  seed: 17
+  output_root: runs
+
+data:
+  root: /home/user/data/motion_data
+  index_csv: runs/curated/bones_sonic_txt_filtered_pair_s17/curated_index.csv
+  samples_jsonl: runs/filtered_sonic_txt/supervised/train_merged-quality-action_30b_h8_stride30_limit999999/samples.jsonl
+  quality_policy_id: bones_sonic_txt_filtered_pair_s17
+  quality_report: runs/curated/bones_sonic_txt_filtered_pair_s17/curated_report.json
+  quality_policy_audit: ""
+  action_column: merged_quality_action
+  allow_debug_data: true
+  source_format: soma_proportional_bvh_fk
+  target_format: g1_joint_position
+  history_frames: 8
+  source_body_count: 30
+  task: sonic_txt_filtered
+
+model:
+  family: token_transformer
+  latent_dim: 128
+  nhead: 4
+  num_encoder_layers: 2
+  num_decoder_layers: 2
+  dim_feedforward: 512
+  dropout: 0.1
+  output_mode: position
+  use_prev_state: true
+  output: g1_joint_position
+
+loss:
+  l1: 1.0
+  token_autoencoder:
+    skeleton: 0.05
+    motion: 0.01
+    state: 0.05
+    latent_alignment: 0.0
+
+train:
+  batch_size: 512
+  max_steps: 2000
+  learning_rate: 0.0003
+  precision: fp32
+  ddp: true
+  log_every: 20
+  eval_every: 0
+
+evaluation:
+  metrics:
+    - joint_mae
+    - joint_mse
+    - joint_rmse
+    - max_joint_abs_error
+    - joint_velocity_rmse
+    - action_similarity
+    - predicted_joint_jump_rate
+    - target_joint_jump_rate
+    - predicted_minus_target_joint_jump_rate
+  failure_metric: joint_rmse
+  joint_jump_velocity: 20.0
+  max_failures: 50
+
+tracking:
+  wandb_mode: online
+  auto_offline_eval: true
+
+run:
+  dry_run: false
+  allow_debug_data: true
+  output_dir: ""
+  predict_only: false
+  checkpoint: ""
+  limit: 3
+

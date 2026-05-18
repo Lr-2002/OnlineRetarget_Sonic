@@ -455,6 +455,8 @@ def main() -> None:
     windowed.add_argument("--limit", type=int, default=16)
     windowed.add_argument("--history-frames", type=int, default=8)
     windowed.add_argument("--target-frame-offset", type=int, default=0)
+    windowed.add_argument("--window-stride", type=int, default=10)
+    windowed.add_argument("--max-windows-per-clip", type=int, default=1)
     windowed.add_argument("--position-scale", type=float, default=0.01)
 
     sonic_windowed = subparsers.add_parser(
@@ -1147,6 +1149,8 @@ def _build_windowed_jsonl(args: argparse.Namespace) -> None:
             limit=args.limit,
             history_frames=args.history_frames,
             target_frame_offset=args.target_frame_offset,
+            window_stride=args.window_stride,
+            max_windows_per_clip=args.max_windows_per_clip,
             position_scale=args.position_scale,
         ),
     )

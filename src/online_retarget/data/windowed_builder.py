@@ -69,6 +69,8 @@ class WindowedBuildConfig:
     limit: int = 16
     history_frames: int = 8
     target_frame_offset: int = 0
+    window_stride: int = 10
+    max_windows_per_clip: int = 1
     position_scale: float = 0.01
     root_body: str = "Hips"
     source_body_names: tuple[str, ...] = DEFAULT_SOURCE_BODY_NAMES
@@ -125,6 +127,7 @@ def build_windowed_jsonl(
     """Build fixed-window 30-body observations and G1-joint targets."""
 
     config = config or WindowedBuildConfig()
+    _validate_config(config)
     spec = ObservationSpec(
         history_frames=config.history_frames,
         source_body_count=len(config.source_body_names),
@@ -150,13 +153,16 @@ def build_windowed_jsonl(
                 for ref in refs:
                     if sample_count >= config.limit:
                         break
-                    sample = _build_sample(source_tar, target_tar, ref, config, spec)
-                    if sample is None:
+                    samples = _build_samples(source_tar, target_tar, ref, config, spec)
+                    if not samples:
                         skipped_count += 1
                         continue
-                    f.write(json.dumps(sample, sort_keys=True))
-                    f.write("\n")
-                    sample_count += 1
+                    for sample in samples:
+                        if sample_count >= config.limit:
+                            break
+                        f.write(json.dumps(sample, sort_keys=True))
+                        f.write("\n")
+                        sample_count += 1
 
     manifest = {
         "data_root": str(data_root),
@@ -323,49 +329,66 @@ def global_body_position_maps_from_bvh(
     return frames
 
 
-def _build_sample(
+def _build_samples(
     source_tar: tarfile.TarFile,
     target_tar: tarfile.TarFile,
     ref: MotionPairRef,
     config: WindowedBuildConfig,
     spec: ObservationSpec,
-) -> dict[str, object] | None:
+) -> list[dict[str, object]]:
     source_positions = _read_source_positions(source_tar, ref, config)
-    target_values = _read_g1_joints(target_tar, ref.target_g1_path)
-    if source_positions is None or target_values is None:
-        return None
-    if len(source_positions) < config.history_frames:
-        return None
-    target_index = config.history_frames - 1 + config.target_frame_offset
-    if target_index >= len(target_values):
-        return None
-
-    history = source_positions[: config.history_frames]
-    velocities = _velocities(history)
-    source_features = []
-    for positions, velocity in zip(history, velocities):
-        source_features.extend(positions)
-        source_features.extend(velocity)
-    observation = (
-        source_features
-        + _morphology_vector(ref.morphology)
-        + [0.0] * spec.robot_state_dim()
+    target_values = _read_g1_joints(
+        target_tar,
+        ref.target_g1_path,
+        max_frames=_needed_target_frames(config),
     )
-    return {
-        "sample_id": ref.sample_id,
-        "actor_uid": ref.actor_uid,
-        "category": ref.category,
-        "package": ref.package,
-        "quality_action": ref.quality_action,
-        "quality_flags": list(ref.quality_flags),
-        "source_motion_path": ref.source_motion_path,
-        "target_g1_path": ref.target_g1_path,
-        "history_frames": config.history_frames,
-        "source_body_names": list(config.source_body_names),
-        "target_frame": target_index,
-        "observation": observation,
-        "target_joints": target_values[target_index],
-    }
+    if source_positions is None or target_values is None:
+        return []
+    usable_frames = min(len(source_positions), len(target_values))
+    last_target = usable_frames - 1 - config.target_frame_offset
+    max_start = last_target - config.history_frames + 1
+    if max_start < 0:
+        return []
+
+    samples = []
+    windows_for_clip = 0
+    for start in range(0, max_start + 1, config.window_stride):
+        target_index = start + config.history_frames - 1 + config.target_frame_offset
+        history = source_positions[start : start + config.history_frames]
+        velocities = _velocities(history)
+        source_features = []
+        for positions, velocity in zip(history, velocities):
+            source_features.extend(positions)
+            source_features.extend(velocity)
+        observation = (
+            source_features
+            + _morphology_vector(ref.morphology)
+            + [0.0] * spec.robot_state_dim()
+        )
+        samples.append(
+            {
+                "sample_id": f"{ref.sample_id}:{start}",
+                "actor_uid": ref.actor_uid,
+                "category": ref.category,
+                "package": ref.package,
+                "quality_action": ref.quality_action,
+                "quality_flags": list(ref.quality_flags),
+                "source_motion_path": ref.source_motion_path,
+                "target_g1_path": ref.target_g1_path,
+                "history_frames": config.history_frames,
+                "source_body_names": list(config.source_body_names),
+                "window_start": start,
+                "target_frame": target_index,
+                "prev_target_frame": max(0, target_index - 1),
+                "observation": observation,
+                "prev_target_joints": target_values[max(0, target_index - 1)],
+                "target_joints": target_values[target_index],
+            }
+        )
+        windows_for_clip += 1
+        if windows_for_clip >= config.max_windows_per_clip:
+            break
+    return samples
 
 
 def _read_source_positions(
@@ -385,7 +408,7 @@ def _read_source_positions(
         except UnicodeDecodeError:
             return None
     try:
-        motion = parse_bvh_motion(text)
+        motion = parse_bvh_motion(text, max_frames=_needed_source_frames(config))
     except ValueError:
         return None
     return body_positions_from_bvh(
@@ -396,24 +419,31 @@ def _read_source_positions(
     )
 
 
-def _read_g1_joints(tar: tarfile.TarFile, member_path: str) -> list[list[float]] | None:
+def _read_g1_joints(
+    tar: tarfile.TarFile,
+    member_path: str,
+    *,
+    max_frames: int | None = None,
+) -> list[list[float]] | None:
     try:
         extracted = tar.extractfile(member_path)
     except (KeyError, tarfile.TarError):
         return None
     if extracted is None:
         return None
+    values = []
     with extracted:
         try:
-            rows = list(csv.DictReader(io.TextIOWrapper(extracted, encoding="utf-8", newline="")))
+            rows = csv.DictReader(io.TextIOWrapper(extracted, encoding="utf-8", newline=""))
+            for row in rows:
+                if max_frames is not None and len(values) >= max_frames:
+                    break
+                frame = [_maybe_float(row.get(column)) for column in G1_JOINT_COLUMNS]
+                if any(value is None for value in frame):
+                    continue
+                values.append([float(value) for value in frame if value is not None])
         except UnicodeDecodeError:
             return None
-    values = []
-    for row in rows:
-        frame = [_maybe_float(row.get(column)) for column in G1_JOINT_COLUMNS]
-        if any(value is None for value in frame):
-            continue
-        values.append([float(value) for value in frame if value is not None])
     return values
 
 
@@ -541,7 +571,39 @@ def _maybe_float(value: str | None) -> float | None:
 def _run_name(config: WindowedBuildConfig) -> str:
     action_tag = config.action_column.replace("_", "-")
     body_tag = f"{len(config.source_body_names)}b"
-    return f"{config.split}_{action_tag}_{body_tag}_h{config.history_frames}_limit{config.limit}"
+    return (
+        f"{config.split}_{action_tag}_{body_tag}_h{config.history_frames}"
+        f"_stride{config.window_stride}_limit{config.limit}"
+    )
+
+
+def _needed_source_frames(config: WindowedBuildConfig) -> int | None:
+    if config.max_windows_per_clip <= 0:
+        return None
+    last_start = (config.max_windows_per_clip - 1) * config.window_stride
+    return last_start + config.history_frames
+
+
+def _needed_target_frames(config: WindowedBuildConfig) -> int | None:
+    source_frames = _needed_source_frames(config)
+    if source_frames is None:
+        return None
+    return source_frames + config.target_frame_offset
+
+
+def _validate_config(config: WindowedBuildConfig) -> None:
+    if config.split not in {"train", "val", "test"}:
+        raise ValueError("split must be train, val, or test")
+    if config.limit <= 0:
+        raise ValueError("limit must be positive")
+    if config.history_frames <= 0:
+        raise ValueError("history_frames must be positive")
+    if config.window_stride <= 0:
+        raise ValueError("window_stride must be positive")
+    if config.max_windows_per_clip <= 0:
+        raise ValueError("max_windows_per_clip must be positive")
+    if config.target_frame_offset < 0:
+        raise ValueError("target_frame_offset must be non-negative")
 
 
 def _git_sha() -> str:
