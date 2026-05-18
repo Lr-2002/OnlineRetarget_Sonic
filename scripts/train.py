@@ -518,6 +518,17 @@ def _train_jsonl(
         [_previous_target_joints(sample, output_dim) for sample in samples],
         dtype=torch.float32,
     )
+    samples, x, y, prev_y, sample_filter = _filter_finite_supervised_tensors(
+        torch,
+        samples=samples,
+        x=x,
+        y=y,
+        prev_y=prev_y,
+    )
+    if not samples:
+        raise SystemExit(f"all supervised samples contain non-finite values: {samples_jsonl}")
+    if rank == 0:
+        print(f"sample_filter={json.dumps(sample_filter, sort_keys=True)}")
 
     seed = int(_nested_get(config, ("experiment", "seed"), 17))
     torch.manual_seed(seed)
@@ -656,6 +667,7 @@ def _train_jsonl(
         evaluation_config=_evaluation_config(config, run_name="train_offline_eval").to_dict(),
         distributed_runtime=_runtime_report(runtime),
         resume_checkpoint=str(resume_checkpoint) if resume_checkpoint is not None else "",
+        sample_filter=sample_filter,
     )
     torch.save(
         {
@@ -815,6 +827,60 @@ def _previous_target_joints(sample: dict[str, Any], output_dim: int) -> list[flo
     return [0.0] * output_dim
 
 
+def _filter_finite_supervised_tensors(
+    torch,
+    *,
+    samples: list[dict[str, Any]],
+    x,
+    y,
+    prev_y,
+) -> tuple[list[dict[str, Any]], Any, Any, Any, dict[str, Any]]:
+    """Drop JSONL rows with NaN/Inf tensors before they can poison optimization."""
+
+    finite_x = torch.isfinite(x).all(dim=1)
+    finite_y = torch.isfinite(y).all(dim=1)
+    finite_prev_y = torch.isfinite(prev_y).all(dim=1)
+    keep_mask = finite_x & finite_y & finite_prev_y
+    dropped_indices = (~keep_mask).nonzero(as_tuple=False).flatten().tolist()
+    report = {
+        "input_count": len(samples),
+        "filtered_count": int(keep_mask.sum().item()),
+        "dropped_count": len(dropped_indices),
+        "dropped_examples": [],
+    }
+    if not dropped_indices:
+        return samples, x, y, prev_y, report
+
+    for index in dropped_indices[:20]:
+        reasons = []
+        if not bool(finite_x[index]):
+            reasons.append("observation_nonfinite")
+        if not bool(finite_y[index]):
+            reasons.append("target_joints_nonfinite")
+        if not bool(finite_prev_y[index]):
+            reasons.append("prev_target_joints_nonfinite")
+        sample = samples[index]
+        report["dropped_examples"].append(
+            {
+                "index": int(index),
+                "sample_id": str(sample.get("sample_id", "")),
+                "source_motion_path": str(sample.get("source_motion_path", "")),
+                "target_g1_path": str(sample.get("target_g1_path", "")),
+                "reasons": reasons,
+            }
+        )
+
+    keep_indices = keep_mask.nonzero(as_tuple=False).flatten()
+    filtered_samples = [samples[int(index)] for index in keep_indices.tolist()]
+    return (
+        filtered_samples,
+        x.index_select(0, keep_indices),
+        y.index_select(0, keep_indices),
+        prev_y.index_select(0, keep_indices),
+        report,
+    )
+
+
 def _loss_config(config: dict[str, Any]) -> dict[str, Any]:
     payload = config.get("loss", {})
     return dict(payload) if isinstance(payload, dict) else {}
@@ -904,6 +970,15 @@ def _predict_jsonl(
         [_previous_target_joints(sample, output_dim) for sample in samples],
         dtype=torch.float32,
     )
+    samples, x, y, prev_y, sample_filter = _filter_finite_supervised_tensors(
+        torch,
+        samples=samples,
+        x=x,
+        y=y,
+        prev_y=prev_y,
+    )
+    if not samples:
+        raise SystemExit(f"all supervised samples contain non-finite values: {samples_jsonl}")
     output_dir.mkdir(parents=True, exist_ok=True)
     with torch.no_grad():
         pred = _predict_tensor(
@@ -941,6 +1016,7 @@ def _predict_jsonl(
         "model_config": model_build.config,
         "loss_config": _loss_config(config),
         "evaluation_config": _evaluation_config(config, run_name="offline_eval").to_dict(),
+        "sample_filter": sample_filter,
         "quality_gate": quality_gate,
         "device": str(device),
         "world_size": world_size,
@@ -1021,6 +1097,7 @@ def _build_train_report(
     evaluation_config: dict[str, Any] | None = None,
     distributed_runtime: dict[str, Any] | None = None,
     resume_checkpoint: str = "",
+    sample_filter: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "samples_jsonl": str(samples_jsonl),
@@ -1046,6 +1123,13 @@ def _build_train_report(
         "rank": rank,
         "distributed_runtime": distributed_runtime or {},
         "resume_checkpoint": resume_checkpoint,
+        "sample_filter": sample_filter
+        or {
+            "input_count": sample_count,
+            "filtered_count": sample_count,
+            "dropped_count": 0,
+            "dropped_examples": [],
+        },
         "final_train_mse": final_train_mse,
         "git_sha": _git_sha(),
         "git_dirty": _git_dirty(),

@@ -1,4 +1,5 @@
 import json
+import math
 from pathlib import Path
 import tempfile
 import unittest
@@ -345,6 +346,40 @@ class TrainEntryTests(unittest.TestCase):
     def test_previous_target_joints_falls_back_to_zeros(self):
         self.assertEqual(train_entry._previous_target_joints({}, 2), [0.0, 0.0])
 
+    def test_filter_finite_supervised_tensors_drops_bad_rows(self):
+        class TorchStub:
+            @staticmethod
+            def isfinite(tensor):
+                return tensor.isfinite()
+
+        samples = [
+            {"sample_id": "good", "source_motion_path": "a.bvh", "target_g1_path": "a.csv"},
+            {"sample_id": "bad", "source_motion_path": "b.bvh", "target_g1_path": "b.csv"},
+        ]
+        x = _FakeMatrix([[1.0, 2.0], [math.nan, 3.0]])
+        y = _FakeMatrix([[0.0], [1.0]])
+        prev_y = _FakeMatrix([[0.0], [1.0]])
+
+        filtered_samples, filtered_x, filtered_y, filtered_prev_y, report = (
+            train_entry._filter_finite_supervised_tensors(
+                TorchStub,
+                samples=samples,
+                x=x,
+                y=y,
+                prev_y=prev_y,
+            )
+        )
+
+        self.assertEqual([sample["sample_id"] for sample in filtered_samples], ["good"])
+        self.assertEqual(filtered_x.rows, [[1.0, 2.0]])
+        self.assertEqual(filtered_y.rows, [[0.0]])
+        self.assertEqual(filtered_prev_y.rows, [[0.0]])
+        self.assertEqual(report["input_count"], 2)
+        self.assertEqual(report["filtered_count"], 1)
+        self.assertEqual(report["dropped_count"], 1)
+        self.assertEqual(report["dropped_examples"][0]["sample_id"], "bad")
+        self.assertEqual(report["dropped_examples"][0]["reasons"], ["observation_nonfinite"])
+
 
 def _write_policy_audit(
     path: Path,
@@ -382,6 +417,81 @@ class _FakeTensor:
 
     def __rmul__(self, other):
         return self
+
+
+class _FakeBoolVector:
+    def __init__(self, values):
+        self.values = [bool(value) for value in values]
+
+    def __and__(self, other):
+        return _FakeBoolVector([left and right for left, right in zip(self.values, other.values)])
+
+    def __invert__(self):
+        return _FakeBoolVector([not value for value in self.values])
+
+    def __getitem__(self, index):
+        return self.values[index]
+
+    def sum(self):
+        return _FakeScalar(sum(self.values))
+
+    def nonzero(self, as_tuple=False):
+        indices = [index for index, value in enumerate(self.values) if value]
+        if as_tuple:
+            return (_FakeIndexVector(indices),)
+        return _FakeIndexMatrix(indices)
+
+
+class _FakeScalar:
+    def __init__(self, value):
+        self.value = value
+
+    def item(self):
+        return self.value
+
+
+class _FakeIndexVector:
+    def __init__(self, indices):
+        self.indices = list(indices)
+
+    def flatten(self):
+        return self
+
+    def tolist(self):
+        return list(self.indices)
+
+
+class _FakeIndexMatrix(_FakeIndexVector):
+    pass
+
+
+class _FakeMatrix:
+    def __init__(self, rows):
+        self.rows = [list(row) for row in rows]
+
+    def isfinite(self):
+        return _FakeFiniteMatrix(
+            [[math.isfinite(value) for value in row] for row in self.rows]
+        )
+
+    def index_select(self, dim, indices):
+        self.assert_dim_zero(dim)
+        return _FakeMatrix([self.rows[index] for index in indices.tolist()])
+
+    @staticmethod
+    def assert_dim_zero(dim):
+        if dim != 0:
+            raise AssertionError(f"expected dim 0, got {dim}")
+
+
+class _FakeFiniteMatrix:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def all(self, dim):
+        if dim != 1:
+            raise AssertionError(f"expected dim 1, got {dim}")
+        return _FakeBoolVector([all(row) for row in self.rows])
 
 
 if __name__ == "__main__":
