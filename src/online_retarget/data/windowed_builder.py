@@ -369,7 +369,6 @@ def _build_samples(
             {
                 "sample_id": f"{ref.sample_id}:{start}",
                 "actor_uid": ref.actor_uid,
-                "encoder_id": ref.actor_uid,
                 "category": ref.category,
                 "package": ref.package,
                 "quality_action": ref.quality_action,

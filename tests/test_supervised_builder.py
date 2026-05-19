@@ -34,7 +34,6 @@ class SupervisedBuilderTests(unittest.TestCase):
         self.assertEqual(result.skipped_count, 0)
         self.assertEqual(result.output_dim, len(G1_JOINT_COLUMNS))
         self.assertEqual(len(sample["observation"]), 2 * 6 + 13)
-        self.assertEqual(sample["encoder_id"], "A001")
         self.assertEqual(len(sample["target_joints"]), len(G1_JOINT_COLUMNS))
         self.assertEqual(sample["target_frame"], 1)
 

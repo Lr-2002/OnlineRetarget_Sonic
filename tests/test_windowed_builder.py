@@ -60,7 +60,6 @@ class WindowedBuilderTests(unittest.TestCase):
         self.assertEqual(result.sample_count, 1)
         self.assertEqual(result.input_dim, spec.flattened_dim())
         self.assertEqual(len(sample["observation"]), spec.flattened_dim())
-        self.assertEqual(sample["encoder_id"], "A001")
         self.assertEqual(len(sample["target_joints"]), len(G1_JOINT_COLUMNS))
         self.assertEqual(manifest["builder"], "bvh_fk_30body_window")
 

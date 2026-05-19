@@ -222,7 +222,6 @@ def _samples_for_row(
         sample = {
             "sample_id": _sample_id(row, config.split, start),
             "actor_uid": row.get("actor_uid", ""),
-            "encoder_id": row.get("actor_uid", ""),
             "category": row.get("category", ""),
             "package": row.get("package", ""),
             "quality_action": "debug_unfiltered",

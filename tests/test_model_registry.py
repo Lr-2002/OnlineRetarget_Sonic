@@ -2,6 +2,7 @@ import unittest
 
 from online_retarget.data.schema import ObservationSpec
 from online_retarget.models.registry import build_model
+from online_retarget.models.token_vae import MLPTokenVAE, vae_loss
 
 
 class ModelRegistryTests(unittest.TestCase):
@@ -54,8 +55,6 @@ class ModelRegistryTests(unittest.TestCase):
             import torch
         except ImportError:
             self.skipTest("torch is not installed")
-        from online_retarget.models.token_vae import MLPTokenVAE, vae_loss
-
         model = MLPTokenVAE(input_dim=5, latent_dim=3, hidden_dims=(7,))
         x = torch.zeros(4, 5)
 
