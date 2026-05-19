@@ -375,3 +375,61 @@ Before training:
   - split
   - source and target paths
 - Only then launch two 4-GPU experiments.
+
+## Proportional Skeleton Registry v0
+
+Generated from the filtered BONES Sonic curated index:
+
+```bash
+PYTHONPATH=src python3 -m online_retarget.cli build-skeleton-registry \
+  --index-csv runs/curated/bones_sonic_txt_filtered_pair_s17/curated_index.csv \
+  --data-root /home/user/data/motion_data \
+  --output-root runs \
+  --run-name bones_sonic_txt_filtered_skeleton_registry_v0 \
+  --action-column merged_quality_action
+```
+
+Outputs:
+
+- `runs/skeleton_registry/bones_sonic_txt_filtered_skeleton_registry_v0/skeleton_registry.csv`
+- `runs/skeleton_registry/bones_sonic_txt_filtered_skeleton_registry_v0/skeleton_registry_report.json`
+
+Key result:
+
+- Rows seen: `112723`
+- Rows used for first training lane (`keep` + `downweight`): `110697`
+- Rows excluded by action filter (`quarantine`): `2026`
+- Actor/proportional skeleton count in full table: `515`
+- Effective actor/proportional skeleton count for first encoder bank: `489`
+- Actors excluded by action filter: `26`
+- Missing proportional shape files among effective actors: `0`
+- Split clips: train `87394`, val `12758`, test `10545`
+- Split actors: train `387`, val `50`, test `52`
+- Clip count per effective actor: min `2`, mean `226.374233`, max `889`
+- Shape header signature is consistent for all effective actors:
+  `face_expr_params:<f4:1x72|identity_params:<f4:1x45|pose_params:<f4:1x136|scale_params:<f4:1x68`
+
+Interpretation:
+
+- The first practical skeleton id is `actor_uid`.
+- The first practical encoder id is also `actor_uid`.
+- The proportional skeleton source is `move_soma_proportional_path`.
+- The actor shape source is `move_soma_proportional_shape_path`.
+- The paired robot target remains the G1 motion in the same curated row.
+- Do not allocate first-version actor encoders for the 26 actors that have no
+  `keep` or `downweight` rows.
+
+Baseline-2 minimal implementation boundary:
+
+```text
+curated row
+  -> actor_uid / encoder_id
+  -> proportional SOMA source feature B
+  -> actor-specific or adapter encoder E_actor(B, shape/morphology)
+  -> shared latent Z
+  -> shared G1 kinematics decoder
+  -> shared G1 dynamics decoder / low-level controller path
+```
+
+The registry is only the routing and audit artifact. It does not change
+training behavior by itself.

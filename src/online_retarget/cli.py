@@ -43,6 +43,7 @@ from online_retarget.data.sonic_windowed_builder import (
     SonicWindowedBuildConfig,
     build_sonic_windowed_jsonl,
 )
+from online_retarget.data.skeleton_registry import build_skeleton_registry
 from online_retarget.data.source_fk_quality import (
     SourceFKQualityConfig,
     scan_source_fk_quality_from_index,
@@ -81,6 +82,25 @@ def main() -> None:
     sonic_index.add_argument("--output-root", type=Path, default=Paths.from_env().output_root)
     sonic_index.add_argument("--run-name", default="bones_sonic_index_v0")
     sonic_index.add_argument("--limit", type=int)
+
+    skeleton_registry = subparsers.add_parser(
+        "build-skeleton-registry",
+        help="Aggregate curated rows into actor/proportional-skeleton encoder ids",
+    )
+    skeleton_registry.add_argument("--index-csv", type=Path, required=True)
+    skeleton_registry.add_argument("--data-root", type=Path, default=Paths.from_env().data_root)
+    skeleton_registry.add_argument("--output-root", type=Path, default=Paths.from_env().output_root)
+    skeleton_registry.add_argument(
+        "--run-name",
+        default="bones_sonic_txt_filtered_skeleton_registry_v0",
+    )
+    skeleton_registry.add_argument("--action-column", default="merged_quality_action")
+    skeleton_registry.add_argument(
+        "--allowed-action",
+        action="append",
+        default=[],
+        help="Allowed row action. Repeat for multiple values. Defaults to keep/downweight.",
+    )
 
     sonic_quality = subparsers.add_parser(
         "scan-sonic-quality",
@@ -760,6 +780,8 @@ def main() -> None:
         _inventory(args.data_root, args.sample_actors)
     elif args.command == "build-sonic-index":
         _build_sonic_index(args)
+    elif args.command == "build-skeleton-registry":
+        _build_skeleton_registry(args)
     elif args.command == "scan-sonic-quality":
         _scan_sonic_quality(args)
     elif args.command == "export-sonic-review-clips":
@@ -829,6 +851,18 @@ def _build_sonic_index(args: argparse.Namespace) -> None:
         output_root=args.output_root,
         run_name=args.run_name,
         limit=args.limit,
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _build_skeleton_registry(args: argparse.Namespace) -> None:
+    result = build_skeleton_registry(
+        index_csv=args.index_csv,
+        data_root=args.data_root,
+        output_root=args.output_root,
+        run_name=args.run_name,
+        action_column=args.action_column,
+        allowed_actions=tuple(args.allowed_action or ["keep", "downweight"]),
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 
