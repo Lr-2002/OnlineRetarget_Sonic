@@ -70,6 +70,8 @@ def build_model(
             dropout=float(model_cfg.get("dropout", 0.1)),
             output_mode=str(model_cfg.get("output_mode", "position")),
             use_prev_state=bool(model_cfg.get("use_prev_state", True)),
+            skeleton_encoder_mode=str(model_cfg.get("skeleton_encoder_mode", "shared_mlp")),
+            num_actor_encoders=int(model_cfg.get("num_actor_encoders", 0)),
         )
     elif family == "flow_matching":
         from .temporal import FlowMatchingRetargeter

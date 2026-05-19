@@ -71,6 +71,7 @@ class SonicWindowedBuilderTests(unittest.TestCase):
         self.assertEqual(result.selected_clip_count, 1)
         self.assertEqual(result.input_dim, spec.flattened_dim())
         self.assertEqual(len(sample_rows[0]["observation"]), spec.flattened_dim())
+        self.assertEqual(sample_rows[0]["encoder_id"], "A001")
         self.assertEqual(len(sample_rows[0]["target_joints"]), len(SONIC_JOINT_NAMES))
         self.assertEqual(len(sample_rows[0]["prev_target_joints"]), len(SONIC_JOINT_NAMES))
         self.assertEqual(sample_rows[1]["prev_target_frame"], sample_rows[1]["target_frame"] - 1)

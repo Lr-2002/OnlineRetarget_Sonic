@@ -433,3 +433,40 @@ curated row
 
 The registry is only the routing and audit artifact. It does not change
 training behavior by itself.
+
+## Actor-Bank Encoder Support v0
+
+Implemented the smallest OnlineRetarget-side code path for Baseline 2:
+
+```yaml
+data:
+  skeleton_registry_csv: runs/skeleton_registry/bones_sonic_txt_filtered_skeleton_registry_v0/skeleton_registry.csv
+
+model:
+  family: token_transformer
+  skeleton_encoder_mode: actor_bank
+```
+
+Runtime behavior:
+
+- Training reads `data.skeleton_registry_csv` and builds a stable
+  `encoder_id -> integer index` map.
+- `num_actor_encoders` is injected into the model config from the registry.
+- Samples use `encoder_id` when present, otherwise fall back to `actor_uid`.
+- Windowed/sample builders now emit `encoder_id = actor_uid`.
+- `TokenizedTransformerRetargeter` keeps the default shared skeleton MLP unless
+  `skeleton_encoder_mode: actor_bank` is set.
+- In actor-bank mode, only the skeleton/morphology encoder is per actor; the
+  motion encoder, transformer, query/state path, G1 output head, and auxiliary
+  decoders remain shared.
+
+Debug config:
+
+- `configs/bones_bvh_token_transformer_actor_bank_debug.yaml`
+
+Important limitation:
+
+- This is not yet a SONIC PPO/controller modification. It is the repo-local
+  supervised token-transformer baseline path needed to test whether
+  actor-specific proportional skeleton encoders help map heterogeneous SOMA
+  proportional sources into a shared G1 target space.

@@ -145,6 +145,7 @@ def _build_sample(
     return {
         "sample_id": ref.sample_id,
         "actor_uid": ref.actor_uid,
+        "encoder_id": ref.actor_uid,
         "category": ref.category,
         "package": ref.package,
         "quality_action": ref.quality_action,

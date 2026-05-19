@@ -1,11 +1,19 @@
 import unittest
 
 from online_retarget.data.schema import ObservationSpec
-import scripts.pretrain_token_vaes as pretrain_token_vaes
+
+try:
+    import scripts.pretrain_token_vaes as pretrain_token_vaes
+except ModuleNotFoundError as exc:  # pragma: no cover - minimal env without torch.
+    if exc.name != "torch":
+        raise
+    pretrain_token_vaes = None
 
 
 class PretrainTokenVaeTests(unittest.TestCase):
     def test_component_tensors_follow_observation_spec_slices(self):
+        if pretrain_token_vaes is None:
+            self.skipTest("torch is not installed")
         try:
             import torch
         except ImportError:
@@ -30,6 +38,8 @@ class PretrainTokenVaeTests(unittest.TestCase):
         self.assertAlmostEqual(tensors["action"][0, 2].item(), 0.3, places=6)
 
     def test_component_config_parses_string_and_list(self):
+        if pretrain_token_vaes is None:
+            self.skipTest("torch is not installed")
         self.assertEqual(
             pretrain_token_vaes._components_from_config({"pretrain": {"components": "motion"}}),
             ("motion",),
@@ -42,6 +52,8 @@ class PretrainTokenVaeTests(unittest.TestCase):
         )
 
     def test_wandb_mode_override_does_not_mutate_input(self):
+        if pretrain_token_vaes is None:
+            self.skipTest("torch is not installed")
         config = {"tracking": {"wandb_mode": "disabled"}}
 
         updated = pretrain_token_vaes._apply_wandb_mode_override(config, "online")

@@ -107,6 +107,8 @@ class TokenizedTransformerRetargeter(nn.Module):
         dropout: float = 0.1,
         output_mode: str = "position",
         use_prev_state: bool = True,
+        skeleton_encoder_mode: str = "shared_mlp",
+        num_actor_encoders: int = 0,
     ) -> None:
         super().__init__()
         if latent_dim <= 0:
@@ -124,14 +126,29 @@ class TokenizedTransformerRetargeter(nn.Module):
         self.latent_dim = latent_dim
         self.output_mode = output_mode
         self.use_prev_state = use_prev_state
+        self.skeleton_encoder_mode = skeleton_encoder_mode
 
         self.motion_encoder = _mlp(source_feature_dim, latent_dim, hidden_dim=max(latent_dim, 256))
         self.motion_decoder = _mlp(latent_dim, source_feature_dim, hidden_dim=max(latent_dim, 256))
-        self.skeleton_encoder = _mlp(
-            max(1, morphology_dim),
-            latent_dim,
-            hidden_dim=max(latent_dim, 128),
-        )
+        skeleton_input_dim = max(1, morphology_dim)
+        skeleton_hidden_dim = max(latent_dim, 128)
+        if skeleton_encoder_mode == "shared_mlp":
+            self.skeleton_encoder = _mlp(
+                skeleton_input_dim,
+                latent_dim,
+                hidden_dim=skeleton_hidden_dim,
+            )
+            self.skeleton_encoder_bank = None
+        elif skeleton_encoder_mode == "actor_bank":
+            if num_actor_encoders <= 0:
+                raise ValueError("num_actor_encoders must be positive for actor_bank mode")
+            self.skeleton_encoder = None
+            self.skeleton_encoder_bank = nn.ModuleList(
+                _mlp(skeleton_input_dim, latent_dim, hidden_dim=skeleton_hidden_dim)
+                for _ in range(num_actor_encoders)
+            )
+        else:
+            raise ValueError(f"unsupported skeleton_encoder_mode: {skeleton_encoder_mode}")
         self.skeleton_decoder = _mlp(
             latent_dim,
             max(1, morphology_dim),
@@ -170,20 +187,30 @@ class TokenizedTransformerRetargeter(nn.Module):
             nn.Linear(latent_dim, output_dim),
         )
 
-    def forward(self, observation: torch.Tensor, prev_state: torch.Tensor | None = None) -> torch.Tensor:
-        output, _ = self.forward_with_aux(observation, prev_state=prev_state)
+    def forward(
+        self,
+        observation: torch.Tensor,
+        prev_state: torch.Tensor | None = None,
+        encoder_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        output, _ = self.forward_with_aux(
+            observation,
+            prev_state=prev_state,
+            encoder_ids=encoder_ids,
+        )
         return output
 
     def forward_with_aux(
         self,
         observation: torch.Tensor,
         prev_state: torch.Tensor | None = None,
+        encoder_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         source, skeleton, side = self._split_observation(observation)
         if prev_state is None:
             prev_state = self._prev_state_from_side(side, observation)
         z_motion = self.motion_encoder(source)
-        z_skeleton = self.skeleton_encoder(skeleton)
+        z_skeleton = self._encode_skeleton(skeleton, encoder_ids)
         z_state = self.state_encoder(prev_state)
         memory = torch.stack([z_skeleton, z_motion], dim=1) + self.memory_type
         memory = self.encoder(memory)
@@ -210,6 +237,30 @@ class TokenizedTransformerRetargeter(nn.Module):
             "z_state": z_state,
         }
         return predicted, aux
+
+    def _encode_skeleton(
+        self,
+        skeleton: torch.Tensor,
+        encoder_ids: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if self.skeleton_encoder_mode == "shared_mlp":
+            if self.skeleton_encoder is None:
+                raise RuntimeError("shared skeleton encoder is not initialized")
+            return self.skeleton_encoder(skeleton)
+        if self.skeleton_encoder_bank is None:
+            raise RuntimeError("actor skeleton encoder bank is not initialized")
+        if encoder_ids is None:
+            raise ValueError("encoder_ids are required for actor_bank skeleton encoding")
+        encoder_ids = encoder_ids.to(device=skeleton.device, dtype=torch.long).reshape(-1)
+        if encoder_ids.shape[0] != skeleton.shape[0]:
+            raise ValueError("encoder_ids batch size must match observation batch size")
+        if torch.any(encoder_ids < 0) or torch.any(encoder_ids >= len(self.skeleton_encoder_bank)):
+            raise ValueError("encoder_ids contain values outside the actor encoder bank")
+        encoded = skeleton.new_empty((skeleton.shape[0], self.latent_dim))
+        for encoder_index in torch.unique(encoder_ids, sorted=True).tolist():
+            mask = encoder_ids == int(encoder_index)
+            encoded[mask] = self.skeleton_encoder_bank[int(encoder_index)](skeleton[mask])
+        return encoded
 
     def _split_observation(
         self,

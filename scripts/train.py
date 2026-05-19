@@ -209,6 +209,85 @@ def _nested_get(mapping: dict[str, Any], path: tuple[str, ...], default: Any) ->
     return current
 
 
+def _encoder_bank_context(config: dict[str, Any], samples: list[dict[str, Any]]) -> dict[str, Any]:
+    model_cfg = config.get("model", {})
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    mode = str(model_cfg.get("skeleton_encoder_mode", "shared_mlp"))
+    if mode != "actor_bank":
+        return {
+            "enabled": False,
+            "skeleton_encoder_mode": mode,
+        }
+
+    registry_csv = str(_nested_get(config, ("data", "skeleton_registry_csv"), ""))
+    if registry_csv:
+        encoder_ids = _encoder_ids_from_registry(Path(registry_csv))
+        source = "skeleton_registry_csv"
+    else:
+        encoder_ids = sorted({_sample_encoder_id(sample) for sample in samples})
+        source = "samples"
+    encoder_ids = [encoder_id for encoder_id in encoder_ids if encoder_id]
+    if not encoder_ids:
+        raise SystemExit("actor_bank skeleton encoder mode requires at least one encoder id")
+    if len(set(encoder_ids)) != len(encoder_ids):
+        raise SystemExit("actor_bank skeleton registry contains duplicate encoder ids")
+    encoder_id_to_index = {encoder_id: index for index, encoder_id in enumerate(encoder_ids)}
+    sample_encoder_ids = [_sample_encoder_id(sample) for sample in samples]
+    missing = sorted({encoder_id for encoder_id in sample_encoder_ids if encoder_id not in encoder_id_to_index})
+    if missing:
+        examples = ", ".join(missing[:20])
+        raise SystemExit(f"actor_bank samples contain encoder ids outside registry: {examples}")
+    return {
+        "enabled": True,
+        "skeleton_encoder_mode": mode,
+        "source": source,
+        "skeleton_registry_csv": registry_csv,
+        "num_actor_encoders": len(encoder_ids),
+        "sample_encoder_count": len(set(sample_encoder_ids)),
+        "encoder_ids": encoder_ids,
+        "encoder_id_to_index": encoder_id_to_index,
+    }
+
+
+def _config_with_encoder_bank(
+    config: dict[str, Any],
+    encoder_context: dict[str, Any],
+) -> dict[str, Any]:
+    if not encoder_context.get("enabled"):
+        return config
+    updated = dict(config)
+    model_cfg = updated.get("model", {})
+    model_cfg = dict(model_cfg) if isinstance(model_cfg, dict) else {}
+    model_cfg["skeleton_encoder_mode"] = "actor_bank"
+    model_cfg["num_actor_encoders"] = int(encoder_context["num_actor_encoders"])
+    updated["model"] = model_cfg
+    return updated
+
+
+def _encoder_ids_from_registry(registry_csv: Path) -> list[str]:
+    if not registry_csv.exists():
+        raise SystemExit(f"skeleton registry CSV does not exist: {registry_csv}")
+    with registry_csv.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    encoder_ids = [str(row.get("encoder_id") or row.get("actor_uid") or "") for row in rows]
+    return [encoder_id for encoder_id in encoder_ids if encoder_id]
+
+
+def _sample_encoder_id(sample: dict[str, Any]) -> str:
+    return str(sample.get("encoder_id") or sample.get("actor_uid") or "")
+
+
+def _encoder_id_tensor(torch, samples: list[dict[str, Any]], encoder_context: dict[str, Any]):
+    if not encoder_context.get("enabled"):
+        return torch.zeros((len(samples),), dtype=torch.long)
+    mapping = encoder_context["encoder_id_to_index"]
+    return torch.tensor(
+        [int(mapping[_sample_encoder_id(sample)]) for sample in samples],
+        dtype=torch.long,
+    )
+
+
 def _apply_wandb_mode_override(config: dict[str, Any], wandb_mode: str | None) -> dict[str, Any]:
     if not wandb_mode:
         return config
@@ -532,6 +611,9 @@ def _train_jsonl(
 
     seed = int(_nested_get(config, ("experiment", "seed"), 17))
     torch.manual_seed(seed)
+    encoder_context = _encoder_bank_context(config, samples)
+    config = _config_with_encoder_bank(config, encoder_context)
+    encoder_ids = _encoder_id_tensor(torch, samples, encoder_context)
     model_build = build_model(
         config,
         input_dim=input_dim,
@@ -561,7 +643,7 @@ def _train_jsonl(
     output_dir.mkdir(parents=True, exist_ok=True)
     log_every = max(1, int(_nested_get(config, ("train", "log_every"), 100)))
     steps = min(max_steps, max_steps if max_steps > 0 else 1)
-    dataset = torch.utils.data.TensorDataset(x, y, prev_y)
+    dataset = torch.utils.data.TensorDataset(x, y, prev_y, encoder_ids)
     sampler = None
     if runtime["distributed"]:
         sampler = torch.utils.data.distributed.DistributedSampler(
@@ -584,11 +666,12 @@ def _train_jsonl(
     while step < steps:
         if sampler is not None:
             sampler.set_epoch(epoch)
-        for batch_x, batch_y, batch_prev_y in loader:
+        for batch_x, batch_y, batch_prev_y, batch_encoder_ids in loader:
             step += 1
             batch_x = batch_x.to(device, non_blocking=True)
             batch_y = batch_y.to(device, non_blocking=True)
             batch_prev_y = batch_prev_y.to(device, non_blocking=True)
+            batch_encoder_ids = batch_encoder_ids.to(device, non_blocking=True)
             loss = _training_loss(
                 torch,
                 model,
@@ -597,6 +680,7 @@ def _train_jsonl(
                 batch_y,
                 config,
                 prev_target=batch_prev_y,
+                encoder_ids=batch_encoder_ids,
             )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -625,6 +709,7 @@ def _train_jsonl(
             batch_size=batch_size,
             device=device,
             prev_y=prev_y,
+            encoder_ids=encoder_ids,
         )
         final_loss = float(torch.nn.functional.mse_loss(full_pred, y.to(device)).detach().cpu())
     checkpoint = output_dir / "checkpoint.pt"
@@ -668,6 +753,7 @@ def _train_jsonl(
         distributed_runtime=_runtime_report(runtime),
         resume_checkpoint=str(resume_checkpoint) if resume_checkpoint is not None else "",
         sample_filter=sample_filter,
+        encoder_context=encoder_context,
     )
     torch.save(
         {
@@ -698,6 +784,7 @@ def _training_loss(
     config: dict[str, Any],
     *,
     prev_target=None,
+    encoder_ids=None,
 ):
     if family == "flow_matching":
         noise = torch.randn_like(target)
@@ -710,7 +797,11 @@ def _training_loss(
         unwrapped = _unwrap_model(model)
         if prev_target is None:
             prev_target = torch.zeros_like(target)
-        prediction, aux = unwrapped.forward_with_aux(observation, prev_state=prev_target)
+        prediction, aux = unwrapped.forward_with_aux(
+            observation,
+            prev_state=prev_target,
+            encoder_ids=encoder_ids,
+        )
         return _supervised_loss(torch, prediction, target, config) + _auxiliary_token_loss(
             torch,
             aux,
@@ -786,6 +877,7 @@ def _predict_tensor(
     batch_size: int,
     device,
     prev_y=None,
+    encoder_ids=None,
 ):
     model.eval()
     predictions = []
@@ -808,7 +900,17 @@ def _predict_tensor(
                 )
             else:
                 prev_batch = prev_y[start : start + batch_size].to(device, non_blocking=True)
-            pred = _unwrap_model(model)(batch, prev_state=prev_batch)
+            batch_encoder_ids = None
+            if encoder_ids is not None:
+                batch_encoder_ids = encoder_ids[start : start + batch_size].to(
+                    device,
+                    non_blocking=True,
+                )
+            pred = _unwrap_model(model)(
+                batch,
+                prev_state=prev_batch,
+                encoder_ids=batch_encoder_ids,
+            )
         else:
             pred = model(batch)
         predictions.append(pred.detach())
@@ -951,6 +1053,8 @@ def _predict_jsonl(
         input_dim=input_dim,
     )
     device = runtime["device"]
+    encoder_context = _encoder_bank_context(config, samples)
+    config = _config_with_encoder_bank(config, encoder_context)
     model_build = build_model(
         config,
         input_dim=input_dim,
@@ -979,6 +1083,7 @@ def _predict_jsonl(
     )
     if not samples:
         raise SystemExit(f"all supervised samples contain non-finite values: {samples_jsonl}")
+    encoder_ids = _encoder_id_tensor(torch, samples, encoder_context)
     output_dir.mkdir(parents=True, exist_ok=True)
     with torch.no_grad():
         pred = _predict_tensor(
@@ -990,6 +1095,7 @@ def _predict_jsonl(
             batch_size=int(_nested_get(config, ("train", "batch_size"), 64)),
             device=device,
             prev_y=prev_y,
+            encoder_ids=encoder_ids,
         )
         predictions = pred.detach().cpu().tolist()
         final_mse = float(torch.nn.functional.mse_loss(pred, y.to(device)).detach().cpu())
@@ -1016,6 +1122,7 @@ def _predict_jsonl(
         "model_config": model_build.config,
         "loss_config": _loss_config(config),
         "evaluation_config": _evaluation_config(config, run_name="offline_eval").to_dict(),
+        "encoder_context": encoder_context,
         "sample_filter": sample_filter,
         "quality_gate": quality_gate,
         "device": str(device),
@@ -1098,6 +1205,7 @@ def _build_train_report(
     distributed_runtime: dict[str, Any] | None = None,
     resume_checkpoint: str = "",
     sample_filter: dict[str, Any] | None = None,
+    encoder_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "samples_jsonl": str(samples_jsonl),
@@ -1116,6 +1224,7 @@ def _build_train_report(
         "model_family": model_family,
         "model_config": model_config or {},
         "loss_config": loss_config or {},
+        "encoder_context": encoder_context or {},
         "evaluation_config": evaluation_config or {},
         "quality_gate": quality_gate,
         "device": device,

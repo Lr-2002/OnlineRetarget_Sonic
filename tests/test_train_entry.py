@@ -1,3 +1,4 @@
+import csv
 import json
 import math
 from pathlib import Path
@@ -101,6 +102,7 @@ class TrainEntryTests(unittest.TestCase):
             final_train_mse=0.1,
             wandb_summary={"enabled": False},
             resume_checkpoint="runs/train/prev/checkpoint.pt",
+            encoder_context={"enabled": True, "num_actor_encoders": 2},
         )
 
         self.assertEqual(report["predictions_jsonl"], "runs/train/run/train_predictions.jsonl")
@@ -110,6 +112,7 @@ class TrainEntryTests(unittest.TestCase):
         )
         self.assertEqual(report["quality_gate"]["policy_id"], "policy")
         self.assertEqual(report["resume_checkpoint"], "runs/train/prev/checkpoint.pt")
+        self.assertEqual(report["encoder_context"]["num_actor_encoders"], 2)
         self.assertFalse(report["wandb"]["enabled"])
 
     def test_quality_gate_blocks_formal_training_without_policy(self):
@@ -345,6 +348,54 @@ class TrainEntryTests(unittest.TestCase):
 
     def test_previous_target_joints_falls_back_to_zeros(self):
         self.assertEqual(train_entry._previous_target_joints({}, 2), [0.0, 0.0])
+
+    def test_encoder_bank_context_reads_registry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "skeleton_registry.csv"
+            with registry.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["actor_uid", "encoder_id"])
+                writer.writeheader()
+                writer.writerows(
+                    [
+                        {"actor_uid": "A001", "encoder_id": "A001"},
+                        {"actor_uid": "A002", "encoder_id": "A002"},
+                    ]
+                )
+            config = {
+                "data": {"skeleton_registry_csv": str(registry)},
+                "model": {"skeleton_encoder_mode": "actor_bank"},
+            }
+
+            context = train_entry._encoder_bank_context(
+                config,
+                [{"sample_id": "s1", "actor_uid": "A002"}],
+            )
+            updated = train_entry._config_with_encoder_bank(config, context)
+
+        self.assertTrue(context["enabled"])
+        self.assertEqual(context["num_actor_encoders"], 2)
+        self.assertEqual(context["encoder_id_to_index"]["A002"], 1)
+        self.assertEqual(updated["model"]["num_actor_encoders"], 2)
+
+    def test_encoder_bank_context_rejects_missing_registry_actor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "skeleton_registry.csv"
+            with registry.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["actor_uid", "encoder_id"])
+                writer.writeheader()
+                writer.writerow({"actor_uid": "A001", "encoder_id": "A001"})
+            config = {
+                "data": {"skeleton_registry_csv": str(registry)},
+                "model": {"skeleton_encoder_mode": "actor_bank"},
+            }
+
+            with self.assertRaises(SystemExit) as raised:
+                train_entry._encoder_bank_context(
+                    config,
+                    [{"sample_id": "s1", "actor_uid": "A404"}],
+                )
+
+        self.assertIn("outside registry", str(raised.exception))
 
     def test_filter_finite_supervised_tensors_drops_bad_rows(self):
         class TorchStub:
