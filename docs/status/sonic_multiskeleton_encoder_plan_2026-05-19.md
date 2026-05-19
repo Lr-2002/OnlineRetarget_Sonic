@@ -339,24 +339,34 @@ Initial recommendation:
 
 ## Implementation Direction
 
-Do not edit external SONIC source in place.
+Decision correction on 2026-05-19:
 
-Preferred implementation plan:
+- Do not build the multi-skeleton baseline through OnlineRetarget
+  `token_transformer`/TF code.
+- Do not introduce a standalone downstream retargeter decoder while the project
+  direction is SONIC-first.
+- Keep OnlineRetarget's registry/data-audit artifacts, because SONIC still
+  needs a stable `actor_uid` / proportional skeleton mapping.
+- Implement model changes in the SONIC codebase:
+  `/home/user/project/GR00T-WholeBodyControl-upstream-training`.
 
-1. Add a repo-local SONIC analysis/pretraining lane in OnlineRetarget or
-   `mask_controller`, using SONIC upstream as a read-only reference.
-2. Build a filtered paired dataset that can emit:
-   - G1 future/current target features.
-   - SOMA proportional human joint features.
-   - actor morphology / skeleton id / skeleton cluster fields.
-   - split labels.
-3. Reuse SONIC feature naming and loss semantics:
-   - `g1` latent as teacher/reference latent.
-   - `soma` or `soma_cluster_*` latent as student/human latent.
-   - G1 reconstruction and G1/SOMA latent MSE.
-4. Only after offline pretraining is stable, decide whether to:
-   - port the encoder weights into SONIC PPO training, or
-   - keep a standalone online retargeter decoder.
+SONIC-native implementation plan:
+
+1. Keep SONIC's existing `UniversalTokenModule` shape:
+   `g1/smpl/teleop/soma encoders -> shared FSQ/token -> g1_kin/g1_dyn decoders`.
+2. Treat the current `soma` encoder as the extension point for proportional
+   skeleton adaptation.
+3. Feed actor/proportional skeleton identity or shape features into SONIC's
+   tokenizer observations, not into a separate OnlineRetarget model.
+4. Start with the smallest SONIC-compatible design:
+   - one shared `soma` MLP plus lightweight actor/shape conditioning or adapter;
+   - only escalate to one full MLP encoder per actor if this underfits.
+5. Keep SONIC's existing losses as the reference objective:
+   - `G1SomaLatentLoss` for `z_g1` / `z_soma` alignment;
+   - `G1ReconLoss` for G1 kinematic decoder reconstruction;
+   - `g1_dyn` decoder remains the controller-action path.
+6. Use OnlineRetarget registry only to generate/audit the mapping from filtered
+   BONES Sonic rows to proportional skeleton ids and shape files.
 
 ## Immediate Next Checks
 
@@ -422,14 +432,18 @@ Interpretation:
 Baseline-2 minimal implementation boundary:
 
 ```text
-curated row
-  -> actor_uid / encoder_id
-  -> proportional SOMA source feature B
-  -> actor-specific or adapter encoder E_actor(B, shape/morphology)
-  -> shared latent Z
-  -> shared G1 kinematics decoder
-  -> shared G1 dynamics decoder / low-level controller path
+SONIC motion library row
+  -> actor_uid / proportional skeleton id from registry
+  -> SONIC tokenizer obs:
+       soma_joints_multi_future_local_nonflat
+       soma_root_ori_b_multi_future
+       joint_pos_multi_future_wrist_for_soma
+       actor/shape conditioning feature
+  -> SONIC soma encoder or soma adapter
+  -> shared SONIC latent/token Z
+  -> shared SONIC g1_kin decoder
+  -> shared SONIC g1_dyn decoder / low-level controller path
 ```
 
 The registry is only the routing and audit artifact. It does not change
-training behavior by itself.
+training behavior by itself, and it is not a reason to add a TF baseline.
