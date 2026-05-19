@@ -137,7 +137,7 @@ Gate:
 - Corrected full-length 3D capsule review videos exist.
 - Legacy BONES-SEED archive evidence is explicitly labeled invalid for current SONIC claims.
 
-Current status: paused/deferred on 2026-05-18. The index, skeleton-order correction, bounded SONIC quality smoke, and corrected full-length capsule review are enough to stop blocking on visualization/curation. Full SONIC scan, threshold calibration, manual review, simulator validation, and promoted curation policy are deferred until after the train/test/eval path and small baseline are in place. Durable summary: `docs/status/data_experience_summary_2026-05-18.md`.
+Current status: paused/deferred on 2026-05-18. The index, skeleton-order correction, bounded SONIC quality smoke, and corrected full-length capsule review are enough to stop blocking on visualization/curation. Full SONIC scan, threshold calibration, manual review, simulator validation, and promoted curation policy are deferred until after the train/test/eval path and small baseline are in place. On 2026-05-19 a full official SONIC filtered-BONES baseline was started on the remote 8-GPU host using `robot_filtered_v1.index.pkl`, with `ee_body_pos` and `foot_pos_xyz` terminations disabled while keeping `time_out`, `anchor_pos`, and `anchor_ori_full`; run details are in `docs/status/sonic_multiskeleton_encoder_plan_2026-05-19.md`. Durable summary: `docs/status/data_experience_summary_2026-05-18.md`.
 
 ## M3 - Dataset Schema and Observation Contract
 
@@ -240,7 +240,7 @@ Gate:
 
 Stop condition: one candidate is selected for simulator evaluation with a defensible quality/latency tradeoff.
 
-Current status: latency benchmark scaffold exists and dry-run records dimensions/config. Real 4090 timing requires torch/CUDA environment.
+Current status: latency benchmark scaffold exists and dry-run records dimensions/config. Real 4090 timing requires torch/CUDA environment. On 2026-05-19 the next latent branch was re-scoped toward a SONIC-compatible multi-skeleton encoder lane: reuse upstream SONIC `UniversalTokenModule` evidence (`g1`, `teleop`, `smpl`, optional `soma` encoders, FSQ token space, G1 dynamic/kinematic decoders, and G1-SOMA latent MSE) before adding a separate VAE. The state and loss-path plan is recorded in `docs/status/sonic_multiskeleton_encoder_plan_2026-05-19.md`.
 
 ## M7 - Physics Refinement and Simulator Evaluation
 
