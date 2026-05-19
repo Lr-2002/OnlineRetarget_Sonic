@@ -2,7 +2,10 @@
 
 Date: 2026-05-18
 
-Status: design checkpoint for the next implementation pass.
+Status: archived design checkpoint. This is not the active implementation lane
+after the 2026-05-19 SONIC pivot. Keep it as reasoning history only; do not add
+new model features to the OnlineRetarget token-transformer path unless a later
+decision explicitly reopens this branch.
 
 ## Goal
 
@@ -16,10 +19,10 @@ SOMA proportional skeleton and motion tokens
     -> Unitree G1 29D next-frame joint target
 ```
 
-The immediate implementation target is still offline supervised training on BONES
-`SOMA proportional BVH -> BONES-SONIC G1 joint_pos` pairs. The design must remain
-compatible with online inference, autoregressive rollout, and a later Flow
-Matching decoder.
+Historical implementation target at the time of writing was offline supervised
+training on BONES `SOMA proportional BVH -> BONES-SONIC G1 joint_pos` pairs. The
+active implementation lane has since moved to SONIC; this document is retained
+only to preserve the reasoning behind the archived Transformer branch.
 
 Default latent token size: `128`.
 

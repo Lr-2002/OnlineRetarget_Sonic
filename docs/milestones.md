@@ -217,18 +217,30 @@ Gate:
 
 Stop condition: baseline is worse/better by concrete metrics, not subjective visual inspection alone.
 
-Current status: training dry-run validates config, git state, DDP rank/world size, curated index, M2Q quality gate context, observation/output dimensions, and sample refs. Raw-BVH-channel and 30-body BVH-FK supervised JSONL builders exist and have produced real smoke artifacts. `scripts/train.py` now supports config-selected temporal MLP, temporal Transformer, and flow-matching model families, configurable loss/metric settings, rank-aware DDP training via `torchrun`, automatic offline eval, and rank0-only checkpoint/report writing. A real BONES `soma_bvh -> bones_sonic joint_pos` smoke was run on 128 train windows and 64 actor-heldout val windows; Transformer/FM path checks also ran. Formal-scale 30-body dataset generation, a promoted M2Q policy, WandB-enabled tmux training, full-sequence eval, and simulator-backed target provenance are still pending.
+Current status: the earlier OnlineRetarget supervised trainer is preserved as a
+legacy scaffold and diagnostic baseline, not the active implementation lane. It
+validated config capture, DDP shape, JSONL sample refs, temporal MLP,
+Transformer, and flow-matching smoke paths, but new model features should not be
+added there. The active baseline moved to SONIC: official filtered BONES
+training runs through SONIC's `UniversalTokenModule`, shared token space, and
+G1 decoder/controller surfaces. OnlineRetarget remains responsible for registry,
+curation, split, audit, offline metric, and documentation artifacts.
 
 ## M6 - Model Design Ablations and Latency Gate
 
 Purpose: compare design choices under the online constraint instead of optimizing only loss.
 
-Candidate branches:
+Candidate branches for the active SONIC lane:
 
-- Direct MLP / temporal MLP.
-- Tiny transformer or temporal convolution.
-- VAE latent motion-action alignment.
-- Single-step distilled flow/diffusion variant only if inference can satisfy the budget.
+- Shared SONIC `soma` encoder with proportional-skeleton / actor-shape
+  conditioning.
+- SONIC shared `soma` trunk plus lightweight actor or skeleton-cluster adapters.
+- One encoder per actor or skeleton group only as a measured escalation, not the
+  first implementation.
+- Offline AE/VAE-style latent probes only if implemented around SONIC encoder /
+  decoder surfaces or explicitly reopened as a standalone research branch.
+- Single-step distilled flow/diffusion variant only if a later SONIC failure mode
+  and inference benchmark justify it.
 - PDF-HR-style pose prior as a scorer or regularizer.
 
 Gate:

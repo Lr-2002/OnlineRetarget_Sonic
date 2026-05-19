@@ -217,8 +217,8 @@ The config path is:
 - `gear_sonic/config/aux_losses/terms/g1_soma_latent.yaml`
 
 This means the first implementation should reuse SONIC's encoder/decoder/loss
-surface where possible, instead of adding a parallel architecture unless we need
-an offline-only simplified trainer.
+surface. Do not add a parallel OnlineRetarget trainer for this lane unless the
+team explicitly reopens that branch after a concrete SONIC-side blocker.
 
 ## What Is Still Missing For Our Goal
 
@@ -270,9 +270,11 @@ Current recommendation:
 
 ## VAE / AE Pretraining Loss Paths
 
-Before full PPO/IsaacLab training, run an offline token/latent pretraining lane.
-This can be built either as a lightweight OnlineRetarget trainer or as a SONIC
-compatible pretraining wrapper around `UniversalTokenModule`.
+Before full PPO/IsaacLab training, run an offline token/latent pretraining lane
+only if it stays SONIC-compatible. The default implementation target is a
+pretraining wrapper around SONIC's `UniversalTokenModule` and existing
+encoder/decoder/loss surfaces. Do not add a separate OnlineRetarget trainer for
+this lane unless the team explicitly reopens that branch.
 
 Use filtered paired data only.
 

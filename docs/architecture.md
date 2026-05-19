@@ -4,40 +4,47 @@ Goal: a compact online retargeter that maps BONES-SEED SOMA proportional human m
 
 Active problem definition: `SOMA proportional -> G1`. The source is actor-specific SOMA proportional BVH plus morphology/shape conditioning; the target is direct Unitree G1 motion, initially 29D joint position from the BONES-SONIC NPZ lane. `SOMA uniform -> G1` is an ablation, not the main task.
 
+Current implementation boundary: model and training changes now start from the
+SONIC codebase, not from a separate OnlineRetarget retargeter. OnlineRetarget is
+kept as the data registry, curation/audit, metric, documentation, and experiment
+tracking layer for this lane. New features such as proportional-skeleton routing,
+actor/shape conditioning, supervisor logging, visualization hooks, or latent
+alignment should be added through SONIC's existing `UniversalTokenModule`,
+`soma` encoder path, shared token space, and G1 decoder/controller surfaces unless
+a later decision explicitly reopens a standalone trainer branch.
+
 ## Baseline Scope
 
-First baseline: direct G1 output.
+First active baseline: SONIC-native G1 controller training on filtered BONES
+data, followed by SONIC-native proportional-skeleton adaptation.
 
-Do not start with VAE/diffusion/flow. Those are design branches after direct output has measured failure modes.
+Do not add a new Transformer/flow/VAE model in OnlineRetarget for the active
+lane. Those branches are archived research scaffolds unless a measured SONIC
+failure mode justifies reopening them.
 
 ## Training Pipeline
 
 ```mermaid
 flowchart LR
-    A[BONES-SEED metadata] --> B[actor-level split]
-    C[SOMA proportional source] --> D[source feature builder]
-    E[BONES-SONIC G1 NPZ target] --> F[target builder]
+    A[Filtered BONES / registry audit in OnlineRetarget] --> B[SONIC motion library / index]
+    C[SOMA proportional source + actor shape] --> D[SONIC tokenizer observations]
     B --> D
-    B --> F
-    D --> G[temporal supervised dataset]
-    F --> G
-    G --> H[compact retargeter]
-    H --> I[offline metrics]
-    I --> J[WandB run + artifact]
-    I --> K[Isaac Lab tracking eval later]
+    D --> E[SONIC soma encoder or adapter]
+    E --> F[Shared SONIC latent/token space]
+    F --> G[SONIC g1_kin + g1_dyn decoders]
+    G --> H[Isaac Lab / controller rollout]
+    H --> I[WandB + metrics + videos]
 ```
 
 ## Inference Pipeline
 
 ```mermaid
 flowchart LR
-    A[live SOMA-proportional-like skeleton frames] --> B[normalize to source frame]
-    B --> C[history window]
-    D[current G1 state and IMU/proprioception] --> E[observation packer]
-    C --> E
-    E --> F[online retargeter]
-    F --> G[G1 joint target or action delta]
-    G --> H[controller/simulator]
+    A[live SOMA-proportional-like skeleton frames] --> B[SONIC-compatible observation packer]
+    C[current G1 state / controller context] --> B
+    B --> D[SONIC policy module]
+    D --> E[G1 action / reference]
+    E --> F[controller or simulator]
 ```
 
 ## Observation Design
@@ -49,7 +56,10 @@ Initial observation blocks:
 - Robot state: current G1 joint position, joint velocity, previous action, base orientation/IMU roll-pitch, angular velocity.
 - Optional future: short future source window if online latency permits buffering.
 
-The first model should accept a fixed-width flattened window. A more expressive tokenized transformer is only justified after the MLP baseline is measured.
+For the active lane, these fields must be exposed as SONIC tokenizer observations
+or conditioning features rather than a separate OnlineRetarget observation
+contract. The old fixed-width flattened-window contract remains useful for
+offline probes, but it is not the implementation path for new model features.
 
 Mid-term design choice: add a skeleton encoder between raw source windows and the retargeter. The encoder would convert SOMA skeleton structure, bone proportions, joint topology, local motion features, contacts, and optional shape parameters into learned skeleton/motion features, then feed those features to the direct G1 retargeter. This is not part of the first baseline, but it is a likely next branch if flattened FK windows plus morphology are not enough to capture cross-person motion semantics and skeleton-specific constraints.
 
@@ -76,11 +86,10 @@ Alternatives:
 
 | Family | Use | Risk |
 | --- | --- | --- |
-| Temporal MLP | First baseline, easiest to deploy under 1 ms | Limited global context |
-| Mid-term skeleton encoder + retargeter | If raw flattened windows underfit cross-skeleton semantics; encodes topology/proportions/local motion into reusable features before G1 prediction | Adds another representation boundary and must prove gains on actor-heldout eval |
-| Tiny temporal transformer | If MLP cannot smooth noisy long-context inputs | Latency and overfitting |
-| VAE latent model | If direct output is unstable across skeletons | More moving parts and harder metrics |
-| Flow/diffusion | Offline refinement or distillation target | Multi-step inference likely violates 1 ms unless distilled |
+| SONIC shared `soma` encoder | Active baseline extension point | May underfit actor-specific proportional skeletons |
+| SONIC shared trunk + actor/shape adapter | First proportional-skeleton adaptation branch | Requires stable actor/shape routing and actor-heldout eval |
+| One encoder per actor/skeleton group | Escalation only if adapters underfit | Hundreds of modules are hard to manage and easy to overfit |
+| OnlineRetarget temporal MLP/Transformer/flow | Archived scaffold / diagnostic baseline only | Not the active code path |
 | PDF-HR-style pose prior | Regularizer/scorer for G1 plausibility | Needs high-quality positive pose set |
 
 ## Losses
