@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="${ROOT:-/mnt/data_cpfs/code/wxh/OnlineRetarget}"
+SONIC_ROOT="${SONIC_ROOT:-/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training}"
 RUN_GROUP="${RETARGET_RUN_GROUP:-sonic_native_retarget_1m_20260520T220222Z}"
 INTERVAL_SECONDS="${MONITOR_INTERVAL_SECONDS:-1800}"
 ONCE="${MONITOR_ONCE:-0}"
@@ -35,9 +36,21 @@ hard_error() {
 }
 
 validation_file_count() {
-  find "${RUN_ROOT}" -path '*online_retarget_visual_validation*' -type f 2>/dev/null \
+  validation_files \
     | wc -l \
     | tr -d ' '
+}
+
+validation_files() {
+  if [[ -d "${RUN_ROOT}" ]]; then
+    find "${RUN_ROOT}" -path '*online_retarget_visual_validation*' -type f 2>/dev/null
+  fi
+  if [[ -d "${SONIC_ROOT}/logs_rl/OnlineRetarget" ]]; then
+    find "${SONIC_ROOT}/logs_rl/OnlineRetarget" \
+      -path "*${RUN_GROUP}*/online_retarget_visual_validation*" \
+      -type f \
+      2>/dev/null
+  fi
 }
 
 rate_fields() {
@@ -117,6 +130,9 @@ write_snapshot() {
     printf -- '- time_utc: `%s`\n' "${ts}"
     printf -- '- run_group: `%s`\n' "${RUN_GROUP}"
     printf -- '- validation_file_count: `%s`\n\n' "${validation_count}"
+    printf -- '- validation_search_roots: `%s`, `%s`\n\n' \
+      "${RUN_ROOT}" \
+      "${SONIC_ROOT}/logs_rl/OnlineRetarget"
     printf '| Variant | Iteration | Iter/hr | ETA 20k | ETA 1M | Log mtime UTC | Hard error |\n'
     printf '| --- | ---: | ---: | --- | --- | --- | --- |\n'
   } > "${tmp}"
