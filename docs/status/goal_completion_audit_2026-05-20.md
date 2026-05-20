@@ -260,3 +260,60 @@ Current conclusion remains unchanged: the implementation and launch contract are
 in place, and the four formal Sonic-native runs are alive, but the Goal is not
 complete until the 20k-step videos, 1M-step completion or reproducible failure
 evidence, and final A1/A2/B1/B2 comparison report exist.
+
+## Visual Callback Smoke Evidence: 2026-05-21
+
+A short A1 smoke run was found under:
+
+`/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_native_retarget_runs/sonic_native_retarget_vis_smoke_20260520T215549Z`
+
+This smoke run is not a substitute for the formal 20k-step validation videos,
+but it does prove that the integrated callback can execute inside Sonic
+training, render mp4 files, write per-clip reports, and upload videos through
+W&B.
+
+Observed artifacts:
+
+| Evidence | Result |
+| --- | --- |
+| Per-clip reports | `6` reports across steps `1`, `2`, and `3` |
+| Videos | `6` mp4 files under `online_retarget_visual_validation/step_*` |
+| Upload reports | `3` `main_upload_report.json` files |
+| W&B upload status | Every upload report records `online_retarget_visual_validation/wandb_upload_status: ok` and `videos_uploaded: 2` |
+| Time alignment metadata | Clip reports record `source_fps: 50.0`, `target_fps: 50.0`, `duration_sec: 0.2`, `target_frame_count: 10`, and `physical_time_aligned: true` |
+| Motion keys | Sample reports include `210531__jump_and_land_heavy_001__A001` and `210531__jump_and_land_heavy_001__A001_M` |
+
+Limitations:
+
+- This was a short smoke configuration (`duration_sec: 0.2`, `num_videos: 2`)
+  rather than the formal 20k-step validation configuration
+  (`duration_sec: 4.0`, `num_videos: 8`).
+- Remote `ffprobe` is not installed, so video duration/fps were verified from
+  callback reports and file existence, not container metadata.
+- The formal run group
+  `sonic_native_retarget_1m_20260520T220222Z` still has `0` validation files
+  because it has not reached step `20000`.
+
+## Remote Monitor Update: 2026-05-21
+
+A no-GPU monitor was added and started on 5090:
+
+- Script: `scripts/monitor_sonic_native_retarget_runs.sh`
+- tmux session: `sonic_native_retarget_monitor_1m`
+- Summary path:
+  `/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_native_retarget_runs/sonic_native_retarget_1m_20260520T220222Z/_monitor/latest_status.md`
+- JSONL path:
+  `/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_native_retarget_runs/sonic_native_retarget_1m_20260520T220222Z/_monitor/status.jsonl`
+- Interval: `1800` seconds
+
+Initial monitor snapshot:
+
+| Variant | Iteration | Hard error | Validation files |
+| --- | ---: | --- | ---: |
+| A1 | `306` | `none` | `0` |
+| A2 | `298` | `none` | `0` |
+| B1 | `301` | `none` | `0` |
+| B2 | `302` | `none` | `0` |
+
+This monitor is status evidence only. It does not satisfy the Goal's 20k-step
+video, 1M-step, or final comparison-report acceptance criteria.
