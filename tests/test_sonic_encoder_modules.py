@@ -94,6 +94,27 @@ class SonicEncoderModuleTests(unittest.TestCase):
         self.assertEqual(module.last_routes.tolist(), [2, 3])
         self.assertEqual(module.route_summary()["counts"], [0, 0, 1, 1])
 
+    def test_expert_output_uses_expert_dtype_under_autocast(self):
+        module = ExpertSomaEncoderModule(
+            input_dim=5,
+            output_dim=4,
+            conditioning_dim=2,
+            hidden_dim=8,
+            num_experts=4,
+            num_input_temporal_dims=2,
+            num_output_temporal_dims=2,
+        )
+        x = torch.zeros(2, 2, 5)
+        x[:, :, :3] = 1.0
+        x[0, :, 4] = 0.0
+        x[1, :, 4] = 1.0
+
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            output = module(x)
+
+        self.assertEqual(tuple(output.shape), (2, 2, 4))
+        self.assertEqual(output.dtype, torch.bfloat16)
+
 
 if __name__ == "__main__":
     unittest.main()

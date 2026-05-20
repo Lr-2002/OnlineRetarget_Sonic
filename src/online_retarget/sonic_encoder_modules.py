@@ -315,11 +315,16 @@ class ExpertSomaEncoderModule(_SonicEncoderBase):
         _, conditioning = self._split_motion_conditioning(x, self.conditioning_feature_dim)
         routes = self._routes(conditioning)
         self.last_routes = routes.detach()
-        output = flat.new_zeros(*flat.shape[:-1], self.output_dim)
+        output: torch.Tensor | None = None
         for index, expert in enumerate(self.experts):
             mask = routes == index
             if mask.any():
-                output[mask] = expert(flat[mask])
+                expert_output = expert(flat[mask])
+                if output is None:
+                    output = expert_output.new_zeros(*flat.shape[:-1], self.output_dim)
+                output[mask] = expert_output
+        if output is None:
+            output = flat.new_zeros(*flat.shape[:-1], self.output_dim)
         return self._reshape_output(output)
 
     def _routes(self, conditioning: torch.Tensor) -> torch.Tensor:
