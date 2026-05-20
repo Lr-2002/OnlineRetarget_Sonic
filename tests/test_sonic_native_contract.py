@@ -162,6 +162,7 @@ def _base_formal_config():
                     "++manager_env.observations.tokenizer.g1_target_action.func=online_retarget.sonic_observation_terms:g1_target_action",
                     "++algo.config.actor.backbone.encoders.soma.params._target_=online_retarget.sonic_encoder_modules.ConcatSomaEncoderModule",
                     "++algo.config.actor.backbone.aux_loss_func.online_retarget_g1_dyn_action._target_=online_retarget.sonic_losses.G1DynamicsActionLoss",
+                    "algo.config.num_learning_iterations=1000000",
                     "++callbacks.online_retarget_visual_val._target_=online_retarget.sonic_validation_callback.SonicVisualValidationCallback",
                     "++callbacks.online_retarget_visual_val.every_steps=20000",
                     "++callbacks.online_retarget_visual_val.num_videos=8",

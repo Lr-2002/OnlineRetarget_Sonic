@@ -501,6 +501,11 @@ def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -
         "sonic_hydra.args must wire the integrated visual validation callback",
     )
     _require(
+        f"algo.config.num_learning_iterations={FORMAL_MAX_STEPS}" in hydra_text,
+        errors,
+        "sonic_hydra.args must set Sonic algo.config.num_learning_iterations=1000000",
+    )
+    _require(
         f"every_steps={VISUAL_VALIDATION_EVERY_STEPS}" in hydra_text,
         errors,
         "visual validation callback must run every 20000 steps",

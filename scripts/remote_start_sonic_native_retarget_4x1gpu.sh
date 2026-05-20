@@ -137,7 +137,7 @@ from pathlib import Path
 print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["variant"]["name"])
 PY
 )"
-  hydra_args="$("${PYTHON_BIN}" - "${cfg}" "${ROOT}" <<'PY'
+  hydra_args="$("${PYTHON_BIN}" - "${cfg}" "${ROOT}" "${RUN_GROUP}" "${CONTROL_COMMIT}" "${SONIC_COMMIT}" <<'PY'
 import json
 import shlex
 import sys
@@ -145,11 +145,22 @@ from pathlib import Path
 
 cfg_path = Path(sys.argv[1])
 root = Path(sys.argv[2])
+run_group = sys.argv[3]
+online_retarget_commit = sys.argv[4]
+sonic_commit = sys.argv[5]
 config = json.loads(cfg_path.read_text(encoding="utf-8"))
 args = list(config.get("sonic_hydra", {}).get("args", []))
+variant = config["variant"]["name"]
+args.append("use_wandb=True")
+args.append(f"wandb.wandb_group={run_group}")
+args.append(f"wandb.wandb_dir={root / 'outputs' / 'wandb'}")
+args.append(f"exp_var={variant}_{run_group}")
 args.append(f"++online_retarget.config_path={root / cfg_path}")
-args.append(f"++online_retarget.encoder_variant={config['variant']['name']}")
+args.append(f"++online_retarget.encoder_variant={variant}")
 args.append("++online_retarget.contract=sonic_native_retarget")
+args.append(f"++online_retarget.run_group={run_group}")
+args.append(f"++online_retarget.git_sha={online_retarget_commit}")
+args.append(f"++online_retarget.sonic_git_sha={sonic_commit}")
 print(" ".join(shlex.quote(str(arg)) for arg in args))
 PY
 )"

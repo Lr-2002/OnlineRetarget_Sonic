@@ -137,6 +137,7 @@
       "num_envs=4096",
       "headless=True",
       "project_name=OnlineRetarget",
+      "algo.config.num_learning_iterations=1000000",
       "++callbacks.online_retarget_visual_val._target_=online_retarget.sonic_validation_callback.SonicVisualValidationCallback",
       "++callbacks.online_retarget_visual_val.every_steps=20000",
       "++callbacks.online_retarget_visual_val.num_videos=8",
