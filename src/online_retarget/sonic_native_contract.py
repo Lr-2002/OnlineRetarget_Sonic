@@ -489,6 +489,12 @@ def _check_sonic_paths(config: Mapping[str, Any], errors: list[str]) -> None:
             errors,
             allow_sentinel=False,
         )
+    if robot_motion_file and soma_motion_file:
+        _check_motion_key_alignment(
+            _resolve_runtime_path(robot_motion_file, source_repo=source_repo),
+            _resolve_runtime_path(soma_motion_file, source_repo=source_repo),
+            errors,
+        )
     if skeleton_registry:
         _check_file_path(
             "input_data.skeleton_registry",
@@ -646,6 +652,46 @@ def _check_motion_path(
             errors.append(f"{label} must be a .pkl file or directory: {path}")
         return
     errors.append(f"{label} is not a file or directory: {path}")
+
+
+def _check_motion_key_alignment(robot_path: Path, soma_path: Path, errors: list[str]) -> None:
+    if not robot_path.exists() or not soma_path.exists():
+        return
+    robot_keys = _motion_keys(robot_path)
+    soma_keys = _motion_keys(soma_path)
+    if not robot_keys or not soma_keys:
+        return
+    if robot_keys == soma_keys:
+        return
+    robot_only = sorted(robot_keys - soma_keys)
+    soma_only = sorted(soma_keys - robot_keys)
+    details = []
+    if robot_only:
+        details.append(f"robot_only={len(robot_only)} examples={robot_only[:5]}")
+    if soma_only:
+        details.append(f"soma_only={len(soma_only)} examples={soma_only[:5]}")
+    errors.append("robot and soma motionlib keys must match: " + "; ".join(details))
+
+
+def _motion_keys(path: Path) -> set[str]:
+    if path.is_dir():
+        metadata_path = path / "metadata.pkl"
+        if metadata_path.exists():
+            loaded = _load_joblib(metadata_path)
+            if isinstance(loaded, Mapping):
+                return set(str(key) for key in loaded)
+        return {item.stem for item in path.glob("*.pkl") if item.name != "metadata.pkl"}
+    if path.is_file() and path.suffix == ".pkl":
+        loaded = _load_joblib(path)
+        if isinstance(loaded, Mapping):
+            return set(str(key) for key in loaded)
+    return set()
+
+
+def _load_joblib(path: Path) -> Any:
+    import joblib
+
+    return joblib.load(path)
 
 
 def _check_file_path(label: str, path: Path, errors: list[str]) -> None:

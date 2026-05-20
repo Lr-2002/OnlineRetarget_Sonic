@@ -78,6 +78,7 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     bvh_index = build_bvh_index(source_bvh_root, keys)
     jobs = []
+    results = []
     missing = []
     for key in keys:
         bvh_path = resolve_bvh_for_motion_key(key, source_bvh_root, bvh_index)
@@ -86,17 +87,24 @@ def main() -> int:
             continue
         out_path = output_dir / f"{key}.pkl"
         if args.skip_existing and out_path.exists():
-            jobs.append((key, str(bvh_path), str(out_path), str(extractor_path), True))
+            results.append(
+                {
+                    "key": key,
+                    "status": "skipped",
+                    "output_path": str(out_path),
+                    "source_bvh": str(bvh_path),
+                }
+            )
         else:
             jobs.append((key, str(bvh_path), str(out_path), str(extractor_path), False))
 
     t0 = time.time()
-    results = []
     workers = max(1, int(args.num_workers))
-    with ProcessPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(convert_one, job) for job in jobs]
-        for future in as_completed(futures):
-            results.append(future.result())
+    if jobs:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(convert_one, job) for job in jobs]
+            for future in as_completed(futures):
+                results.append(future.result())
 
     report = build_report(
         robot_motion_dir=robot_motion_dir,
@@ -166,7 +174,10 @@ def convert_one(job: tuple[str, str, str, str, bool]) -> dict[str, Any]:
         np = _import_numpy()
 
         bvh_path = Path(bvh_path_text)
-        joints, channel_order, motion_data, _n_frames, frame_time = extractor.parse_bvh(bvh_path)
+        joints, channel_order, motion_data, _n_frames, frame_time, parse_stats = parse_bvh_sanitized(
+            bvh_path,
+            np,
+        )
         fps_source = round(1.0 / frame_time)
         positions, root_quats = extractor.compute_fk_selected(
             joints,
@@ -192,6 +203,7 @@ def convert_one(job: tuple[str, str, str, str, bool]) -> dict[str, Any]:
                 "fps": int(fps_source),
                 "joint_names": list(extractor.SOMA_JOINTS),
                 "source_bvh": str(bvh_path),
+                "parse_stats": parse_stats,
             }
         }
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -203,6 +215,7 @@ def convert_one(job: tuple[str, str, str, str, bool]) -> dict[str, Any]:
             "source_bvh": str(bvh_path),
             "fps": int(fps_source),
             "frames": int(positions_zup.shape[0]),
+            "parse_stats": parse_stats,
         }
     except Exception as exc:  # noqa: BLE001
         return {
@@ -244,6 +257,128 @@ def build_report(
         "failed_examples": failed[:20],
         "elapsed_sec": elapsed_sec,
     }
+
+
+def parse_bvh_sanitized(filepath: Path, np: Any):
+    """Parse BVH while tolerating known source-file corruption.
+
+    A small number of proportional BVH files contain NUL bytes in motion rows
+    or advertise one more frame than the file actually stores.  We normalize
+    those issues before handing the arrays to SONIC's FK routine so the
+    generated motionlib still follows the SONIC representation contract.
+    """
+
+    raw = filepath.read_bytes()
+    nul_bytes = raw.count(b"\x00")
+    text = raw.decode("utf-8", errors="replace")
+    if nul_bytes:
+        text = text.replace("\x00", " ")
+    lines = text.splitlines()
+
+    joints = []
+    joint_stack = []
+    channel_order = []
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if line == "MOTION":
+            i += 1
+            break
+
+        match = re.match(r"(ROOT|JOINT)\s+(\S+)", line)
+        if match:
+            name = match.group(2)
+            parent_idx = joint_stack[-1] if joint_stack else -1
+            joints.append({"name": name, "offset": None, "channels": [], "parent_idx": parent_idx})
+            joint_stack.append(len(joints) - 1)
+        elif line.startswith("OFFSET") and joint_stack:
+            vals = [_safe_float(token) for token in line.split()[1:4]]
+            while len(vals) < 3:
+                vals.append(0.0)
+            joints[joint_stack[-1]]["offset"] = np.asarray(vals, dtype=np.float64)
+        elif line.startswith("CHANNELS") and joint_stack:
+            parts = line.split()
+            n_ch = int(parts[1])
+            ch_names = parts[2 : 2 + n_ch]
+            joints[joint_stack[-1]]["channels"] = ch_names
+            for ch in ch_names:
+                channel_order.append((joint_stack[-1], ch))
+        elif line == "}":
+            if joint_stack:
+                joint_stack.pop()
+        i += 1
+
+    if i >= len(lines):
+        raise ValueError(f"BVH motion section is missing in {filepath}")
+
+    frames_line = lines[i].strip()
+    if not frames_line.startswith("Frames:"):
+        raise ValueError(f"BVH frames line is malformed in {filepath}: {frames_line!r}")
+    declared_frames = int(frames_line.split(":", 1)[1])
+    i += 1
+
+    if i >= len(lines):
+        raise ValueError(f"BVH frame-time line is missing in {filepath}")
+    frame_time_line = lines[i].strip()
+    if not frame_time_line.startswith("Frame Time:"):
+        raise ValueError(f"BVH frame-time line is malformed in {filepath}: {frame_time_line!r}")
+    frame_time = float(frame_time_line.split(":", 1)[1])
+    i += 1
+
+    channel_count = len(channel_order)
+    rows = []
+    bad_float_count = 0
+    padded_rows = 0
+    truncated_rows = 0
+    available_lines = lines[i : i + declared_frames]
+    previous_row = [0.0] * channel_count
+    for line in available_lines:
+        tokens = line.strip().split()
+        if len(tokens) < channel_count:
+            padded_rows += 1
+        elif len(tokens) > channel_count:
+            truncated_rows += 1
+        row = []
+        for col in range(channel_count):
+            if col < len(tokens):
+                value = _safe_float(tokens[col])
+                if value != value:  # NaN without importing math in worker hot path.
+                    value = previous_row[col]
+                    bad_float_count += 1
+            else:
+                value = previous_row[col]
+                bad_float_count += 1
+            row.append(value)
+        previous_row = row
+        rows.append(row)
+
+    if not rows:
+        raise ValueError(f"BVH has no parseable motion rows in {filepath}")
+
+    motion_data = np.asarray(rows, dtype=np.float64)
+    nonfinite_mask = ~np.isfinite(motion_data)
+    nonfinite_count = int(nonfinite_mask.sum())
+    if nonfinite_count:
+        motion_data = np.nan_to_num(motion_data, nan=0.0, posinf=0.0, neginf=0.0)
+
+    parse_stats = {
+        "declared_frames": int(declared_frames),
+        "parsed_frames": int(motion_data.shape[0]),
+        "channel_count": int(channel_count),
+        "nul_bytes": int(nul_bytes),
+        "bad_float_count": int(bad_float_count),
+        "nonfinite_count": nonfinite_count,
+        "padded_rows": int(padded_rows),
+        "truncated_rows": int(truncated_rows),
+    }
+    return joints, channel_order, motion_data, int(motion_data.shape[0]), frame_time, parse_stats
+
+
+def _safe_float(token: str) -> float:
+    try:
+        return float(token)
+    except ValueError:
+        return float("nan")
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:

@@ -145,6 +145,26 @@ class SonicNativeContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ContractError, "robot_motion_file does not exist"):
                 validate_config(config, require_formal=True, check_paths=True)
 
+    def test_check_paths_rejects_unpaired_robot_and_soma_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _base_formal_config()
+            config["source_repo"] = str(root / "sonic")
+            _write_sonic_config_files(Path(config["source_repo"]))
+            robot_dir = root / "robot_motionlib"
+            soma_dir = root / "soma_motionlib"
+            robot_dir.mkdir()
+            soma_dir.mkdir()
+            (robot_dir / "clip_a.pkl").write_bytes(b"not-used-by-contract-test")
+            (robot_dir / "clip_b.pkl").write_bytes(b"not-used-by-contract-test")
+            (soma_dir / "clip_a.pkl").write_bytes(b"not-used-by-contract-test")
+            registry = root / "skeleton_registry.csv"
+            registry.write_text("actor_uid,actor_height_cm\nA001,170\n", encoding="utf-8")
+            _set_data_paths(config, robot_dir, soma_dir, registry)
+
+            with self.assertRaisesRegex(ContractError, "motionlib keys must match"):
+                validate_config(config, require_formal=True, check_paths=True)
+
     def test_rejects_hydra_motion_path_mismatch(self):
         config = _base_formal_config()
         config["sonic_hydra"]["args"] = [
