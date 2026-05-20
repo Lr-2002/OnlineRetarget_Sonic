@@ -895,9 +895,9 @@ def validate_runtime(config: dict[str, Any], output_dir: Path) -> None:
         raise FileNotFoundError(f"data_root is missing: {data_root}")
     if not index_path_from_config(config).exists():
         raise FileNotFoundError(f"index is missing: {index_path_from_config(config)}")
+    source_root = Path(config["source_repo"])
     if config["runtime"].get("require_committed_code", True):
         control_root = Path.cwd()
-        source_root = Path(config["source_repo"])
         if git_revision(control_root) is None:
             raise RuntimeError(f"control repo is not a git worktree: {control_root}")
         if git_has_tracked_changes(control_root):
@@ -908,6 +908,7 @@ def validate_runtime(config: dict[str, Any], output_dir: Path) -> None:
             raise RuntimeError(f"source repo has uncommitted tracked changes: {source_root}")
     if config["runtime"].get("require_latest_code", True):
         require_latest_git(Path.cwd(), "control repo")
+        require_latest_git(source_root, "source repo")
 
 
 def set_seed(seed: int) -> None:

@@ -91,6 +91,7 @@ else
   git -C "${SONIC_ROOT}" status --short >&2
   exit 1
 fi
+require_latest_git "${SONIC_ROOT}" "SONIC source repo"
 
 mkdir -p "${LAUNCH_ROOT}"
 

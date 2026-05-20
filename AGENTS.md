@@ -8,6 +8,7 @@ This repository targets a learning-based online retargeter from heterogeneous hu
 - Keep code simple before adding abstractions. Prefer direct supervised baselines and independent evaluation modules before generative or simulator-heavy variants.
 - Cite papers or source code in docs when a design is derived from prior work.
 - Keep training runs traceable: commit before meaningful training, log config and git SHA to WandB, and launch long training inside tmux.
+- Before any remote training launch, verify the corresponding remote Git checkout is clean and at the latest upstream commit; launchers must refuse to run if this cannot be checked.
 - Use Isaac Lab for simulation stages. This repo may contain adapters and configs, but simulator-specific assets should remain clearly separated.
 - Preserve DDP readiness for training code: use rank/world-size aware logging, deterministic config capture, and output paths that do not collide across ranks.
 

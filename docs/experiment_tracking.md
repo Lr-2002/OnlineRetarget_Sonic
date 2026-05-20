@@ -10,9 +10,13 @@ Before meaningful training:
 
 1. Commit code and config.
 2. Record `git rev-parse HEAD`.
-3. On a remote training host, fetch the tracking branch and require
-   `HEAD == @{u}` before launching.
-4. Store any dirty diff as an artifact or do not start the run.
+3. On a remote training host, fetch the tracking branch for every code
+   checkout used by the run, including the owning repo and any configured
+   source repo.
+4. Require each checked repo to be clean and `HEAD == FETCH_HEAD` for its
+   upstream branch before launching. If upstream is missing or unreachable,
+   do not start the run.
+5. Store any dirty diff as an artifact or do not start the run.
 
 Commit messages should follow the Lore protocol from the workspace instructions when commits are requested.
 
