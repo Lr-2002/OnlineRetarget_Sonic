@@ -330,3 +330,28 @@ The first monitor version only searched the OnlineRetarget launcher run root for
 expected to resolve under Sonic's `logs_rl/OnlineRetarget` tree. Commit
 `0aa5482` extended the monitor to search both locations while filtering by
 `run_group`, so formal 20k validation artifacts should not be missed.
+
+## 20k Validation Watcher Update: 2026-05-21
+
+A no-GPU watcher was added and started on 5090:
+
+- Script: `scripts/watch_sonic_native_retarget_20k_validation.sh`
+- tmux session: `sonic_native_retarget_20k_watcher`
+- Ready report path:
+  `/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_native_retarget_runs/sonic_native_retarget_1m_20260520T220222Z/_monitor/validation_20k_ready.md`
+- Interval: `1800` seconds
+- Search roots:
+  `/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_native_retarget_runs/sonic_native_retarget_1m_20260520T220222Z`
+  and
+  `/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training/logs_rl/OnlineRetarget`
+
+The watcher exits after it sees any formal
+`online_retarget_visual_validation` file and writes a compact ready report with
+mp4, clip/rank report, and upload report counts plus sample paths.
+
+Important limitation:
+
+`validation_20k_ready.md` is a trigger for follow-up audit only. It does not
+prove the Goal is complete. The follow-up audit still must verify the formal
+20k step, expected 8 clips per run, W&B video upload, time alignment metadata,
+and absence of render/upload errors.
