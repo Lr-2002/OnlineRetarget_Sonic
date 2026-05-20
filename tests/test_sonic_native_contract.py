@@ -248,6 +248,52 @@ class SonicNativeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "remove_motion_keys"):
             validate_config(config, require_formal=True)
 
+    def test_check_paths_rejects_motions_missing_registry_actor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _base_formal_config()
+            config["source_repo"] = str(root / "sonic")
+            _write_sonic_config_files(Path(config["source_repo"]))
+            robot_dir = root / "robot_motionlib"
+            soma_dir = root / "soma_motionlib"
+            robot_dir.mkdir()
+            soma_dir.mkdir()
+            (robot_dir / "move__A100.pkl").write_bytes(b"not-used-by-contract-test")
+            (soma_dir / "move__A100.pkl").write_bytes(b"not-used-by-contract-test")
+            registry = root / "skeleton_registry.csv"
+            registry.write_text("actor_uid,actor_height_cm\nA001,170\n", encoding="utf-8")
+            _set_data_paths(config, robot_dir, soma_dir, registry)
+
+            with self.assertRaisesRegex(ContractError, "skeleton_registry"):
+                validate_config(config, require_formal=True, check_paths=True)
+
+    def test_check_paths_accepts_filter_for_registry_covered_subset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _base_formal_config()
+            config["source_repo"] = str(root / "sonic")
+            _write_sonic_config_files(Path(config["source_repo"]))
+            robot_dir = root / "robot_motionlib"
+            soma_dir = root / "soma_motionlib"
+            robot_dir.mkdir()
+            soma_dir.mkdir()
+            (robot_dir / "move__A001.pkl").write_bytes(b"not-used-by-contract-test")
+            (robot_dir / "move__A100.pkl").write_bytes(b"not-used-by-contract-test")
+            (soma_dir / "move__A001.pkl").write_bytes(b"not-used-by-contract-test")
+            registry = root / "skeleton_registry.csv"
+            registry.write_text("actor_uid,actor_height_cm\nA001,170\n", encoding="utf-8")
+            _set_data_paths(config, robot_dir, soma_dir, registry)
+            filter_regex = r"^(?!.*__(?:A100)(?:_M)?$).*$"
+            config["input_data"]["robot_filter_motion_keys"] = filter_regex
+            config["sonic_hydra"]["args"].append(
+                "++manager_env.commands.motion.motion_lib_cfg.filter_motion_keys="
+                + filter_regex
+            )
+
+            result = validate_config(config, require_formal=True, check_paths=True)
+
+        self.assertTrue(result.formal)
+
     def test_rejects_hydra_motion_path_mismatch(self):
         config = _base_formal_config()
         config["sonic_hydra"]["args"] = [

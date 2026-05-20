@@ -7,6 +7,7 @@ are allowed for labels and visualization, but not as deployable encoder inputs.
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 from functools import lru_cache
 import json
@@ -27,6 +28,7 @@ VISUAL_VALIDATION_NUM_VIDEOS = 8
 VISUAL_VALIDATION_DURATION_SEC = 4.0
 FORMAL_MAX_STEPS = 1_000_000
 MOTION_FILE_SENTINELS = ("dummy", "zeros")
+ACTOR_UID_PATTERN = re.compile(r"A\d{3,}")
 
 
 class ContractError(ValueError):
@@ -495,14 +497,24 @@ def _check_sonic_paths(config: Mapping[str, Any], errors: list[str]) -> None:
             _resolve_runtime_path(robot_motion_file, source_repo=source_repo),
             _resolve_runtime_path(soma_motion_file, source_repo=source_repo),
             errors,
+            robot_filter_motion_keys=_string_list(input_data.get("robot_filter_motion_keys")),
             robot_remove_motion_keys=_string_list(input_data.get("robot_remove_motion_keys")),
         )
     if skeleton_registry:
-        _check_file_path(
-            "input_data.skeleton_registry",
-            _resolve_runtime_path(skeleton_registry, source_repo=Path.cwd()),
-            errors,
-        )
+        registry_path = _resolve_runtime_path(skeleton_registry, source_repo=Path.cwd())
+        _check_file_path("input_data.skeleton_registry", registry_path, errors)
+        if robot_motion_file:
+            _check_registry_motion_coverage(
+                _resolve_runtime_path(robot_motion_file, source_repo=source_repo),
+                registry_path,
+                errors,
+                robot_filter_motion_keys=_string_list(
+                    input_data.get("robot_filter_motion_keys")
+                ),
+                robot_remove_motion_keys=_string_list(
+                    input_data.get("robot_remove_motion_keys")
+                ),
+            )
 
 
 def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -> None:
@@ -603,6 +615,17 @@ def _validate_data_hydra_consistency(config: Mapping[str, Any], errors: list[str
                 f"input_data value {input_value!r}"
             )
     robot_remove_keys = _string_list(input_data.get("robot_remove_motion_keys"))
+    robot_filter_keys = _string_list(input_data.get("robot_filter_motion_keys"))
+    if robot_filter_keys:
+        hydra_key = "manager_env.commands.motion.motion_lib_cfg.filter_motion_keys"
+        hydra_value = _strip_hydra_quotes(hydra.get(hydra_key))
+        if hydra_value in {"", None}:
+            errors.append(f"sonic_hydra.args missing {hydra_key}")
+        elif str(hydra_value) != str(robot_filter_keys[0]):
+            errors.append(
+                f"sonic_hydra.args {hydra_key}={hydra_value!r} does not match "
+                f"input_data value {robot_filter_keys[0]!r}"
+            )
     if robot_remove_keys:
         hydra_key = "manager_env.commands.motion.motion_lib_cfg.remove_motion_keys"
         hydra_value = hydra.get(hydra_key)
@@ -626,6 +649,14 @@ def _hydra_overrides(config: Mapping[str, Any]) -> dict[str, str]:
         key = key.lstrip("+")
         result[key] = value
     return result
+
+
+def _strip_hydra_quotes(value: Any) -> Any:
+    if not isinstance(value, str) or len(value) < 2:
+        return value
+    if value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
 
 
 def _resolve_runtime_path(value: str, *, source_repo: Path) -> Path:
@@ -695,12 +726,18 @@ def _check_motion_key_alignment(
     soma_path: Path,
     errors: list[str],
     *,
+    robot_filter_motion_keys: Sequence[str] = (),
     robot_remove_motion_keys: Sequence[str] = (),
 ) -> None:
     if not robot_path.exists() or not soma_path.exists():
         return
     raw_robot_keys = _motion_keys(robot_path)
-    robot_keys = _apply_remove_motion_keys(raw_robot_keys, robot_remove_motion_keys)
+    try:
+        robot_keys = _apply_filter_motion_keys(raw_robot_keys, robot_filter_motion_keys)
+    except ValueError as exc:
+        errors.append(str(exc))
+        return
+    robot_keys = _apply_remove_motion_keys(robot_keys, robot_remove_motion_keys)
     soma_keys = _motion_keys(soma_path)
     if not robot_keys or not soma_keys:
         return
@@ -724,6 +761,55 @@ def _check_motion_key_alignment(
     if soma_only:
         details.append(f"soma_only={len(soma_only)} examples={soma_only[:5]}")
     errors.append("robot and soma motionlib keys must match: " + "; ".join(details))
+
+
+def _check_registry_motion_coverage(
+    robot_path: Path,
+    registry_path: Path,
+    errors: list[str],
+    *,
+    robot_filter_motion_keys: Sequence[str] = (),
+    robot_remove_motion_keys: Sequence[str] = (),
+) -> None:
+    if not robot_path.exists() or not registry_path.exists() or not registry_path.is_file():
+        return
+    try:
+        motion_keys = _apply_filter_motion_keys(_motion_keys(robot_path), robot_filter_motion_keys)
+    except ValueError as exc:
+        errors.append(str(exc))
+        return
+    motion_keys = _apply_remove_motion_keys(motion_keys, robot_remove_motion_keys)
+    if not motion_keys:
+        return
+    registry_actors = _registry_actor_uids(registry_path)
+    missing = []
+    for motion_key in sorted(motion_keys):
+        actor_uid = _actor_uid_from_motion_key(motion_key)
+        if actor_uid and actor_uid not in registry_actors:
+            missing.append((motion_key, actor_uid))
+    if missing:
+        missing_actors = sorted({actor for _, actor in missing})
+        errors.append(
+            "skeleton_registry must cover all final robot motion actors: "
+            f"missing_motion_count={len(missing)} "
+            f"missing_actors={missing_actors[:20]} "
+            f"examples={[key for key, _ in missing[:5]]}"
+        )
+
+
+def _apply_filter_motion_keys(keys: set[str], filter_motion_keys: Sequence[str]) -> set[str]:
+    if not filter_motion_keys:
+        return keys
+    patterns = list(filter_motion_keys)
+    if all(pattern in keys for pattern in patterns):
+        return {pattern for pattern in patterns if pattern in keys}
+    compiled = []
+    for pattern in patterns:
+        try:
+            compiled.append(re.compile(pattern))
+        except re.error as exc:
+            raise ValueError(f"Invalid filter_motion_keys regex: {pattern}") from exc
+    return {key for key in keys if any(regex.fullmatch(key) for regex in compiled)}
 
 
 def _apply_remove_motion_keys(keys: set[str], remove_motion_keys: Sequence[str]) -> set[str]:
@@ -763,6 +849,20 @@ def _load_joblib(path: Path) -> Any:
     import joblib
 
     return joblib.load(path)
+
+
+@lru_cache(maxsize=16)
+def _registry_actor_uids(path_text: str | Path) -> frozenset[str]:
+    path = Path(path_text)
+    with path.open(newline="", encoding="utf-8") as file:
+        return frozenset(
+            row.get("actor_uid", "") for row in csv.DictReader(file) if row.get("actor_uid")
+        )
+
+
+def _actor_uid_from_motion_key(motion_key: str) -> str | None:
+    match = ACTOR_UID_PATTERN.search(Path(motion_key).stem)
+    return match.group(0) if match else None
 
 
 def _check_file_path(label: str, path: Path, errors: list[str]) -> None:
