@@ -24,7 +24,8 @@ evidence from the formal A1/A2/B1/B2 runs, not from smoke runs or dry runs.
 | --- | --- |
 | OnlineRetarget launch commit | `de7ff733edf5b8cd978882826229b0a7400ac0d2` |
 | Sonic launch commit | `53e5a44f6373fe70b2bc62c934fa8f98ee810062` |
-| Current repo monitor/docs commit | `6d5c468` |
+| Monitor ETA script commit | `6d5c468` |
+| Report scaffold first commit | `8808244` |
 | Launcher manifest | `/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_native_retarget_runs/sonic_native_retarget_1m_20260520T220222Z/_launcher/launch_manifest.json` |
 | Monitor summary | `/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_native_retarget_runs/sonic_native_retarget_1m_20260520T220222Z/_monitor/latest_status.md` |
 
