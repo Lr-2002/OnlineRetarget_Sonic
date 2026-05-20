@@ -70,7 +70,8 @@
     "required_gpu_count": 1,
     "write_root": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs",
     "forbid_write_roots": ["/home/user/data/motion_data", "/mnt/data_oss"],
-    "require_committed_code": true
+    "require_committed_code": true,
+    "require_latest_code": true
   },
   "wandb": {
     "enabled": true,

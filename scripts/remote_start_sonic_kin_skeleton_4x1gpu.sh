@@ -35,6 +35,38 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
   exit 1
 fi
 
+require_latest_git() {
+  local repo="$1"
+  local label="$2"
+  local upstream remote branch head upstream_head
+
+  upstream="$(git -C "${repo}" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+  if [[ -z "${upstream}" ]]; then
+    echo "${label} has no upstream tracking branch; set upstream before remote training" >&2
+    exit 1
+  fi
+
+  remote="${upstream%%/*}"
+  branch="${upstream#*/}"
+  if [[ -z "${remote}" || -z "${branch}" || "${remote}" == "${branch}" ]]; then
+    echo "${label} has unsupported upstream '${upstream}'" >&2
+    exit 1
+  fi
+
+  if ! git -C "${repo}" fetch --quiet "${remote}" "${branch}"; then
+    echo "${label} could not fetch ${upstream}; refusing to start training without a latest-code check" >&2
+    exit 1
+  fi
+
+  head="$(git -C "${repo}" rev-parse HEAD)"
+  upstream_head="$(git -C "${repo}" rev-parse FETCH_HEAD)"
+  if [[ "${head}" != "${upstream_head}" ]]; then
+    echo "${label} is not latest: HEAD=${head}, ${upstream}=${upstream_head}" >&2
+    echo "pull or sync the remote checkout before training" >&2
+    exit 1
+  fi
+}
+
 if git diff --quiet && git diff --cached --quiet; then
   CONTROL_COMMIT="$(git rev-parse HEAD)"
 else
@@ -42,6 +74,7 @@ else
   git status --short >&2
   exit 1
 fi
+require_latest_git "${ROOT}" "OnlineRetarget repo"
 
 SONIC_ROOT="$("${PYTHON_BIN}" - "${CONFIGS[0]}" <<'PY'
 import json

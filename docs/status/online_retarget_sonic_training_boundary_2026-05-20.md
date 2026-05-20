@@ -23,6 +23,9 @@ Rules for the next kinematics-only runs:
 
 - Use `scripts/remote_start_sonic_kin_skeleton_4x1gpu.sh` from OnlineRetarget.
 - Commit and push OnlineRetarget before launching.
+- The remote OnlineRetarget checkout must be at the latest upstream commit.
+  The launcher fetches its tracking branch and refuses to start if `HEAD` does
+  not match upstream.
 - Keep output under `outputs/` in the OnlineRetarget remote checkout.
 - Log W&B runs to project `OnlineRetarget`.
 - Record both the OnlineRetarget commit and Sonic source commit in each run

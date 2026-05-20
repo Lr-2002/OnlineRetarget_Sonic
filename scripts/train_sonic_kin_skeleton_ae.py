@@ -121,6 +121,43 @@ def git_has_tracked_changes(root: Path) -> bool:
     return False
 
 
+def require_latest_git(root: Path, label: str) -> None:
+    try:
+        upstream = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            cwd=root,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception as exc:
+        raise RuntimeError(f"{label} has no upstream tracking branch: {root}") from exc
+    if "/" not in upstream:
+        raise RuntimeError(f"{label} has unsupported upstream {upstream!r}: {root}")
+    remote, branch = upstream.split("/", 1)
+    try:
+        subprocess.run(
+            ["git", "fetch", "--quiet", remote, branch],
+            cwd=root,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"{label} could not fetch {upstream}; refusing to train without a latest-code check"
+        ) from exc
+
+    head = git_revision(root)
+    upstream_head = subprocess.check_output(
+        ["git", "rev-parse", "FETCH_HEAD"],
+        cwd=root,
+        text=True,
+        stderr=subprocess.DEVNULL,
+    ).strip()
+    if head != upstream_head:
+        raise RuntimeError(f"{label} is not latest: HEAD={head}, {upstream}={upstream_head}")
+
+
 def resolve_text(value: str, config: dict[str, Any], run_group: str) -> str:
     return (
         value.replace("{run_group}", run_group)
@@ -869,6 +906,8 @@ def validate_runtime(config: dict[str, Any], output_dir: Path) -> None:
             raise RuntimeError(f"source repo is not a git worktree: {source_root}")
         if git_has_tracked_changes(source_root):
             raise RuntimeError(f"source repo has uncommitted tracked changes: {source_root}")
+    if config["runtime"].get("require_latest_code", True):
+        require_latest_git(Path.cwd(), "control repo")
 
 
 def set_seed(seed: int) -> None:
