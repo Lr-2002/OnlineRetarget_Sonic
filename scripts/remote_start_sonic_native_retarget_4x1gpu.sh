@@ -4,7 +4,13 @@ set -euo pipefail
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT="${ROOT:-${SCRIPT_ROOT}}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-ACCELERATE_BIN="${ACCELERATE_BIN:-accelerate}"
+if [[ -z "${ACCELERATE_CMD:-}" ]]; then
+  if [[ -n "${ACCELERATE_BIN:-}" ]]; then
+    ACCELERATE_CMD="${ACCELERATE_BIN} launch"
+  else
+    ACCELERATE_CMD="${PYTHON_BIN} -m accelerate.commands.launch"
+  fi
+fi
 RUN_GROUP="${RETARGET_RUN_GROUP:-sonic_native_retarget_$(date -u +%Y%m%dT%H%M%SZ)}"
 LAUNCH_ROOT="${LAUNCH_ROOT:-${ROOT}/outputs/sonic_native_retarget_runs/${RUN_GROUP}/_launcher}"
 GIT_FETCH_TIMEOUT_SECONDS="${GIT_FETCH_TIMEOUT_SECONDS:-60}"
@@ -67,6 +73,19 @@ require_latest_git() {
   fi
 }
 
+require_latest_git_if_configured() {
+  local repo="$1"
+  local label="$2"
+  local upstream
+
+  upstream="$(git -C "${repo}" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+  if [[ -z "${upstream}" ]]; then
+    echo "${label} has no upstream tracking branch; requiring a clean tree and recording the local commit only" >&2
+    return 0
+  fi
+  require_latest_git "${repo}" "${label}"
+}
+
 if git diff --quiet && git diff --cached --quiet; then
   CONTROL_COMMIT="$(git rev-parse HEAD)"
 else
@@ -99,7 +118,7 @@ if [[ "${EXECUTE_SONIC_NATIVE_TRAINING}" == "1" ]]; then
     git -C "${SONIC_ROOT}" status --short >&2
     exit 1
   fi
-  require_latest_git "${SONIC_ROOT}" "SONIC source repo"
+  require_latest_git_if_configured "${SONIC_ROOT}" "SONIC source repo"
 else
   SONIC_COMMIT="not-checked-contract-only"
 fi
@@ -176,11 +195,13 @@ export ONLINE_RETARGET_CONFIG="${ROOT}/${cfg}"
 export ONLINE_RETARGET_GIT_SHA="${CONTROL_COMMIT}"
 export SONIC_GIT_SHA="${SONIC_COMMIT}"
 export PYTHONPATH="${ROOT}/src:${PYTHONPATH:-}"
+export ACCELERATE_CMD="${ACCELERATE_CMD}"
 export WANDB_MODE="${WANDB_MODE:-online}"
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 echo "variant=${variant} gpu=${gpu} online_retarget_commit=${CONTROL_COMMIT} sonic_commit=${SONIC_COMMIT}"
-"${ACCELERATE_BIN}" launch --num_processes=1 gear_sonic/train_agent_trl.py ${hydra_args} 2>&1 | tee -a "${log_path}"
+read -r -a _accelerate_cmd <<< "\${ACCELERATE_CMD}"
+"\${_accelerate_cmd[@]}" --num_processes=1 gear_sonic/train_agent_trl.py ${hydra_args} 2>&1 | tee -a "${log_path}"
 EOF
 )
   COMMANDS+=("${cmd}")
