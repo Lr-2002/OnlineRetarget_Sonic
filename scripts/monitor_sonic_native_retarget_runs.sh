@@ -46,9 +46,9 @@ write_snapshot() {
 
   {
     printf '# Sonic Native Retarget Monitor\n\n'
-    printf '- time_utc: `%s`\n' "${ts}"
-    printf '- run_group: `%s`\n' "${RUN_GROUP}"
-    printf '- validation_file_count: `%s`\n\n' "${validation_count}"
+    printf -- '- time_utc: `%s`\n' "${ts}"
+    printf -- '- run_group: `%s`\n' "${RUN_GROUP}"
+    printf -- '- validation_file_count: `%s`\n\n' "${validation_count}"
     printf '| Variant | Iteration | Log mtime UTC | Hard error |\n'
     printf '| --- | ---: | --- | --- |\n'
   } > "${tmp}"
