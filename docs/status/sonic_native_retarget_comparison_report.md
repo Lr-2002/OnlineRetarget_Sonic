@@ -85,3 +85,19 @@ Decision rule:
 - Current ETA to 1M steps is measured in weeks, so the final decision may need
   an intermediate checkpoint comparison before full completion if training cost
   becomes unacceptable.
+
+## Latest Monitor Snapshot
+
+Manual refresh at `2026-05-20T23:54:58Z` for run group
+`sonic_native_retarget_1m_20260520T220222Z`:
+
+| Variant | Iteration | Iter/hr | ETA 20k | ETA 1M | Validation files | Hard error |
+| --- | ---: | ---: | --- | --- | ---: | --- |
+| A1 | `1046` | `568.4` | `1d 9h` | `73d 5h` | `0` | `none` |
+| A2 | `1026` | `559.2` | `1d 9h` | `74d 10h` | `0` | `none` |
+| B1 | `1034` | `563.0` | `1d 9h` | `73d 22h` | `0` | `none` |
+| B2 | `1038` | `565.3` | `1d 9h` | `73d 15h` | `0` | `none` |
+
+No 20k validation evidence is expected yet. This report remains pending until
+formal validation videos, W&B uploads, checkpoints, metrics, and latency
+measurements exist.

@@ -355,3 +355,44 @@ Important limitation:
 prove the Goal is complete. The follow-up audit still must verify the formal
 20k step, expected 8 clips per run, W&B video upload, time alignment metadata,
 and absence of render/upload errors.
+
+## Live Training Status: 2026-05-20T23:54:58Z
+
+Manual monitor refresh on remote host `5090`:
+
+```bash
+ROOT=/mnt/data_cpfs/code/wxh/OnlineRetarget \
+SONIC_ROOT=/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training \
+RETARGET_RUN_GROUP=sonic_native_retarget_1m_20260520T220222Z \
+MONITOR_ONCE=1 \
+bash /mnt/data_cpfs/code/wxh/OnlineRetarget/scripts/monitor_sonic_native_retarget_runs.sh
+```
+
+Observed summary:
+
+| Variant | Iteration | Iter/hr | ETA 20k | ETA 1M | Hard error |
+| --- | ---: | ---: | --- | --- | --- |
+| A1_concat | `1046` | `568.4` | `1d 9h` | `73d 5h` | `none` |
+| A2_film_contact | `1026` | `559.2` | `1d 9h` | `74d 10h` | `none` |
+| B1_adapter | `1034` | `563.0` | `1d 9h` | `73d 22h` | `none` |
+| B2_expert | `1038` | `565.3` | `1d 9h` | `73d 15h` | `none` |
+
+Validation artifact count remains `0`, which is expected because the formal
+video callback is gated at `every_steps=20000`. The current remote
+OnlineRetarget checkout is clean at `9a3954a50ec78832baa19b41defa0331e0877b04`
+and matches its upstream. The launched runs remain traceable to launch commit
+`de7ff733edf5b8cd978882826229b0a7400ac0d2` through the launcher manifest and
+W&B args; later commits only update monitoring/audit surfaces unless a new run
+is launched.
+
+Focused validation after this status refresh:
+
+```bash
+PYTHONPATH=src:. python3 -m unittest \
+  tests.test_sonic_validation_callback \
+  tests.test_sonic_native_contract
+```
+
+Observed result: `30` tests passed with `3` skips. These tests cover the
+`20k` visual-validation step gate and formal config contract, but they do not
+replace the required real 20k W&B video artifacts.
