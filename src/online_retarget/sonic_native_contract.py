@@ -640,12 +640,35 @@ def _check_motion_path(
         return
     if path.is_dir():
         try:
-            has_pkl = any(path.rglob("*.pkl"))
+            has_pkl = any(_is_sonic_motion_file(item) for item in path.rglob("*.pkl"))
         except OSError as exc:
             errors.append(f"{label} could not be scanned for PKL files: {path} ({exc})")
             return
         if not has_pkl:
-            errors.append(f"{label} has no PKL motion files: {path}")
+            errors.append(f"{label} has no Sonic-loadable per-motion PKL files: {path}")
+            return
+        metadata_path = path / "metadata.pkl"
+        if metadata_path.exists():
+            motion_keys = _directory_motion_keys(path)
+            loaded = _load_joblib(metadata_path)
+            if isinstance(loaded, Mapping):
+                metadata_keys = set(str(key) for key in loaded)
+                if metadata_keys != motion_keys:
+                    metadata_only = sorted(metadata_keys - motion_keys)
+                    file_only = sorted(motion_keys - metadata_keys)
+                    details = []
+                    if metadata_only:
+                        details.append(
+                            f"metadata_only={len(metadata_only)} examples={metadata_only[:5]}"
+                        )
+                    if file_only:
+                        details.append(
+                            f"file_only={len(file_only)} examples={file_only[:5]}"
+                        )
+                    errors.append(
+                        f"{label} metadata keys must match Sonic-loadable PKL files: "
+                        + "; ".join(details)
+                    )
         return
     if path.is_file():
         if path.suffix != ".pkl":
@@ -675,17 +698,20 @@ def _check_motion_key_alignment(robot_path: Path, soma_path: Path, errors: list[
 
 def _motion_keys(path: Path) -> set[str]:
     if path.is_dir():
-        metadata_path = path / "metadata.pkl"
-        if metadata_path.exists():
-            loaded = _load_joblib(metadata_path)
-            if isinstance(loaded, Mapping):
-                return set(str(key) for key in loaded)
-        return {item.stem for item in path.glob("*.pkl") if item.name != "metadata.pkl"}
+        return _directory_motion_keys(path)
     if path.is_file() and path.suffix == ".pkl":
         loaded = _load_joblib(path)
         if isinstance(loaded, Mapping):
             return set(str(key) for key in loaded)
     return set()
+
+
+def _directory_motion_keys(path: Path) -> set[str]:
+    return {item.stem for item in path.rglob("*.pkl") if _is_sonic_motion_file(item)}
+
+
+def _is_sonic_motion_file(path: Path) -> bool:
+    return path.is_file() and path.suffix == ".pkl" and path.name != "metadata.pkl"
 
 
 def _load_joblib(path: Path) -> Any:

@@ -1,3 +1,5 @@
+import importlib
+import importlib.util
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -143,6 +145,55 @@ class SonicNativeContractTests(unittest.TestCase):
             _set_data_paths(config, robot_dir, soma_dir, registry)
 
             with self.assertRaisesRegex(ContractError, "robot_motion_file does not exist"):
+                validate_config(config, require_formal=True, check_paths=True)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("joblib"),
+        "joblib is required for metadata fixtures",
+    )
+    def test_check_paths_rejects_metadata_only_motionlib_before_isaac_launch(self):
+        joblib = importlib.import_module("joblib")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _base_formal_config()
+            config["source_repo"] = str(root / "sonic")
+            _write_sonic_config_files(Path(config["source_repo"]))
+            robot_dir = root / "robot_motionlib"
+            soma_dir = root / "soma_motionlib"
+            robot_dir.mkdir()
+            soma_dir.mkdir()
+            joblib.dump({"clip": {"num_frames": 10}}, robot_dir / "metadata.pkl")
+            (soma_dir / "clip.pkl").write_bytes(b"not-used-by-contract-test")
+            registry = root / "skeleton_registry.csv"
+            registry.write_text("actor_uid,actor_height_cm\nA001,170\n", encoding="utf-8")
+            _set_data_paths(config, robot_dir, soma_dir, registry)
+
+            with self.assertRaisesRegex(ContractError, "Sonic-loadable per-motion PKL"):
+                validate_config(config, require_formal=True, check_paths=True)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("joblib"),
+        "joblib is required for metadata fixtures",
+    )
+    def test_check_paths_rejects_metadata_file_key_mismatch(self):
+        joblib = importlib.import_module("joblib")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _base_formal_config()
+            config["source_repo"] = str(root / "sonic")
+            _write_sonic_config_files(Path(config["source_repo"]))
+            robot_dir = root / "robot_motionlib"
+            soma_dir = root / "soma_motionlib"
+            robot_dir.mkdir()
+            soma_dir.mkdir()
+            (robot_dir / "clip.pkl").write_bytes(b"not-used-by-contract-test")
+            joblib.dump({"other_clip": {"num_frames": 10}}, robot_dir / "metadata.pkl")
+            (soma_dir / "clip.pkl").write_bytes(b"not-used-by-contract-test")
+            registry = root / "skeleton_registry.csv"
+            registry.write_text("actor_uid,actor_height_cm\nA001,170\n", encoding="utf-8")
+            _set_data_paths(config, robot_dir, soma_dir, registry)
+
+            with self.assertRaisesRegex(ContractError, "metadata keys must match"):
                 validate_config(config, require_formal=True, check_paths=True)
 
     def test_check_paths_rejects_unpaired_robot_and_soma_keys(self):
