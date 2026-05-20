@@ -1,0 +1,73 @@
+import unittest
+
+from online_retarget.sonic_validation_callback import (
+    _clip_report,
+    _current_soma_routes,
+    rank_video_indices,
+    should_run_visual_validation,
+    validation_frame_count,
+)
+
+
+class SonicValidationCallbackTests(unittest.TestCase):
+    def test_visual_validation_runs_only_on_positive_interval(self):
+        self.assertFalse(should_run_visual_validation(0, 20000))
+        self.assertFalse(should_run_visual_validation(19999, 20000))
+        self.assertTrue(should_run_visual_validation(20000, 20000))
+        self.assertFalse(should_run_visual_validation(20000, 20000, last_step=20000))
+
+    def test_rank_video_indices_split_global_clips(self):
+        self.assertEqual(rank_video_indices(8, 0, 4), (0, 4))
+        self.assertEqual(rank_video_indices(8, 1, 4), (1, 5))
+        self.assertEqual(rank_video_indices(8, 2, 4), (2, 6))
+        self.assertEqual(rank_video_indices(8, 3, 4), (3, 7))
+
+    def test_validation_frame_count_uses_sonic_target_frequency(self):
+        self.assertEqual(validation_frame_count(4.0, 50), 200)
+        self.assertEqual(validation_frame_count(0.0, 50), 1)
+
+    def test_current_soma_routes_uses_last_temporal_route(self):
+        policy = _PolicyWithRoutes([[0, 1, 2], [3, 2, 1]])
+
+        routes = _current_soma_routes(policy)
+
+        self.assertEqual(list(routes), [2, 1])
+
+    def test_clip_report_includes_encoder_route_counts(self):
+        report = _clip_report(
+            trajectory={
+                "clip_index": 0,
+                "local_env_index": 0,
+                "target_g1": [1, 2, 3],
+                "encoder_routes": [2, 2, 3],
+            },
+            video_path=__file__,
+            step=20000,
+            rank=0,
+            world_size=1,
+            target_fps=50,
+            duration_sec=4.0,
+        )
+
+        self.assertEqual(report["encoder_route_first"], 2)
+        self.assertEqual(report["encoder_route_last"], 3)
+        self.assertEqual(report["encoder_route_counts"], {"2": 2, "3": 1})
+
+
+class _PolicyWithRoutes:
+    def __init__(self, routes):
+        self.actor_module = _ActorModule(routes)
+
+
+class _ActorModule:
+    def __init__(self, routes):
+        self.encoders = {"soma": _Encoder(routes)}
+
+
+class _Encoder:
+    def __init__(self, routes):
+        self.last_routes = routes
+
+
+if __name__ == "__main__":
+    unittest.main()

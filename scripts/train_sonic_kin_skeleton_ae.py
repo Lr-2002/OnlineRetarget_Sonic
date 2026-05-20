@@ -387,11 +387,20 @@ def rows_from_csv_index(config: dict[str, Any], data_root: Path) -> tuple[list[d
             if frame_count <= 1:
                 skipped += 1
                 continue
+            timing = source_target_timing_summary(source, frame_count=frame_count, indexing=indexing)
+            if timing.get("status") == "invalid":
+                skipped += 1
+                continue
             rows.append(
                 {
                     "path": str(path),
                     "relative_path": relative_path,
                     "frame_count": frame_count,
+                    "source_frame_count": timing.get("source_frame_count", ""),
+                    "source_fps": timing.get("source_fps", ""),
+                    "target_fps": timing.get("target_fps", ""),
+                    "source_duration_sec": timing.get("source_duration_sec", ""),
+                    "target_duration_sec": timing.get("target_duration_sec", ""),
                     "source_move_name": source.get("filename") or source.get("move_name"),
                     "source_labels": {
                         "package": source.get("package", ""),
@@ -408,6 +417,61 @@ def rows_from_csv_index(config: dict[str, Any], data_root: Path) -> tuple[list[d
             if max_clips > 0 and len(rows) >= max_clips:
                 break
     return rows, skipped
+
+
+def source_target_timing_summary(
+    source: Mapping[str, Any],
+    *,
+    frame_count: int,
+    indexing: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate metadata-level timing for a 120 Hz source BVH / 50 Hz SONIC target pair."""
+
+    source_frames = _optional_float(source.get("move_duration_frames"))
+    target_fps = _optional_float(source.get("fps"))
+    source_fps = _optional_float(indexing.get("source_fps", 120.0)) or 120.0
+    max_delta = _optional_float(indexing.get("max_duration_delta_sec", 0.02)) or 0.02
+    summary: dict[str, Any] = {
+        "status": "unknown",
+        "flags": [],
+        "source_fps": source_fps,
+        "target_fps": target_fps if target_fps is not None else "",
+        "source_frame_count": int(source_frames) if source_frames is not None else "",
+    }
+    if source_frames is None or target_fps is None or source_frames <= 1 or target_fps <= 0:
+        return summary
+
+    source_duration = source_frames / source_fps
+    target_duration = frame_count / target_fps
+    flags: list[str] = []
+    if target_fps >= source_fps:
+        flags.append("target_fps_not_below_source_fps")
+    if frame_count > source_frames:
+        flags.append("target_frame_count_exceeds_source_frame_count")
+    if abs(target_duration - source_duration) > max_delta:
+        flags.append("source_target_duration_mismatch")
+    summary.update(
+        {
+            "status": "invalid" if flags else "ok",
+            "flags": flags,
+            "source_duration_sec": source_duration,
+            "target_duration_sec": target_duration,
+            "duration_delta_sec": target_duration - source_duration,
+        }
+    )
+    return summary
+
+
+def _optional_float(value: Any) -> float | None:
+    if value in {"", None}:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(result):
+        return None
+    return result
 
 
 def rows_from_index(config: dict[str, Any], data_root: Path) -> tuple[list[dict[str, Any]], int]:
@@ -897,12 +961,18 @@ def _load_visual_render_deps() -> dict[str, Any]:
         G1_CAPSULE_IGNORE_BODIES,
         ReviewClipExportConfig,
         _SourceCapsuleRenderer,
+        _source_capsule_body_names,
+        _source_capsule_edges_from_motion,
         _render_capsule_3d_video,
     )
     from online_retarget.data.sonic_review_clips import (
         SONIC_BODY_NAMES,
         SONIC_PRUNED_BODY_NAMES,
         SONIC_PRUNED_CAPSULE_EDGES,
+    )
+    from online_retarget.data.windowed_builder import (
+        global_body_position_maps_from_bvh,
+        parse_bvh_motion,
     )
 
     return {
@@ -911,7 +981,11 @@ def _load_visual_render_deps() -> dict[str, Any]:
         "G1_CAPSULE_IGNORE_BODIES": G1_CAPSULE_IGNORE_BODIES,
         "ReviewClipExportConfig": ReviewClipExportConfig,
         "_SourceCapsuleRenderer": _SourceCapsuleRenderer,
+        "_source_capsule_body_names": _source_capsule_body_names,
+        "_source_capsule_edges_from_motion": _source_capsule_edges_from_motion,
         "_render_capsule_3d_video": _render_capsule_3d_video,
+        "global_body_position_maps_from_bvh": global_body_position_maps_from_bvh,
+        "parse_bvh_motion": parse_bvh_motion,
         "SONIC_BODY_NAMES": SONIC_BODY_NAMES,
         "SONIC_PRUNED_BODY_NAMES": SONIC_PRUNED_BODY_NAMES,
         "SONIC_PRUNED_CAPSULE_EDGES": SONIC_PRUNED_CAPSULE_EDGES,
@@ -990,7 +1064,14 @@ def _render_visual_validation_clip(
 
     source_bvh = _resolve_source_bvh(row, config, output_dir)
     if source_bvh is not None:
-        source_report = render_deps["_SourceCapsuleRenderer"](render_config).render_bvh(source_bvh, source_video)
+        source_report = _render_time_aligned_source_bvh(
+            source_bvh,
+            source_video,
+            render_config=render_config,
+            target_fps=fps,
+            frame_count=frame_count,
+            render_deps=render_deps,
+        )
     else:
         source_report = _render_missing_panel(
             render_deps=render_deps,
@@ -1082,6 +1163,81 @@ def _render_visual_validation_clip(
         "combined_video": str(combined_video),
         "metadata": str(metadata_path),
     }
+
+
+def _render_time_aligned_source_bvh(
+    bvh_path: Path,
+    video_path: Path,
+    *,
+    render_config: Any,
+    target_fps: float,
+    frame_count: int,
+    render_deps: Mapping[str, Any],
+) -> dict[str, object]:
+    try:
+        text = bvh_path.read_text(encoding="utf-8", errors="replace").replace("\x00", "")
+        motion = render_deps["parse_bvh_motion"](text)
+        body_names = render_deps["_source_capsule_body_names"](motion)
+        edges = render_deps["_source_capsule_edges_from_motion"](motion, body_names)
+        source_frames = render_deps["global_body_position_maps_from_bvh"](
+            motion,
+            body_names=body_names,
+            position_scale=render_config.source_position_scale,
+        )
+        source_fps = 1.0 / float(motion.frame_time) if float(motion.frame_time) > 0 else target_fps
+        aligned_frames, source_indices = _time_align_frame_maps(
+            source_frames,
+            source_fps=source_fps,
+            target_fps=target_fps,
+            frame_count=frame_count,
+        )
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return {"status": "failed", "message": f"Could not load BVH source motion: {exc}"}
+
+    report = render_deps["_render_capsule_3d_video"](
+        frames=aligned_frames,
+        edges=edges,
+        video_path=video_path,
+        config=render_config,
+        label="source bvh 3d capsules",
+        up_axis=1,
+        capsule_color=(48, 132, 83),
+        key_color=(132, 103, 34),
+    )
+    report.update(
+        {
+            "alignment": "source_bvh_time_to_target_fps",
+            "source_fps": source_fps,
+            "target_fps": target_fps,
+            "source_total_frames": len(source_frames),
+            "target_frames": frame_count,
+            "source_index_first": int(source_indices[0]) if source_indices else "",
+            "source_index_last": int(source_indices[-1]) if source_indices else "",
+            "source_time_span_sec": (source_indices[-1] / source_fps) if source_indices and source_fps > 0 else 0.0,
+            "target_time_span_sec": ((frame_count - 1) / target_fps) if frame_count > 0 and target_fps > 0 else 0.0,
+        }
+    )
+    return report
+
+
+def _time_align_frame_maps(
+    frames: Sequence[Mapping[str, tuple[float, float, float]]],
+    *,
+    source_fps: float,
+    target_fps: float,
+    frame_count: int,
+) -> tuple[list[Mapping[str, tuple[float, float, float]]], list[int]]:
+    if not frames or frame_count <= 0:
+        return [], []
+    if source_fps <= 0 or target_fps <= 0:
+        indices = list(range(min(frame_count, len(frames))))
+    else:
+        ratio = source_fps / target_fps
+        indices = [
+            min(len(frames) - 1, max(0, int(math.floor(frame_index * ratio + 1e-6))))
+            for frame_index in range(frame_count)
+        ]
+    return [frames[index] for index in indices], indices
 
 
 def _predict_visual_joint_pos(

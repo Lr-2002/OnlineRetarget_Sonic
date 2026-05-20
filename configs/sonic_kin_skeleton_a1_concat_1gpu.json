@@ -1,6 +1,7 @@
 {
   "schema_version": "1.0.0",
   "owner": "OnlineRetarget",
+  "training_lane": "legacy_kin_diagnostic",
   "purpose": "A1: one-GPU concat-conditioned MLP for supervised SONIC g1_kin target prediction from root-local body motion plus skeleton feature. Kinematics only; no PPO, no dynamics decoder, no Isaac rollout.",
   "source_repo": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training",
   "source_rev": "a2b90bab00216885c389a5b03d7356e7fa112c25",
@@ -10,6 +11,8 @@
       "index_csv": "/mnt/data_cpfs/code/wxh/OnlineRetarget/runs/indices/bones_sonic_index_full_v0/sonic_index.csv",
       "source_path_prefix": "/home/user/data/motion_data/bones_sonic",
       "target_path_prefix": "/mnt/data_cpfs/bones_sonic",
+      "source_fps": 120.0,
+      "max_duration_delta_sec": 0.02,
       "max_clips": 20000
     }
   },
