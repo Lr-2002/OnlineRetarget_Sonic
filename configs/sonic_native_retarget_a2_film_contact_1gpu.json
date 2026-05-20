@@ -10,9 +10,18 @@
   "base_actor_critic_config": "gear_sonic/config/actor_critic/universal_token/all_mlp_v1_soma.yaml",
   "sonic_entrypoint": "gear_sonic/train_agent_trl.py",
   "input_data": {
-    "robot_motion_file": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/robot_soma_paired_v1",
+    "robot_motion_file": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/robot_filtered_v1",
     "soma_motion_file": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/soma_filtered_v1",
-    "skeleton_registry": "/mnt/data_cpfs/code/wxh/OnlineRetarget/runs/skeleton_registry/bones_sonic_txt_filtered_skeleton_registry_v0/skeleton_registry.csv"
+    "skeleton_registry": "/mnt/data_cpfs/code/wxh/OnlineRetarget/runs/skeleton_registry/bones_sonic_txt_filtered_skeleton_registry_v0/skeleton_registry.csv",
+    "robot_remove_motion_keys": [
+      "230124__no_see_002__A142_M",
+      "240529__neutral_button__press_001__A543",
+      "240529__neutral_button__press_001__A543_M",
+      "240529__neutral_button__press_001__A544",
+      "240529__neutral_button__press_001__A544_M",
+      "240529__neutral_button__press_001__A545",
+      "240529__neutral_button__press_001__A545_M"
+    ]
   },
   "source_features": [
     "soma_joints_multi_future_local_nonflat",
@@ -154,7 +163,8 @@
       "++callbacks.online_retarget_visual_val.wandb_upload=true",
       "++callbacks.online_retarget_visual_val.output_dir=${experiment_dir}/online_retarget_visual_validation",
       "++manager_env.commands.motion.motion_lib_cfg.target_fps=50",
-      "++manager_env.commands.motion.motion_lib_cfg.motion_file=/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/robot_soma_paired_v1",
+      "++manager_env.commands.motion.motion_lib_cfg.motion_file=/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/robot_filtered_v1",
+      "++manager_env.commands.motion.motion_lib_cfg.remove_motion_keys=[230124__no_see_002__A142_M,240529__neutral_button__press_001__A543,240529__neutral_button__press_001__A543_M,240529__neutral_button__press_001__A544,240529__neutral_button__press_001__A544_M,240529__neutral_button__press_001__A545,240529__neutral_button__press_001__A545_M]",
       "++manager_env.commands.motion.motion_lib_cfg.soma_motion_file=/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/soma_filtered_v1",
       "++manager_env.commands.motion.encoder_sample_probs.g1=1.0",
       "++manager_env.commands.motion.encoder_sample_probs.teleop=0.0",

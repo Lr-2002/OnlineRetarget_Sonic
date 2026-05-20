@@ -495,6 +495,7 @@ def _check_sonic_paths(config: Mapping[str, Any], errors: list[str]) -> None:
             _resolve_runtime_path(robot_motion_file, source_repo=source_repo),
             _resolve_runtime_path(soma_motion_file, source_repo=source_repo),
             errors,
+            robot_remove_motion_keys=_string_list(input_data.get("robot_remove_motion_keys")),
         )
     if skeleton_registry:
         _check_file_path(
@@ -601,6 +602,18 @@ def _validate_data_hydra_consistency(config: Mapping[str, Any], errors: list[str
                 f"sonic_hydra.args {hydra_key}={hydra_value!r} does not match "
                 f"input_data value {input_value!r}"
             )
+    robot_remove_keys = _string_list(input_data.get("robot_remove_motion_keys"))
+    if robot_remove_keys:
+        hydra_key = "manager_env.commands.motion.motion_lib_cfg.remove_motion_keys"
+        hydra_value = hydra.get(hydra_key)
+        if hydra_value in {"", None}:
+            errors.append(f"sonic_hydra.args missing {hydra_key}")
+        else:
+            missing = [key for key in robot_remove_keys if key not in str(hydra_value)]
+            if missing:
+                errors.append(
+                    f"sonic_hydra.args {hydra_key} missing remove keys: {missing[:5]}"
+                )
 
 
 def _hydra_overrides(config: Mapping[str, Any]) -> dict[str, str]:
@@ -677,13 +690,30 @@ def _check_motion_path(
     errors.append(f"{label} is not a file or directory: {path}")
 
 
-def _check_motion_key_alignment(robot_path: Path, soma_path: Path, errors: list[str]) -> None:
+def _check_motion_key_alignment(
+    robot_path: Path,
+    soma_path: Path,
+    errors: list[str],
+    *,
+    robot_remove_motion_keys: Sequence[str] = (),
+) -> None:
     if not robot_path.exists() or not soma_path.exists():
         return
-    robot_keys = _motion_keys(robot_path)
+    raw_robot_keys = _motion_keys(robot_path)
+    robot_keys = _apply_remove_motion_keys(raw_robot_keys, robot_remove_motion_keys)
     soma_keys = _motion_keys(soma_path)
     if not robot_keys or not soma_keys:
         return
+    missing_remove_keys = [
+        key
+        for key in robot_remove_motion_keys
+        if not any(item.startswith(key) for item in raw_robot_keys)
+    ]
+    if missing_remove_keys:
+        errors.append(
+            "robot_remove_motion_keys must match at least one robot motion: "
+            + f"examples={missing_remove_keys[:5]}"
+        )
     if robot_keys == soma_keys:
         return
     robot_only = sorted(robot_keys - soma_keys)
@@ -694,6 +724,16 @@ def _check_motion_key_alignment(robot_path: Path, soma_path: Path, errors: list[
     if soma_only:
         details.append(f"soma_only={len(soma_only)} examples={soma_only[:5]}")
     errors.append("robot and soma motionlib keys must match: " + "; ".join(details))
+
+
+def _apply_remove_motion_keys(keys: set[str], remove_motion_keys: Sequence[str]) -> set[str]:
+    if not remove_motion_keys:
+        return keys
+    return {
+        key
+        for key in keys
+        if not any(key.startswith(prefix) for prefix in remove_motion_keys)
+    }
 
 
 def _motion_keys(path: Path) -> set[str]:
