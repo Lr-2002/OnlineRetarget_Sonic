@@ -751,16 +751,13 @@ def _check_motion_key_alignment(
             "robot_remove_motion_keys must match at least one robot motion: "
             + f"examples={missing_remove_keys[:5]}"
         )
-    if robot_keys == soma_keys:
-        return
     robot_only = sorted(robot_keys - soma_keys)
-    soma_only = sorted(soma_keys - robot_keys)
-    details = []
-    if robot_only:
-        details.append(f"robot_only={len(robot_only)} examples={robot_only[:5]}")
-    if soma_only:
-        details.append(f"soma_only={len(soma_only)} examples={soma_only[:5]}")
-    errors.append("robot and soma motionlib keys must match: " + "; ".join(details))
+    if not robot_only:
+        return
+    errors.append(
+        "final robot motionlib keys must all exist in soma motionlib: "
+        f"robot_only={len(robot_only)} examples={robot_only[:5]}"
+    )
 
 
 def _check_registry_motion_coverage(

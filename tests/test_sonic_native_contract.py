@@ -213,8 +213,29 @@ class SonicNativeContractTests(unittest.TestCase):
             registry.write_text("actor_uid,actor_height_cm\nA001,170\n", encoding="utf-8")
             _set_data_paths(config, robot_dir, soma_dir, registry)
 
-            with self.assertRaisesRegex(ContractError, "motionlib keys must match"):
+            with self.assertRaisesRegex(ContractError, "final robot motionlib keys"):
                 validate_config(config, require_formal=True, check_paths=True)
+
+    def test_check_paths_allows_unused_soma_extra_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _base_formal_config()
+            config["source_repo"] = str(root / "sonic")
+            _write_sonic_config_files(Path(config["source_repo"]))
+            robot_dir = root / "robot_motionlib"
+            soma_dir = root / "soma_motionlib"
+            robot_dir.mkdir()
+            soma_dir.mkdir()
+            (robot_dir / "clip_a.pkl").write_bytes(b"not-used-by-contract-test")
+            (soma_dir / "clip_a.pkl").write_bytes(b"not-used-by-contract-test")
+            (soma_dir / "clip_b.pkl").write_bytes(b"not-used-by-contract-test")
+            registry = root / "skeleton_registry.csv"
+            registry.write_text("actor_uid,actor_height_cm\nA001,170\n", encoding="utf-8")
+            _set_data_paths(config, robot_dir, soma_dir, registry)
+
+            result = validate_config(config, require_formal=True, check_paths=True)
+
+        self.assertTrue(result.formal)
 
     def test_check_paths_accepts_explicit_sonic_remove_motion_keys(self):
         with tempfile.TemporaryDirectory() as tmp:
