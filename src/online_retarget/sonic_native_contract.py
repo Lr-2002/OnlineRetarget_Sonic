@@ -8,6 +8,7 @@ are allowed for labels and visualization, but not as deployable encoder inputs.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import json
 from pathlib import Path
 import re
@@ -640,16 +641,15 @@ def _check_motion_path(
         return
     if path.is_dir():
         try:
-            has_pkl = any(_is_sonic_motion_file(item) for item in path.rglob("*.pkl"))
+            motion_keys = _directory_motion_keys(path)
         except OSError as exc:
             errors.append(f"{label} could not be scanned for PKL files: {path} ({exc})")
             return
-        if not has_pkl:
+        if not motion_keys:
             errors.append(f"{label} has no Sonic-loadable per-motion PKL files: {path}")
             return
         metadata_path = path / "metadata.pkl"
         if metadata_path.exists():
-            motion_keys = _directory_motion_keys(path)
             loaded = _load_joblib(metadata_path)
             if isinstance(loaded, Mapping):
                 metadata_keys = set(str(key) for key in loaded)
@@ -707,11 +707,16 @@ def _motion_keys(path: Path) -> set[str]:
 
 
 def _directory_motion_keys(path: Path) -> set[str]:
-    return {item.stem for item in path.rglob("*.pkl") if _is_sonic_motion_file(item)}
+    resolved = path.resolve() if path.exists() else path
+    return set(_directory_motion_keys_cached(str(resolved)))
 
 
-def _is_sonic_motion_file(path: Path) -> bool:
-    return path.is_file() and path.suffix == ".pkl" and path.name != "metadata.pkl"
+@lru_cache(maxsize=32)
+def _directory_motion_keys_cached(path_text: str) -> frozenset[str]:
+    path = Path(path_text)
+    return frozenset(
+        item.stem for item in path.rglob("*.pkl") if item.name != "metadata.pkl"
+    )
 
 
 def _load_joblib(path: Path) -> Any:
