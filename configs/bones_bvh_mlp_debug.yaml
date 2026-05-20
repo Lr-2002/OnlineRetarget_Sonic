@@ -1,6 +1,6 @@
 experiment:
   name: bones_bvh_mlp_debug
-  project: online-retarget
+  project: OnlineRetarget
   seed: 17
   output_root: runs
 

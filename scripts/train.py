@@ -1151,7 +1151,7 @@ def _init_wandb(
         import wandb
     except ImportError:
         return None
-    project = str(_nested_get(config, ("experiment", "project"), "online-retarget"))
+    project = str(_nested_get(config, ("experiment", "project"), "OnlineRetarget"))
     name = str(_nested_get(config, ("experiment", "name"), "baseline_mlp_direct_g1"))
     return wandb.init(
         project=project,

@@ -1,6 +1,6 @@
 experiment:
   name: bones_bvh_token_vae_debug
-  project: online-retarget
+  project: OnlineRetarget
   seed: 17
   output_root: runs
 

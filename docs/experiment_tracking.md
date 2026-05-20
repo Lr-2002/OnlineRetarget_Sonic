@@ -28,7 +28,7 @@ Each training/eval run must log:
 - latency benchmark when applicable
 - checkpoint and exported model artifact
 
-Default project: `online-retarget`.
+Default project: `OnlineRetarget`.
 
 ## Tmux Policy
 

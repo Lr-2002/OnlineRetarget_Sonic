@@ -134,7 +134,7 @@ edges:
 evidence:
   git_sha: 4db2e51b2cb64f5d55efde127d8598d703f1c24c
   world_size: 8
-  wandb_project: online-retarget
+  wandb_project: OnlineRetarget
   wandb_run_id: vua8pqzo
   final_train_mse: 13.984659194946289
   train_joint_rmse: 2.2011191881506864

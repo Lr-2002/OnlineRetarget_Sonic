@@ -1,0 +1,85 @@
+{
+  "schema_version": "1.0.0",
+  "owner": "OnlineRetarget",
+  "purpose": "B2: one-GPU skeleton-gated MLP experts for supervised SONIC g1_kin target prediction. Kinematics only; no PPO, no dynamics decoder, no Isaac rollout.",
+  "source_repo": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training",
+  "source_rev": "a2b90bab00216885c389a5b03d7356e7fa112c25",
+  "input_data": {
+    "data_root": "/mnt/data_cpfs/bones_sonic",
+    "indexing": {
+      "index_csv": "/mnt/data_cpfs/code/wxh/OnlineRetarget/runs/indices/bones_sonic_index_full_v0/sonic_index.csv",
+      "source_path_prefix": "/home/user/data/motion_data/bones_sonic",
+      "target_path_prefix": "/mnt/data_cpfs/bones_sonic",
+      "max_clips": 20000
+    }
+  },
+  "output_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_kin_skeleton_runs/{run_group}/B2_expert",
+  "validation_command": "CONFIG=configs/sonic_kin_skeleton_b2_expert_1gpu.json CUDA_VISIBLE_DEVICES=3 scripts/remote_start_sonic_kin_skeleton_4x1gpu.sh",
+  "expected_artifacts": [
+    "manifest.json",
+    "loss_curve.csv",
+    "stats/normalization.pt",
+    "checkpoints/latest.pt",
+    "logs/train.log"
+  ],
+  "variant": {
+    "name": "B2_expert",
+    "family": "B",
+    "type": "expert",
+    "gpu_slot": "B2"
+  },
+  "features": {
+    "future_window_frames": 10,
+    "future_step": 5,
+    "motion_feature": "root_local_body_pos_plus_root_ori6d_plus_root_z",
+    "skeleton_feature": "anchor_frame_root_local_body_pos_plus_root_distance"
+  },
+  "split": {
+    "validation_ratio": 0.005,
+    "hash_salt": "sonic-kin-skeleton-20260520"
+  },
+  "normalization": {
+    "max_frames": 200000,
+    "frames_per_chunk": 1024
+  },
+  "model": {
+    "hidden_dim": 512,
+    "num_layers": 2,
+    "num_experts": 4,
+    "dropout": 0.0
+  },
+  "training": {
+    "seed": 2026052014,
+    "max_steps": 20000,
+    "batch_frames": 4096,
+    "frame_stride": 1,
+    "loader_chunk_frames": 2048,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.00001,
+    "grad_clip_norm": 1.0,
+    "precision": "bf16",
+    "num_workers": 2,
+    "log_every": 20,
+    "validate_every": 200,
+    "validation_batches": 16,
+    "checkpoint_every": 500,
+    "keep_last_checkpoints": 5,
+    "command_loss_weight": 1.0,
+    "anchor_loss_weight": 1.0
+  },
+  "runtime": {
+    "required_gpu_count": 1,
+    "write_root": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs",
+    "forbid_write_roots": ["/home/user/data/motion_data", "/mnt/data_oss"],
+    "require_committed_code": true
+  },
+  "wandb": {
+    "enabled": true,
+    "project": "OnlineRetarget",
+    "entity": null,
+    "group": "sonic_kin_skeleton_{run_group}",
+    "name": "B2_expert_{run_group}",
+    "dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/wandb",
+    "tags": ["sonic-kin-only", "skeleton-aware", "B2", "expert"]
+  }
+}
