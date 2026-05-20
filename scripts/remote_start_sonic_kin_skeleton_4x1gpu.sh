@@ -5,6 +5,7 @@ ROOT="${ROOT:-/mnt/data_cpfs/code/wxh/OnlineRetarget}"
 PYTHON_BIN="${PYTHON_BIN:-/workspace/isaaclab/_isaac_sim/python.sh}"
 RUN_GROUP="${KIN_RUN_GROUP:-kin_skeleton_$(date -u +%Y%m%dT%H%M%SZ)}"
 LAUNCH_ROOT="${LAUNCH_ROOT:-${ROOT}/outputs/sonic_kin_skeleton_runs/${RUN_GROUP}/_launcher}"
+GIT_FETCH_TIMEOUT_SECONDS="${GIT_FETCH_TIMEOUT_SECONDS:-60}"
 
 cd "${ROOT}"
 
@@ -53,7 +54,7 @@ require_latest_git() {
     exit 1
   fi
 
-  if ! git -C "${repo}" fetch --quiet "${remote}" "${branch}"; then
+  if ! timeout "${GIT_FETCH_TIMEOUT_SECONDS}" git -C "${repo}" fetch --quiet "${remote}" "${branch}"; then
     echo "${label} could not fetch ${upstream}; refusing to start training without a latest-code check" >&2
     exit 1
   fi

@@ -13,8 +13,8 @@ Before meaningful training:
 3. On a remote training host, fetch the tracking branch for the owning repo
    that launches the run.
 4. Require that remote checkout to be clean and `HEAD == FETCH_HEAD` for its
-   upstream branch before launching. If upstream is missing or unreachable,
-   do not start the run.
+   upstream branch before launching. Fetch must be bounded by a timeout; if
+   upstream is missing, unreachable, or times out, do not start the run.
 5. For additional source checkouts, require a clean tree and record the exact
    commit; also require latest-upstream only when the checkout has an upstream
    or the run config explicitly declares one.

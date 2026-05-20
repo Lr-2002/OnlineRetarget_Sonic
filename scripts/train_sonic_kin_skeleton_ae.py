@@ -122,6 +122,7 @@ def git_has_tracked_changes(root: Path) -> bool:
 
 
 def require_latest_git(root: Path, label: str) -> None:
+    fetch_timeout = float(os.environ.get("GIT_FETCH_TIMEOUT_SECONDS", "60"))
     try:
         upstream = subprocess.check_output(
             ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
@@ -141,6 +142,7 @@ def require_latest_git(root: Path, label: str) -> None:
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=fetch_timeout,
         )
     except Exception as exc:
         raise RuntimeError(
