@@ -208,3 +208,55 @@ unittest reported `43` tests OK with `14` skipped because this local Python does
 not provide `torch`. The Torch-backed loss tests still need remote Isaac/Sonic
 Python verification after the commit is pushed and the remote checkout is
 synced.
+
+## Current Formal Run Update: 2026-05-21
+
+Current formal run group:
+
+`sonic_native_retarget_1m_20260520T220222Z`
+
+Remote launcher manifest:
+
+`/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_native_retarget_runs/sonic_native_retarget_1m_20260520T220222Z/_launcher/launch_manifest.json`
+
+| Item | Evidence | Status |
+| --- | --- | --- |
+| OnlineRetarget commit | Manifest and W&B args record `de7ff733edf5b8cd978882826229b0a7400ac0d2` | Covered for launched runs |
+| Sonic commit | Manifest, W&B metadata, and W&B args record `53e5a44f6373fe70b2bc62c934fa8f98ee810062` | Covered |
+| Remote checkout at launch audit | `/mnt/data_cpfs/code/wxh/OnlineRetarget` was clean; `HEAD` and upstream both resolved to `de7ff73` | Covered at audit time |
+| Launcher execution | Manifest records `executed: true`, configs A1/A2/B1/B2, GPUs `0 1 2 3`, and four tmux sessions | Covered |
+| A1 run | W&B local run `rcuzxotj`; args include `encoder_variant=A1_concat`, `num_learning_iterations=1000000`, `g1_dyn` loss, and visual callback settings | Running |
+| A2 run | W&B local run `o1ldyppd`; args include `encoder_variant=A2_film_contact`, `num_learning_iterations=1000000`, `g1_dyn` loss, and visual callback settings | Running |
+| B1 run | W&B local run `ctkd8d87`; args include `encoder_variant=B1_adapter`, deterministic adapter module, `num_learning_iterations=1000000`, and visual callback settings | Running |
+| B2 run | W&B local run `2r8c0hs0`; args include `encoder_variant=B2_expert`, deterministic expert module, `num_learning_iterations=1000000`, and visual callback settings | Running |
+| Sonic callback integration | Sonic `HVCallbackHandler` passes `env`, `model`, and `accelerator` to callback `on_step_end`; `PPOTrainer` increments `global_step` before calling callbacks | Covered at source-audit level |
+| 1M-step semantics | Sonic config maps `num_total_batches` to `algo.config.num_learning_iterations` and comments it as total training steps | Covered |
+| Health scan | Grep over the four launcher logs found no `Traceback`, `CUDA out of memory`, `RuntimeError`, import error, or validation/W&B failure markers at the audit time | Covered so far |
+| Current progress sample | Logs showed A1 around learning iteration `205`, A2 around `198`, B1 around `201`, and B2 around `202` | In progress |
+| 20k-step visual validation | Runs are far below global step `20000`, so no integrated validation video should exist yet | Missing until reached |
+| 1M-step completion | Runs are far below `1000000` Sonic training steps | Missing |
+| Final comparison report | Requires completed or reproducibly failed A1/A2/B1/B2 runs with metrics, validation videos, and latency evidence | Missing |
+
+Latest focused local verification:
+
+```bash
+PYTHONPATH=src python3 scripts/validate_sonic_native_retarget_config.py --require-formal \
+  configs/sonic_native_retarget_a1_concat_1gpu.json \
+  configs/sonic_native_retarget_a2_film_contact_1gpu.json \
+  configs/sonic_native_retarget_b1_adapter_1gpu.json \
+  configs/sonic_native_retarget_b2_expert_1gpu.json
+
+PYTHONPATH=src python3 -m unittest \
+  tests.test_sonic_native_contract \
+  tests.test_sonic_validation_callback
+
+bash -n scripts/remote_start_sonic_native_retarget_4x1gpu.sh
+```
+
+Observed result: formal config validation passed for all four configs; focused
+unittest ran `30` tests with `3` skips; launcher shell syntax check passed.
+
+Current conclusion remains unchanged: the implementation and launch contract are
+in place, and the four formal Sonic-native runs are alive, but the Goal is not
+complete until the 20k-step videos, 1M-step completion or reproducible failure
+evidence, and final A1/A2/B1/B2 comparison report exist.
