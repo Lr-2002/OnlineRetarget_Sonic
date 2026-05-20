@@ -23,7 +23,8 @@ with `g1_dyn` as the primary target and `g1_kin` only auxiliary.
 | Integrated validation runs inside formal Sonic training | `src/online_retarget/sonic_validation_callback.py` implements a Sonic `TrainerCallback`; all formal configs inject it under `callbacks.online_retarget_visual_val`; contract validation now requires this callback wiring | Covered at code/config level |
 | W&B video upload inside formal training | `SonicVisualValidationCallback` collects rank-local videos into the shared step directory and main rank logs them with `wandb.Video`; formal configs require `wandb_upload=true` | Covered at code/config level |
 | Remote launch checks committed/latest git | `remote_start_sonic_native_retarget_4x1gpu.sh` validates formal configs and requires committed/latest git before execution | Covered |
-| A1/A2/B1/B2 can launch under assigned GPU budget | Launcher allocates one GPU per formal config and validates `sonic_hydra.variant_wired=true`; dry-run passed after commit `55be433d14c372119d5534a044dfcd52060cd190`; execution still requires the remote Sonic/Isaac environment and four visible GPUs | Partial until remote launch |
+| A1/A2/B1/B2 can launch under assigned GPU budget | Launcher allocates one GPU per formal config and validates `sonic_hydra.variant_wired=true`; dry-run passed after commit `cd7bdb71473434f8ea0197a6b34b07cf038c03ae`; execution still requires the remote Sonic/Isaac environment and four visible GPUs | Partial until remote launch |
+| Formal Sonic runs use 1M trainer iterations | Formal configs and validator require `algo.config.num_learning_iterations=1000000`, which is the Sonic trainer loop field; sidecar `training.max_steps` alone is not trusted | Covered at config-contract level |
 | 1M-step comparison report selects best variant | No 1M-step runs or comparison report exist | Missing |
 
 ## Verification Run
@@ -93,14 +94,16 @@ Observed result: compile passed; focused unittest ran 28 tests with 4
 torch-dependent encoder tensor tests skipped because local `torch` is not
 installed; formal config validator passed; launcher dry-run passed and wrote:
 
-`outputs/sonic_native_retarget_runs/sonic_native_retarget_20260520T164445Z/_launcher/launch_manifest.json`
+`outputs/sonic_native_retarget_runs/sonic_native_retarget_20260520T165510Z/_launcher/launch_manifest.json`
 
 The dry-run manifest records:
 
-- `online_retarget_commit`: `55be433d14c372119d5534a044dfcd52060cd190`
+- `online_retarget_commit`: `cd7bdb71473434f8ea0197a6b34b07cf038c03ae`
 - `executed`: `false`
 - configs: A1/A2/B1/B2 formal configs
 - GPU assignments: `0 1 2 3`
+
+This dry-run also verified `HEAD == origin/main` before writing the manifest.
 
 Local execution blocker on this machine:
 
