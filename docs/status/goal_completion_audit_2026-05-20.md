@@ -305,6 +305,10 @@ A no-GPU monitor was added and started on 5090:
 - JSONL path:
   `/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_native_retarget_runs/sonic_native_retarget_1m_20260520T220222Z/_monitor/status.jsonl`
 - Interval: `1800` seconds
+- Validation artifact search roots:
+  `/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_native_retarget_runs/sonic_native_retarget_1m_20260520T220222Z`
+  and
+  `/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training/logs_rl/OnlineRetarget`
 
 Initial monitor snapshot:
 
@@ -317,3 +321,12 @@ Initial monitor snapshot:
 
 This monitor is status evidence only. It does not satisfy the Goal's 20k-step
 video, 1M-step, or final comparison-report acceptance criteria.
+
+Monitor correction:
+
+The first monitor version only searched the OnlineRetarget launcher run root for
+`online_retarget_visual_validation` files. Formal Sonic configs set callback
+`output_dir` to `${experiment_dir}/online_retarget_visual_validation`, which is
+expected to resolve under Sonic's `logs_rl/OnlineRetarget` tree. Commit
+`0aa5482` extended the monitor to search both locations while filtering by
+`run_group`, so formal 20k validation artifacts should not be missed.
