@@ -56,6 +56,42 @@ class SonicNativeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "teacher forcing"):
             validate_config(config, require_formal=True)
 
+    def test_rejects_g1_encoder_sampling_in_formal_retarget(self):
+        config = _base_formal_config()
+        config["sonic_hydra"]["args"] = [
+            arg.replace(
+                "++manager_env.commands.motion.encoder_sample_probs.g1=0.0",
+                "++manager_env.commands.motion.encoder_sample_probs.g1=1.0",
+            )
+            for arg in config["sonic_hydra"]["args"]
+        ]
+
+        with self.assertRaisesRegex(ContractError, "encoder_sample_probs.g1=0.0"):
+            validate_config(config, require_formal=True)
+
+    def test_rejects_g1_as_active_source_encoder_in_formal_retarget(self):
+        config = _base_formal_config()
+        config["sonic_hydra"]["args"] = [
+            arg.replace(
+                "++algo.config.actor.backbone.active_encoders=[soma]",
+                "++algo.config.actor.backbone.active_encoders=[g1,soma]",
+            )
+            for arg in config["sonic_hydra"]["args"]
+        ]
+
+        with self.assertRaisesRegex(ContractError, "active_encoders=\\[soma\\]"):
+            validate_config(config, require_formal=True)
+
+    def test_rejects_g1_soma_latent_aux_loss_in_formal_retarget(self):
+        config = _base_formal_config()
+        config["sonic_hydra"]["online_retarget_aux_losses"] = [
+            "online_retarget_g1_dyn_action",
+            "g1_soma_latent",
+        ]
+
+        with self.assertRaisesRegex(ContractError, "g1_soma_latent"):
+            validate_config(config, require_formal=True)
+
     def test_formal_config_requires_g1_dyn_primary_decoder(self):
         config = _base_formal_config()
         config["target_decoder"]["primary"] = "g1_kin"
@@ -385,6 +421,22 @@ def _base_formal_config():
                     "++manager_env.observations.tokenizer.soma_morphology.params.registry_csv=/tmp/skeleton_registry.csv",
                     "++manager_env.commands.motion.motion_lib_cfg.motion_file=/tmp/robot_motionlib",
                     "++manager_env.commands.motion.motion_lib_cfg.soma_motion_file=/tmp/soma_motionlib",
+                    "++manager_env.commands.motion.encoder_sample_probs.g1=0.0",
+                    "++manager_env.commands.motion.encoder_sample_probs.teleop=0.0",
+                    "++manager_env.commands.motion.encoder_sample_probs.smpl=0.0",
+                    "++manager_env.commands.motion.encoder_sample_probs.soma=1.0",
+                    "++algo.config.actor.backbone.active_encoders=[soma]",
+                    "++algo.config.actor.backbone.reencode_smpl_g1_recon=false",
+                    "~algo.config.actor.backbone.aux_loss_func.g1_smpl_latent",
+                    "~algo.config.actor.backbone.aux_loss_coef.g1_smpl_latent",
+                    "~algo.config.actor.backbone.aux_loss_func.g1_teleop_latent",
+                    "~algo.config.actor.backbone.aux_loss_coef.g1_teleop_latent",
+                    "~algo.config.actor.backbone.aux_loss_func.teleop_smpl_latent",
+                    "~algo.config.actor.backbone.aux_loss_coef.teleop_smpl_latent",
+                    "~algo.config.actor.backbone.aux_loss_func.reencoded_smpl_g1_latent",
+                    "~algo.config.actor.backbone.aux_loss_coef.reencoded_smpl_g1_latent",
+                    "~algo.config.actor.backbone.aux_loss_func.g1_soma_latent",
+                    "~algo.config.actor.backbone.aux_loss_coef.g1_soma_latent",
                     "++manager_env.observations.tokenizer.g1_target_action.func=online_retarget.sonic_observation_terms:g1_target_action",
                     "++algo.config.actor.backbone.encoders.soma.params._target_=online_retarget.sonic_encoder_modules.ConcatSomaEncoderModule",
                     "++algo.config.actor.backbone.aux_loss_func.online_retarget_g1_dyn_action._target_=online_retarget.sonic_losses.G1DynamicsActionLoss",

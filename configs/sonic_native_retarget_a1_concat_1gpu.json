@@ -81,10 +81,7 @@
       "dynamics_action_mse",
       "dynamics_action_cosine"
     ],
-    "alignment": [
-      "g1_soma_latent_mse",
-      "g1_soma_latent_cosine"
-    ],
+    "alignment": [],
     "auxiliary": [
       "g1_kin_joint_rmse",
       "g1_kin_body_mpjpe",
@@ -160,11 +157,11 @@
       "++manager_env.commands.motion.motion_lib_cfg.filter_motion_keys='^(?!.*__(?:A302|A303|A400|A402|A403|A404|A488|A489|A490|A491|A496|A497|A498|A499|A508|A512|A513|A514|A515|A517|A518|A520|A521|A522|A523|A524|A525|A526|A527|A538|A539|A540|A541)(?:_M)?$).*$'",
       "++manager_env.commands.motion.motion_lib_cfg.remove_motion_keys=[230124__no_see_002__A142_M,240529__neutral_button__press_001__A543,240529__neutral_button__press_001__A543_M,240529__neutral_button__press_001__A544,240529__neutral_button__press_001__A544_M,240529__neutral_button__press_001__A545,240529__neutral_button__press_001__A545_M]",
       "++manager_env.commands.motion.motion_lib_cfg.soma_motion_file=/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/soma_filtered_v1",
-      "++manager_env.commands.motion.encoder_sample_probs.g1=1.0",
+      "++manager_env.commands.motion.encoder_sample_probs.g1=0.0",
       "++manager_env.commands.motion.encoder_sample_probs.teleop=0.0",
       "++manager_env.commands.motion.encoder_sample_probs.smpl=0.0",
       "++manager_env.commands.motion.encoder_sample_probs.soma=1.0",
-      "++algo.config.actor.backbone.active_encoders=[g1,soma]",
+      "++algo.config.actor.backbone.active_encoders=[soma]",
       "++algo.config.actor.backbone.active_decoders=[g1_dyn,g1_kin]",
       "++algo.config.actor.backbone.reencode_smpl_g1_recon=false",
       "~algo.config.actor.backbone.aux_loss_func.g1_smpl_latent",
@@ -175,6 +172,8 @@
       "~algo.config.actor.backbone.aux_loss_coef.teleop_smpl_latent",
       "~algo.config.actor.backbone.aux_loss_func.reencoded_smpl_g1_latent",
       "~algo.config.actor.backbone.aux_loss_coef.reencoded_smpl_g1_latent",
+      "~algo.config.actor.backbone.aux_loss_func.g1_soma_latent",
+      "~algo.config.actor.backbone.aux_loss_coef.g1_soma_latent",
       "++manager_env.observations.tokenizer.soma_morphology._target_=isaaclab.managers.ObservationTermCfg",
       "++manager_env.observations.tokenizer.soma_morphology.func=online_retarget.sonic_observation_terms:soma_morphology",
       "++manager_env.observations.tokenizer.soma_morphology.params.command_name=motion",
@@ -207,7 +206,6 @@
     "online_retarget_aux_losses": [
       "online_retarget_g1_dyn_action",
       "online_retarget_action_smoothness",
-      "g1_soma_latent",
       "g1_recon"
     ]
   },

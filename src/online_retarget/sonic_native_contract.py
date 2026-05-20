@@ -525,6 +525,8 @@ def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -
         "sonic_hydra.variant_wired must be true for formal training configs",
     )
     hydra_text = " ".join(_string_list(sonic_hydra.get("args")))
+    hydra = _hydra_overrides(config)
+    hydra_deletes = _hydra_deletes(config)
     source_encoder = _mapping(config.get("source_encoder"))
     module_target = str(source_encoder.get("module_target", ""))
     if module_target:
@@ -579,23 +581,63 @@ def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -
                 f"sonic_hydra.args still references forbidden deployable source feature {feature}"
             )
 
-    if "active_encoders=[g1,soma]" in hydra_text:
-        _require(
-            "reencode_smpl_g1_recon=false" in hydra_text,
-            errors,
-            "formal g1+soma runs must disable reencode_smpl_g1_recon",
+    active_encoders = _parse_hydra_list(
+        hydra.get("algo.config.actor.backbone.active_encoders")
+    )
+    _require(
+        active_encoders == ("soma",),
+        errors,
+        "formal retarget configs must set algo.config.actor.backbone.active_encoders=[soma]",
+    )
+    for encoder_name in ("g1", "teleop", "smpl"):
+        sample_prob = _optional_float(
+            hydra.get(f"manager_env.commands.motion.encoder_sample_probs.{encoder_name}")
         )
-        for loss_name in (
-            "g1_smpl_latent",
-            "g1_teleop_latent",
-            "teleop_smpl_latent",
-            "reencoded_smpl_g1_latent",
-        ):
+        _require(
+            sample_prob == 0.0,
+            errors,
+            "formal retarget source sampling must set "
+            f"manager_env.commands.motion.encoder_sample_probs.{encoder_name}=0.0",
+        )
+    soma_sample_prob = _optional_float(
+        hydra.get("manager_env.commands.motion.encoder_sample_probs.soma")
+    )
+    _require(
+        soma_sample_prob is not None and soma_sample_prob > 0.0,
+        errors,
+        "formal retarget source sampling must enable encoder_sample_probs.soma",
+    )
+    _require(
+        "reencode_smpl_g1_recon=false" in hydra_text,
+        errors,
+        "formal retarget runs must disable reencode_smpl_g1_recon",
+    )
+    for loss_name in (
+        "g1_smpl_latent",
+        "g1_teleop_latent",
+        "teleop_smpl_latent",
+        "reencoded_smpl_g1_latent",
+        "g1_soma_latent",
+    ):
+        for section in ("aux_loss_func", "aux_loss_coef"):
+            delete_key = f"algo.config.actor.backbone.{section}.{loss_name}"
             _require(
-                f"~algo.config.actor.backbone.aux_loss_func.{loss_name}" in hydra_text,
+                delete_key in hydra_deletes,
                 errors,
-                f"formal g1+soma runs must delete SMPL/teleop aux loss {loss_name}",
+                f"formal retarget runs must delete inherited {section} {loss_name}",
             )
+    active_online_aux = set(_string_list(sonic_hydra.get("online_retarget_aux_losses")))
+    alignment_losses = set(_string_list(_mapping(config.get("losses")).get("alignment")))
+    forbidden_aux = {
+        loss_name
+        for loss_name in active_online_aux | alignment_losses
+        if loss_name.startswith("g1_soma_latent")
+    }
+    if forbidden_aux:
+        errors.append(
+            "formal retarget configs must not enable g1_soma_latent aux/alignment losses: "
+            + ", ".join(sorted(forbidden_aux))
+        )
 
     variant_type = str(_mapping(config.get("variant")).get("type", "")).lower()
     if variant_type in {"adapter", "expert"}:
@@ -667,6 +709,32 @@ def _hydra_overrides(config: Mapping[str, Any]) -> dict[str, str]:
         key = key.lstrip("+")
         result[key] = value
     return result
+
+
+def _hydra_deletes(config: Mapping[str, Any]) -> set[str]:
+    deleted: set[str] = set()
+    sonic_hydra = _mapping(config.get("sonic_hydra"))
+    for raw_arg in _string_list(sonic_hydra.get("args")):
+        stripped = raw_arg.strip()
+        if not stripped.startswith("~") or "=" in stripped:
+            continue
+        deleted.add(stripped[1:])
+    return deleted
+
+
+def _parse_hydra_list(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            stripped = stripped[1:-1]
+        if not stripped:
+            return ()
+        return tuple(item.strip().strip("'\"") for item in stripped.split(",") if item.strip())
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+        return tuple(str(item) for item in value)
+    return (str(value),)
 
 
 def _strip_hydra_quotes(value: Any) -> Any:
