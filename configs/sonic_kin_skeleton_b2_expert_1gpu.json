@@ -50,7 +50,7 @@
   },
   "training": {
     "seed": 2026052014,
-    "max_steps": 20000,
+    "max_steps": 1000000,
     "batch_frames": 4096,
     "frame_stride": 1,
     "loader_chunk_frames": 2048,
