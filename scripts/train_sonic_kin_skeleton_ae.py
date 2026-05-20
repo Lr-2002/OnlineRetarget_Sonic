@@ -908,7 +908,6 @@ def validate_runtime(config: dict[str, Any], output_dir: Path) -> None:
             raise RuntimeError(f"source repo has uncommitted tracked changes: {source_root}")
     if config["runtime"].get("require_latest_code", True):
         require_latest_git(Path.cwd(), "control repo")
-        require_latest_git(source_root, "source repo")
 
 
 def set_seed(seed: int) -> None:
