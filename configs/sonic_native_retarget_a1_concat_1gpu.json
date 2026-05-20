@@ -10,8 +10,8 @@
   "base_actor_critic_config": "gear_sonic/config/actor_critic/universal_token/all_mlp_v1_soma.yaml",
   "sonic_entrypoint": "gear_sonic/train_agent_trl.py",
   "input_data": {
-    "robot_motion_file": "data/motion_lib_bones_seed/robot_filtered",
-    "soma_motion_file": "data/motion_lib_bones_seed/soma_filtered",
+    "robot_motion_file": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/robot_filtered_v1",
+    "soma_motion_file": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/soma_filtered_v1",
     "skeleton_registry": "/mnt/data_cpfs/code/wxh/OnlineRetarget/runs/skeleton_registry/bones_sonic_txt_filtered_skeleton_registry_v0/skeleton_registry.csv"
   },
   "source_features": [
@@ -146,8 +146,8 @@
       "++callbacks.online_retarget_visual_val.wandb_upload=true",
       "++callbacks.online_retarget_visual_val.output_dir=${experiment_dir}/online_retarget_visual_validation",
       "++manager_env.commands.motion.motion_lib_cfg.target_fps=50",
-      "++manager_env.commands.motion.motion_lib_cfg.motion_file=data/motion_lib_bones_seed/robot_filtered",
-      "++manager_env.commands.motion.motion_lib_cfg.soma_motion_file=data/motion_lib_bones_seed/soma_filtered",
+      "++manager_env.commands.motion.motion_lib_cfg.motion_file=/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/robot_filtered_v1",
+      "++manager_env.commands.motion.motion_lib_cfg.soma_motion_file=/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/soma_filtered_v1",
       "++manager_env.commands.motion.encoder_sample_probs.g1=1.0",
       "++manager_env.commands.motion.encoder_sample_probs.teleop=0.0",
       "++manager_env.commands.motion.encoder_sample_probs.smpl=0.0",

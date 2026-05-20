@@ -25,6 +25,7 @@ VISUAL_VALIDATION_EVERY_STEPS = 20_000
 VISUAL_VALIDATION_NUM_VIDEOS = 8
 VISUAL_VALIDATION_DURATION_SEC = 4.0
 FORMAL_MAX_STEPS = 1_000_000
+MOTION_FILE_SENTINELS = ("dummy", "zeros")
 
 
 class ContractError(ValueError):
@@ -123,6 +124,11 @@ def validate_config(
     )
     _require(config.get("sonic_config"), errors, "sonic_config is required")
     _require(config.get("base_actor_critic_config"), errors, "base_actor_critic_config is required")
+    input_data = _mapping(config.get("input_data"))
+    _require(input_data, errors, "input_data is required")
+    _require(input_data.get("robot_motion_file"), errors, "input_data.robot_motion_file is required")
+    _require(input_data.get("soma_motion_file"), errors, "input_data.soma_motion_file is required")
+    _require(input_data.get("skeleton_registry"), errors, "input_data.skeleton_registry is required")
 
     source_features = _source_feature_strings(config)
     source_text = " ".join(source_features).lower()
@@ -236,6 +242,7 @@ def validate_config(
         _check_sonic_paths(config, errors)
 
     _validate_sonic_hydra_wiring(config, errors)
+    _validate_data_hydra_consistency(config, errors)
 
     if errors:
         raise ContractError(_format_errors(path, errors))
@@ -463,6 +470,32 @@ def _check_sonic_paths(config: Mapping[str, Any], errors: list[str]) -> None:
         if not path.exists():
             errors.append(f"{key} does not exist under source_repo: {path}")
 
+    input_data = _mapping(config.get("input_data"))
+    robot_motion_file = str(input_data.get("robot_motion_file") or "")
+    soma_motion_file = str(input_data.get("soma_motion_file") or "")
+    skeleton_registry = str(input_data.get("skeleton_registry") or "")
+
+    if robot_motion_file:
+        _check_motion_path(
+            "input_data.robot_motion_file",
+            _resolve_runtime_path(robot_motion_file, source_repo=source_repo),
+            errors,
+            allow_sentinel=False,
+        )
+    if soma_motion_file:
+        _check_motion_path(
+            "input_data.soma_motion_file",
+            _resolve_runtime_path(soma_motion_file, source_repo=source_repo),
+            errors,
+            allow_sentinel=False,
+        )
+    if skeleton_registry:
+        _check_file_path(
+            "input_data.skeleton_registry",
+            _resolve_runtime_path(skeleton_registry, source_repo=Path.cwd()),
+            errors,
+        )
+
 
 def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -> None:
     sonic_hydra = _mapping(config.get("sonic_hydra"))
@@ -533,6 +566,93 @@ def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -
             errors,
             "adapter/expert variants must wire deterministic skeleton-cluster routing",
         )
+
+
+def _validate_data_hydra_consistency(config: Mapping[str, Any], errors: list[str]) -> None:
+    input_data = _mapping(config.get("input_data"))
+    hydra = _hydra_overrides(config)
+    expected = {
+        "manager_env.commands.motion.motion_lib_cfg.motion_file": input_data.get(
+            "robot_motion_file"
+        ),
+        "manager_env.commands.motion.motion_lib_cfg.soma_motion_file": input_data.get(
+            "soma_motion_file"
+        ),
+        "manager_env.observations.tokenizer.soma_morphology.params.registry_csv": input_data.get(
+            "skeleton_registry"
+        ),
+    }
+    for hydra_key, input_value in expected.items():
+        if input_value in {"", None}:
+            continue
+        hydra_value = hydra.get(hydra_key)
+        if hydra_value in {"", None}:
+            errors.append(f"sonic_hydra.args missing {hydra_key}")
+            continue
+        if str(hydra_value) != str(input_value):
+            errors.append(
+                f"sonic_hydra.args {hydra_key}={hydra_value!r} does not match "
+                f"input_data value {input_value!r}"
+            )
+
+
+def _hydra_overrides(config: Mapping[str, Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    sonic_hydra = _mapping(config.get("sonic_hydra"))
+    for raw_arg in _string_list(sonic_hydra.get("args")):
+        key, sep, value = raw_arg.partition("=")
+        if not sep:
+            continue
+        key = key.lstrip("+")
+        result[key] = value
+    return result
+
+
+def _resolve_runtime_path(value: str, *, source_repo: Path) -> Path:
+    if value in MOTION_FILE_SENTINELS:
+        return Path(value)
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return source_repo / path
+
+
+def _check_motion_path(
+    label: str,
+    path: Path,
+    errors: list[str],
+    *,
+    allow_sentinel: bool,
+) -> None:
+    if str(path) in MOTION_FILE_SENTINELS:
+        if allow_sentinel:
+            return
+        errors.append(f"{label} must be a real motion library path, got {path}")
+        return
+    if not path.exists():
+        errors.append(f"{label} does not exist: {path}")
+        return
+    if path.is_dir():
+        try:
+            has_pkl = any(path.rglob("*.pkl"))
+        except OSError as exc:
+            errors.append(f"{label} could not be scanned for PKL files: {path} ({exc})")
+            return
+        if not has_pkl:
+            errors.append(f"{label} has no PKL motion files: {path}")
+        return
+    if path.is_file():
+        if path.suffix != ".pkl":
+            errors.append(f"{label} must be a .pkl file or directory: {path}")
+        return
+    errors.append(f"{label} is not a file or directory: {path}")
+
+
+def _check_file_path(label: str, path: Path, errors: list[str]) -> None:
+    if not path.exists():
+        errors.append(f"{label} does not exist: {path}")
+    elif not path.is_file():
+        errors.append(f"{label} must be a file: {path}")
 
 
 def _format_errors(path: str | Path | None, errors: Sequence[str]) -> str:

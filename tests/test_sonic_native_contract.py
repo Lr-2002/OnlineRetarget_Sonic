@@ -1,6 +1,7 @@
 import unittest
 from copy import deepcopy
 from pathlib import Path
+import tempfile
 
 from online_retarget.sonic_native_contract import ContractError, validate_config, validate_file
 
@@ -107,6 +108,53 @@ class SonicNativeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "training_lane"):
             validate_config(config, require_formal=True)
 
+    def test_check_paths_verifies_motionlib_and_registry_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _base_formal_config()
+            config["source_repo"] = str(root / "sonic")
+            _write_sonic_config_files(Path(config["source_repo"]))
+            robot_dir = root / "robot_motionlib"
+            soma_dir = root / "soma_motionlib"
+            robot_dir.mkdir()
+            soma_dir.mkdir()
+            (robot_dir / "clip.pkl").write_bytes(b"not-used-by-contract-test")
+            (soma_dir / "clip.pkl").write_bytes(b"not-used-by-contract-test")
+            registry = root / "skeleton_registry.csv"
+            registry.write_text("actor_uid,actor_height_cm\nA001,170\n", encoding="utf-8")
+            _set_data_paths(config, robot_dir, soma_dir, registry)
+
+            result = validate_config(config, require_formal=True, check_paths=True)
+
+        self.assertTrue(result.formal)
+
+    def test_check_paths_rejects_missing_motionlib_before_isaac_launch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _base_formal_config()
+            config["source_repo"] = str(root / "sonic")
+            _write_sonic_config_files(Path(config["source_repo"]))
+            robot_dir = root / "missing_robot_motionlib"
+            soma_dir = root / "soma_motionlib"
+            soma_dir.mkdir()
+            (soma_dir / "clip.pkl").write_bytes(b"not-used-by-contract-test")
+            registry = root / "skeleton_registry.csv"
+            registry.write_text("actor_uid,actor_height_cm\nA001,170\n", encoding="utf-8")
+            _set_data_paths(config, robot_dir, soma_dir, registry)
+
+            with self.assertRaisesRegex(ContractError, "robot_motion_file does not exist"):
+                validate_config(config, require_formal=True, check_paths=True)
+
+    def test_rejects_hydra_motion_path_mismatch(self):
+        config = _base_formal_config()
+        config["sonic_hydra"]["args"] = [
+            arg.replace("/tmp/robot_motionlib", "/tmp/other_robot_motionlib")
+            for arg in config["sonic_hydra"]["args"]
+        ]
+
+        with self.assertRaisesRegex(ContractError, "does not match input_data"):
+            validate_config(config, require_formal=True)
+
 
 def _base_formal_config():
     return deepcopy(
@@ -118,6 +166,11 @@ def _base_formal_config():
             "source_repo": "/tmp/sonic",
             "sonic_config": SONIC_CONFIG,
             "base_actor_critic_config": SONIC_ACTOR_CRITIC_CONFIG,
+            "input_data": {
+                "robot_motion_file": "/tmp/robot_motionlib",
+                "soma_motion_file": "/tmp/soma_motionlib",
+                "skeleton_registry": "/tmp/skeleton_registry.csv",
+            },
             "source_features": [
                 "soma_joints_multi_future_local_nonflat",
                 "soma_root_ori_b_multi_future",
@@ -159,6 +212,9 @@ def _base_formal_config():
                 "variant_wired": True,
                 "args": [
                     "++manager_env.observations.tokenizer.soma_morphology.func=online_retarget.sonic_observation_terms:soma_morphology",
+                    "++manager_env.observations.tokenizer.soma_morphology.params.registry_csv=/tmp/skeleton_registry.csv",
+                    "++manager_env.commands.motion.motion_lib_cfg.motion_file=/tmp/robot_motionlib",
+                    "++manager_env.commands.motion.motion_lib_cfg.soma_motion_file=/tmp/soma_motionlib",
                     "++manager_env.observations.tokenizer.g1_target_action.func=online_retarget.sonic_observation_terms:g1_target_action",
                     "++algo.config.actor.backbone.encoders.soma.params._target_=online_retarget.sonic_encoder_modules.ConcatSomaEncoderModule",
                     "++algo.config.actor.backbone.aux_loss_func.online_retarget_g1_dyn_action._target_=online_retarget.sonic_losses.G1DynamicsActionLoss",
@@ -172,3 +228,32 @@ def _base_formal_config():
             "variant": {"name": "test_variant"},
         }
     )
+
+
+def _write_sonic_config_files(source_repo: Path) -> None:
+    for rel in (SONIC_CONFIG, SONIC_ACTOR_CRITIC_CONFIG):
+        path = source_repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# contract test fixture\n", encoding="utf-8")
+
+
+def _set_data_paths(config, robot_dir: Path, soma_dir: Path, registry: Path) -> None:
+    replacements = {
+        "/tmp/robot_motionlib": str(robot_dir),
+        "/tmp/soma_motionlib": str(soma_dir),
+        "/tmp/skeleton_registry.csv": str(registry),
+    }
+    config["input_data"] = {
+        "robot_motion_file": str(robot_dir),
+        "soma_motion_file": str(soma_dir),
+        "skeleton_registry": str(registry),
+    }
+    config["sonic_hydra"]["args"] = [
+        _replace_all(arg, replacements) for arg in config["sonic_hydra"]["args"]
+    ]
+
+
+def _replace_all(value: str, replacements: dict[str, str]) -> str:
+    for old, new in replacements.items():
+        value = value.replace(old, new)
+    return value
