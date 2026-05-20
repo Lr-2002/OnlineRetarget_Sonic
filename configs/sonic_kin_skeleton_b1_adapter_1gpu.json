@@ -67,6 +67,22 @@
     "command_loss_weight": 1.0,
     "anchor_loss_weight": 1.0
   },
+  "visual_validation": {
+    "enabled": true,
+    "every_steps": 20000,
+    "num_videos": 8,
+    "duration_sec": 4.0,
+    "width": 640,
+    "height": 360,
+    "source_position_scale": 0.01,
+    "source_bvh_roots": [
+      "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/source_bvh_cache",
+      "/home/user/data/motion_data"
+    ],
+    "source_bvh_cache": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/source_bvh_cache",
+    "source_bvh_tar": "/home/user/data/motion_data/back_data/soma_proportional.tar",
+    "g1_model_xml": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training/gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml"
+  },
   "runtime": {
     "required_gpu_count": 1,
     "write_root": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs",

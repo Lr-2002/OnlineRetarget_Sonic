@@ -15,20 +15,30 @@ import csv
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import random
+import re
+import shutil
 import socket
 import subprocess
 import sys
+import tarfile
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = ROOT / "src"
+if SRC_ROOT.exists() and str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 
 REQUIRED_NPZ_KEYS = ("joint_pos", "joint_vel", "body_pos_w", "body_quat_w")
@@ -335,6 +345,11 @@ def rows_from_jsonl_index(config: dict[str, Any], data_root: Path) -> tuple[list
                     "frame_count": frame_count,
                     "source_move_name": source.get("move_name"),
                     "source_labels": source.get("labels", {}),
+                    "source_soma_proportional_path": source.get("source_soma_proportional_path", ""),
+                    "fps": source.get("fps", ""),
+                    "filename": source.get("filename") or source.get("move_name") or Path(relative_path).stem,
+                    "actor_uid": source.get("actor_uid", ""),
+                    "category": source.get("category", ""),
                 }
             )
             if max_clips > 0 and len(rows) >= max_clips:
@@ -383,6 +398,11 @@ def rows_from_csv_index(config: dict[str, Any], data_root: Path) -> tuple[list[d
                         "category": source.get("category", ""),
                         "actor_uid": source.get("actor_uid", ""),
                     },
+                    "source_soma_proportional_path": source.get("source_soma_proportional_path", ""),
+                    "fps": source.get("fps", ""),
+                    "filename": source.get("filename") or Path(relative_path).stem,
+                    "actor_uid": source.get("actor_uid", ""),
+                    "category": source.get("category", ""),
                 }
             )
             if max_clips > 0 and len(rows) >= max_clips:
@@ -737,6 +757,592 @@ def validate(
     return {f"validation/{key}": float(np.mean([row[key] for row in rows])) for key in rows[0]}
 
 
+def visual_validation_due(config: dict[str, Any], step: int) -> bool:
+    cfg = config.get("visual_validation", {})
+    if not cfg.get("enabled", False):
+        return False
+    every_steps = int(cfg.get("every_steps", 0))
+    return every_steps > 0 and step > 0 and step % every_steps == 0
+
+
+def run_visual_validation(
+    *,
+    model: nn.Module,
+    validation_rows: Sequence[Mapping[str, Any]],
+    stats: dict[str, torch.Tensor],
+    device: torch.device,
+    config: dict[str, Any],
+    output_dir: Path,
+    step: int,
+    joint_dim: int,
+    wandb_run: Any,
+) -> dict[str, float]:
+    cfg = config.get("visual_validation", {})
+    started = time.perf_counter()
+    vis_dir = output_dir / "visual_validation" / f"step_{step:08d}"
+    vis_dir.mkdir(parents=True, exist_ok=True)
+    report_path = vis_dir / "summary.json"
+    rows = _select_visual_rows(
+        validation_rows,
+        count=int(cfg.get("num_videos", 8)),
+        salt=f"{config['variant']['name']}:{config['training']['seed']}",
+    )
+    if not rows:
+        summary = {
+            "step": step,
+            "status": "blocked",
+            "message": "no validation rows were available for visual validation",
+            "reports": [],
+        }
+        report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return {"visual_validation/videos_ok": 0.0, "visual_validation/videos_failed": 0.0}
+
+    try:
+        render_deps = _load_visual_render_deps()
+    except Exception as exc:
+        summary = {
+            "step": step,
+            "status": "blocked",
+            "message": f"visual rendering dependencies are unavailable: {exc}",
+            "reports": [],
+        }
+        report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return {"visual_validation/videos_ok": 0.0, "visual_validation/videos_failed": float(len(rows))}
+
+    model_xml = Path(str(cfg.get("g1_model_xml", "")))
+    if not model_xml.exists():
+        summary = {
+            "step": step,
+            "status": "blocked",
+            "message": f"g1_model_xml is missing: {model_xml}",
+            "reports": [],
+        }
+        report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return {"visual_validation/videos_ok": 0.0, "visual_validation/videos_failed": float(len(rows))}
+
+    g1_model = render_deps["load_g1_kinematic_model"](model_xml)
+    was_training = model.training
+    model.eval()
+    reports: list[dict[str, Any]] = []
+    wandb_payload: dict[str, Any] = {}
+    try:
+        for index, row in enumerate(rows):
+            try:
+                report = _render_visual_validation_clip(
+                    model=model,
+                    row=row,
+                    stats=stats,
+                    device=device,
+                    config=config,
+                    output_dir=vis_dir,
+                    index=index,
+                    step=step,
+                    joint_dim=joint_dim,
+                    render_deps=render_deps,
+                    g1_model=g1_model,
+                )
+            except Exception as exc:
+                report = {
+                    "index": index,
+                    "filename": row.get("filename", ""),
+                    "relative_path": row.get("relative_path", ""),
+                    "combined_status": "failed",
+                    "message": str(exc),
+                }
+            reports.append(report)
+            if wandb_run is not None and report.get("combined_status") == "ok":
+                try:
+                    import wandb
+
+                    video_path = Path(str(report["combined_video"]))
+                    fps = float(report.get("fps") or cfg.get("fps") or 50.0)
+                    key = f"visual_validation/{index:02d}_{_safe_metric_name(str(report.get('filename', index)))}"
+                    wandb_payload[key] = wandb.Video(str(video_path), fps=int(round(fps)), format="mp4")
+                except Exception as exc:
+                    report["wandb_video_status"] = "failed"
+                    report["wandb_video_message"] = str(exc)
+    finally:
+        if was_training:
+            model.train()
+
+    if wandb_run is not None and wandb_payload:
+        wandb_run.log(wandb_payload, step=step)
+
+    ok_count = sum(1 for report in reports if report.get("combined_status") == "ok")
+    failed_count = len(reports) - ok_count
+    summary = {
+        "step": step,
+        "status": "ok" if ok_count else "failed",
+        "variant": config["variant"]["name"],
+        "duration_sec": float(cfg.get("duration_sec", 4.0)),
+        "requested_videos": int(cfg.get("num_videos", 8)),
+        "videos_ok": ok_count,
+        "videos_failed": failed_count,
+        "elapsed_sec": time.perf_counter() - started,
+        "reports": reports,
+    }
+    report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return {
+        "visual_validation/videos_ok": float(ok_count),
+        "visual_validation/videos_failed": float(failed_count),
+        "visual_validation/elapsed_sec": float(summary["elapsed_sec"]),
+    }
+
+
+def _load_visual_render_deps() -> dict[str, Any]:
+    from online_retarget.data.g1_quality import g1_fk_body_positions, load_g1_kinematic_model
+    from online_retarget.data.review_clips import (
+        G1_CAPSULE_IGNORE_BODIES,
+        ReviewClipExportConfig,
+        _SourceCapsuleRenderer,
+        _render_capsule_3d_video,
+    )
+    from online_retarget.data.sonic_review_clips import (
+        SONIC_BODY_NAMES,
+        SONIC_PRUNED_BODY_NAMES,
+        SONIC_PRUNED_CAPSULE_EDGES,
+    )
+
+    return {
+        "g1_fk_body_positions": g1_fk_body_positions,
+        "load_g1_kinematic_model": load_g1_kinematic_model,
+        "G1_CAPSULE_IGNORE_BODIES": G1_CAPSULE_IGNORE_BODIES,
+        "ReviewClipExportConfig": ReviewClipExportConfig,
+        "_SourceCapsuleRenderer": _SourceCapsuleRenderer,
+        "_render_capsule_3d_video": _render_capsule_3d_video,
+        "SONIC_BODY_NAMES": SONIC_BODY_NAMES,
+        "SONIC_PRUNED_BODY_NAMES": SONIC_PRUNED_BODY_NAMES,
+        "SONIC_PRUNED_CAPSULE_EDGES": SONIC_PRUNED_CAPSULE_EDGES,
+    }
+
+
+def _render_visual_validation_clip(
+    *,
+    model: nn.Module,
+    row: Mapping[str, Any],
+    stats: dict[str, torch.Tensor],
+    device: torch.device,
+    config: dict[str, Any],
+    output_dir: Path,
+    index: int,
+    step: int,
+    joint_dim: int,
+    render_deps: Mapping[str, Any],
+    g1_model: Any,
+) -> dict[str, Any]:
+    cfg = config.get("visual_validation", {})
+    clip_name = _safe_filename(str(row.get("filename") or Path(str(row["relative_path"])).stem))
+    clip_dir = output_dir / f"{index:02d}_{clip_name}"
+    clip_dir.mkdir(parents=True, exist_ok=True)
+
+    source_video = clip_dir / "source_soma_bvh_capsules.mp4"
+    dataset_video = clip_dir / "dataset_g1_capsules.mp4"
+    inference_video = clip_dir / "inference_g1_capsules.mp4"
+    combined_video = clip_dir / "source_dataset_inference.mp4"
+    metadata_path = clip_dir / "metadata.json"
+
+    arrays, fps = _load_visual_npz(Path(config["input_data"]["data_root"]) / str(row["relative_path"]))
+    total_frames = min(
+        arrays["joint_pos"].shape[0],
+        arrays["joint_vel"].shape[0],
+        arrays["body_pos_w"].shape[0],
+        arrays["body_quat_w"].shape[0],
+    )
+    requested_frames = max(1, int(round(float(cfg.get("duration_sec", 4.0)) * fps)))
+    frame_count = min(total_frames, requested_frames)
+    render_width = int(cfg.get("width", 640))
+    render_height = int(cfg.get("height", 360))
+    render_config = render_deps["ReviewClipExportConfig"](
+        render_max_frames=frame_count,
+        render_width=render_width,
+        render_height=render_height,
+        fps=fps,
+        source_position_scale=float(cfg.get("source_position_scale", 0.01)),
+        model_xml=Path(str(cfg.get("g1_model_xml", ""))),
+    )
+
+    source_bvh = _resolve_source_bvh(row, config, output_dir)
+    if source_bvh is not None:
+        source_report = render_deps["_SourceCapsuleRenderer"](render_config).render_bvh(source_bvh, source_video)
+    else:
+        source_report = _render_missing_panel(
+            render_deps=render_deps,
+            video_path=source_video,
+            render_config=render_config,
+            frame_count=frame_count,
+            label="source bvh unavailable",
+        )
+
+    target_body_pos = arrays["body_pos_w"][:frame_count]
+    dataset_report = render_deps["_render_capsule_3d_video"](
+        frames=_sonic_body_pos_frames(
+            target_body_pos,
+            render_deps["SONIC_BODY_NAMES"],
+            render_deps["SONIC_PRUNED_BODY_NAMES"],
+        ),
+        edges=_sonic_edges(render_deps["SONIC_BODY_NAMES"], render_deps["SONIC_PRUNED_CAPSULE_EDGES"]),
+        video_path=dataset_video,
+        config=render_config,
+        label="dataset g1 body_pos_w",
+        up_axis=2,
+        capsule_color=(61, 107, 160),
+        key_color=(139, 91, 41),
+    )
+
+    predicted_joint_pos = _predict_visual_joint_pos(
+        model=model,
+        arrays=arrays,
+        frame_count=frame_count,
+        stats=stats,
+        device=device,
+        config=config,
+        joint_dim=joint_dim,
+    )
+    inference_frames = _g1_prediction_frames(
+        predicted_joint_pos,
+        root_pos=arrays["body_pos_w"][:frame_count, 0],
+        root_quat=arrays["body_quat_w"][:frame_count, 0],
+        g1_model=g1_model,
+        render_deps=render_deps,
+    )
+    inference_report = render_deps["_render_capsule_3d_video"](
+        frames=inference_frames,
+        edges=_g1_edges(g1_model, render_deps["G1_CAPSULE_IGNORE_BODIES"]),
+        video_path=inference_video,
+        config=render_config,
+        label="inference g1 fk",
+        up_axis=2,
+        capsule_color=(142, 77, 117),
+        key_color=(122, 89, 35),
+    )
+
+    combine_report = _combine_panel_videos(
+        (source_video, dataset_video, inference_video),
+        combined_video,
+        fps=int(round(fps)),
+    )
+    metadata = {
+        "step": step,
+        "index": index,
+        "filename": row.get("filename", ""),
+        "relative_path": row.get("relative_path", ""),
+        "source_soma_proportional_path": row.get("source_soma_proportional_path", ""),
+        "source_bvh": str(source_bvh) if source_bvh is not None else "",
+        "fps": fps,
+        "frames": frame_count,
+        "duration_sec": frame_count / fps if fps > 0 else 0.0,
+        "source_render": source_report,
+        "dataset_render": dataset_report,
+        "inference_render": inference_report,
+        "combine": combine_report,
+        "combined_video": str(combined_video),
+        "note": (
+            "Panels are source SOMA proportional BVH capsules, paired dataset G1 body_pos_w capsules, "
+            "and model inference rendered by G1 MJCF FK from predicted joint_pos."
+        ),
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return {
+        "index": index,
+        "filename": row.get("filename", ""),
+        "relative_path": row.get("relative_path", ""),
+        "fps": fps,
+        "frames": frame_count,
+        "source_status": source_report.get("status"),
+        "dataset_status": dataset_report.get("status"),
+        "inference_status": inference_report.get("status"),
+        "combined_status": combine_report.get("status"),
+        "combined_video": str(combined_video),
+        "metadata": str(metadata_path),
+    }
+
+
+def _predict_visual_joint_pos(
+    *,
+    model: nn.Module,
+    arrays: Mapping[str, np.ndarray],
+    frame_count: int,
+    stats: dict[str, torch.Tensor],
+    device: torch.device,
+    config: dict[str, Any],
+    joint_dim: int,
+) -> np.ndarray:
+    frame_indices = np.arange(frame_count, dtype=np.int64)
+    motion, skeleton, _ = build_features(
+        dict(arrays),
+        frame_indices,
+        int(config["features"]["future_window_frames"]),
+        int(config["features"]["future_step"]),
+    )
+    with torch.no_grad():
+        motion_t = torch.from_numpy(motion).to(device)
+        skeleton_t = torch.from_numpy(skeleton).to(device)
+        motion_n = (motion_t - stats["motion_mean"]) / stats["motion_std"]
+        skeleton_n = (skeleton_t - stats["skeleton_mean"]) / stats["skeleton_std"]
+        pred_n = model(motion_n, skeleton_n)
+        pred_raw = pred_n * stats["target_std"] + stats["target_mean"]
+    return pred_raw[:, :joint_dim].detach().cpu().numpy().astype(np.float32, copy=False)
+
+
+def _load_visual_npz(path: Path) -> tuple[dict[str, np.ndarray], float]:
+    with np.load(path) as loaded:
+        arrays = {key: loaded[key].astype(np.float32, copy=False) for key in REQUIRED_NPZ_KEYS}
+        fps = _scalar_float(loaded["fps"]) if "fps" in loaded else 50.0
+    if fps <= 0 or not math.isfinite(fps):
+        fps = 50.0
+    return arrays, fps
+
+
+def _select_visual_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    count: int,
+    salt: str,
+) -> list[Mapping[str, Any]]:
+    eligible = [row for row in rows if int(row.get("frame_count", 0)) > 1]
+    ranked = sorted(
+        eligible,
+        key=lambda row: stable_hash_int(f"{salt}:{row.get('relative_path', '')}:{row.get('filename', '')}"),
+    )
+    return ranked[: max(0, count)]
+
+
+def _resolve_source_bvh(row: Mapping[str, Any], config: dict[str, Any], output_dir: Path) -> Path | None:
+    rel_text = str(row.get("source_soma_proportional_path") or "")
+    if not rel_text:
+        return None
+    rel = Path(rel_text)
+    cfg = config.get("visual_validation", {})
+    if rel.is_absolute() and rel.exists():
+        return rel
+
+    roots = list(cfg.get("source_bvh_roots", []))
+    if cfg.get("source_bvh_root"):
+        roots.append(cfg["source_bvh_root"])
+    for root_text in roots:
+        root = Path(str(root_text))
+        candidates = [root / rel_text]
+        if rel_text.startswith("soma_proportional/"):
+            candidates.append(root / rel_text[len("soma_proportional/") :])
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+    tar_text = str(cfg.get("source_bvh_tar", ""))
+    tar_path = Path(tar_text) if tar_text else None
+    if tar_path is not None and tar_path.exists():
+        cache_root = Path(str(cfg.get("source_bvh_cache", output_dir / "source_bvh_cache")))
+        extracted = _extract_source_bvh_from_tar(tar_path, rel_text, cache_root)
+        if extracted is not None:
+            return extracted
+    return None
+
+
+def _extract_source_bvh_from_tar(tar_path: Path, member_name: str, cache_root: Path) -> Path | None:
+    safe_member = Path(member_name)
+    if safe_member.is_absolute() or ".." in safe_member.parts:
+        return None
+    out_path = cache_root / safe_member
+    if out_path.exists():
+        return out_path
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with tarfile.open(tar_path) as tar:
+            extracted = tar.extractfile(member_name)
+            if extracted is None:
+                return None
+            tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+            with tmp_path.open("wb") as handle:
+                shutil.copyfileobj(extracted, handle)
+            tmp_path.replace(out_path)
+        return out_path
+    except (OSError, KeyError, tarfile.TarError):
+        return None
+
+
+def _sonic_body_pos_frames(
+    body_pos: np.ndarray,
+    body_names: Sequence[str],
+    selected_names: Sequence[str],
+) -> list[dict[str, tuple[float, float, float]]]:
+    selected = [
+        (index, name)
+        for index, name in enumerate(body_names)
+        if index < body_pos.shape[1] and name in set(selected_names)
+    ]
+    return [
+        {
+            name: (
+                float(frame[index, 0]),
+                float(frame[index, 1]),
+                float(frame[index, 2]),
+            )
+            for index, name in selected
+        }
+        for frame in body_pos
+    ]
+
+
+def _sonic_edges(
+    body_names: Sequence[str],
+    edges: Sequence[tuple[str, str]],
+) -> tuple[tuple[str, str], ...]:
+    available = set(body_names)
+    return tuple((start, end) for start, end in edges if start in available and end in available)
+
+
+def _g1_prediction_frames(
+    predicted_joint_pos: np.ndarray,
+    *,
+    root_pos: np.ndarray,
+    root_quat: np.ndarray,
+    g1_model: Any,
+    render_deps: Mapping[str, Any],
+) -> list[dict[str, tuple[float, float, float]]]:
+    frames: list[dict[str, tuple[float, float, float]]] = []
+    ignored = set(render_deps["G1_CAPSULE_IGNORE_BODIES"])
+    fk = render_deps["g1_fk_body_positions"]
+    for joints, root, quat in zip(predicted_joint_pos, root_pos, root_quat):
+        body_points = fk(
+            g1_model,
+            [float(value) for value in joints],
+            root_position=[float(value) for value in root],
+            root_euler=_quat_wxyz_to_euler_xyz(quat),
+            include_empty_body_origin=True,
+        )
+        frame: dict[str, tuple[float, float, float]] = {}
+        for name, points in body_points.items():
+            if name in ignored or not points:
+                continue
+            frame[name] = _centroid(points)
+        frames.append(frame)
+    return frames
+
+
+def _g1_edges(g1_model: Any, ignored_names: Sequence[str]) -> tuple[tuple[str, str], ...]:
+    ignored = set(ignored_names)
+    edges: list[tuple[str, str]] = []
+    for body in g1_model.bodies:
+        if body.name in ignored or body.parent is None:
+            continue
+        parent_name = g1_model.bodies[body.parent].name
+        if parent_name in ignored:
+            continue
+        edges.append((parent_name, body.name))
+    return tuple(edges)
+
+
+def _centroid(points: Sequence[Sequence[float]]) -> tuple[float, float, float]:
+    count = max(1, len(points))
+    return (
+        sum(float(point[0]) for point in points) / count,
+        sum(float(point[1]) for point in points) / count,
+        sum(float(point[2]) for point in points) / count,
+    )
+
+
+def _quat_wxyz_to_euler_xyz(quat: Sequence[float]) -> list[float]:
+    matrix = quat_to_matrix(np.asarray(quat, dtype=np.float64).reshape(1, 4))[0]
+    sy = float(np.clip(matrix[0, 2], -1.0, 1.0))
+    y = math.asin(sy)
+    cy = math.cos(y)
+    if abs(cy) > 1e-6:
+        x = math.atan2(-float(matrix[1, 2]), float(matrix[2, 2]))
+        z = math.atan2(-float(matrix[0, 1]), float(matrix[0, 0]))
+    else:
+        x = math.atan2(float(matrix[2, 1]), float(matrix[1, 1]))
+        z = 0.0
+    return [x, y, z]
+
+
+def _render_missing_panel(
+    *,
+    render_deps: Mapping[str, Any],
+    video_path: Path,
+    render_config: Any,
+    frame_count: int,
+    label: str,
+) -> dict[str, object]:
+    frames = [{"missing": (0.0, 0.0, 1.0)} for _ in range(frame_count)]
+    report = render_deps["_render_capsule_3d_video"](
+        frames=frames,
+        edges=(),
+        video_path=video_path,
+        config=render_config,
+        label=label,
+        up_axis=2,
+        capsule_color=(145, 73, 68),
+        key_color=(145, 73, 68),
+    )
+    if report.get("status") == "ok":
+        report["status"] = "missing"
+        report["message"] = "Source BVH was unavailable; rendered a placeholder panel."
+    return report
+
+
+def _combine_panel_videos(
+    inputs: Sequence[Path],
+    output: Path,
+    *,
+    fps: int,
+) -> dict[str, object]:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return {"status": "blocked", "message": "ffmpeg is required to combine visual validation videos"}
+    missing = [str(path) for path in inputs if not path.exists() or path.stat().st_size == 0]
+    if missing:
+        return {"status": "failed", "message": "one or more panel videos are missing", "missing": missing}
+    command = [ffmpeg, "-y"]
+    for path in inputs:
+        command.extend(["-i", str(path)])
+    command.extend(
+        [
+            "-filter_complex",
+            f"[0:v][1:v][2:v]hstack=inputs=3,fps={max(1, fps)}[v]",
+            "-map",
+            "[v]",
+            "-an",
+            "-vcodec",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(output),
+        ]
+    )
+    result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        return {
+            "status": "failed",
+            "message": "ffmpeg failed while combining panels",
+            "ffmpeg_tail": result.stderr[-800:],
+        }
+    if not output.exists() or output.stat().st_size == 0:
+        return {"status": "failed", "message": "combined visual validation video was not written"}
+    return {
+        "status": "ok",
+        "message": "combined source/dataset/inference visual validation video",
+        "video_path": str(output),
+        "bytes": output.stat().st_size,
+        "fps": max(1, fps),
+    }
+
+
+def _scalar_float(value: Any) -> float:
+    return float(np.asarray(value).reshape(-1)[0])
+
+
+def _safe_filename(text: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("._")
+    return safe[:96] or "clip"
+
+
+def _safe_metric_name(text: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("._")
+    return safe[:64] or "clip"
+
+
 def write_loss_header(path: Path) -> None:
     if path.exists():
         return
@@ -1082,6 +1688,39 @@ def main() -> None:
                     print(json.dumps({"event": "validation", "step": step, **val_metrics}, sort_keys=True), flush=True)
                     if wandb_run is not None:
                         wandb_run.log(val_metrics, step=step)
+
+            if visual_validation_due(config, step):
+                try:
+                    visual_metrics = run_visual_validation(
+                        model=model,
+                        validation_rows=validation_dataset.rows,
+                        stats=stats,
+                        device=device,
+                        config=config,
+                        output_dir=output_dir,
+                        step=step,
+                        joint_dim=joint_dim,
+                        wandb_run=wandb_run,
+                    )
+                except Exception as exc:
+                    visual_metrics = {
+                        "visual_validation/videos_ok": 0.0,
+                        "visual_validation/videos_failed": float(config.get("visual_validation", {}).get("num_videos", 8)),
+                    }
+                    visual_error = {
+                        "event": "visual_validation",
+                        "step": step,
+                        "status": "failed",
+                        "message": str(exc),
+                    }
+                    print(json.dumps(visual_error, sort_keys=True), flush=True)
+                else:
+                    print(
+                        json.dumps({"event": "visual_validation", "step": step, **visual_metrics}, sort_keys=True),
+                        flush=True,
+                    )
+                if wandb_run is not None and visual_metrics:
+                    wandb_run.log(visual_metrics, step=step)
 
             if step % checkpoint_every == 0 or step == 1:
                 save_checkpoint(output_dir, model, optimizer, step, metrics, keep_last)
