@@ -890,6 +890,8 @@ def run_visual_validation(
 
 
 def _load_visual_render_deps() -> dict[str, Any]:
+    _ensure_ffmpeg_on_path()
+
     from online_retarget.data.g1_quality import g1_fk_body_positions, load_g1_kinematic_model
     from online_retarget.data.review_clips import (
         G1_CAPSULE_IGNORE_BODIES,
@@ -914,6 +916,31 @@ def _load_visual_render_deps() -> dict[str, Any]:
         "SONIC_PRUNED_BODY_NAMES": SONIC_PRUNED_BODY_NAMES,
         "SONIC_PRUNED_CAPSULE_EDGES": SONIC_PRUNED_CAPSULE_EDGES,
     }
+
+
+def _ensure_ffmpeg_on_path() -> None:
+    if shutil.which("ffmpeg") is not None:
+        return
+    try:
+        import imageio_ffmpeg
+
+        ffmpeg_exe = Path(imageio_ffmpeg.get_ffmpeg_exe())
+    except Exception:
+        return
+    if not ffmpeg_exe.exists():
+        return
+    shim_dir = Path(os.environ.get("ONLINE_RETARGET_FFMPEG_SHIM", "/tmp/online_retarget_ffmpeg_bin"))
+    try:
+        shim_dir.mkdir(parents=True, exist_ok=True)
+        shim_path = shim_dir / "ffmpeg"
+        if not shim_path.exists():
+            shim_path.symlink_to(ffmpeg_exe)
+        current_path = os.environ.get("PATH", "")
+        path_parts = current_path.split(os.pathsep) if current_path else []
+        if str(shim_dir) not in path_parts:
+            os.environ["PATH"] = str(shim_dir) + (os.pathsep + current_path if current_path else "")
+    except OSError:
+        return
 
 
 def _render_visual_validation_clip(
