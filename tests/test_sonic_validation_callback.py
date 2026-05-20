@@ -1,12 +1,24 @@
+import importlib.util
+from pathlib import Path
+import tempfile
 import unittest
 
 from online_retarget.sonic_validation_callback import (
     _clip_report,
     _current_soma_routes,
+    _render_triplet_video,
     rank_video_indices,
     should_run_visual_validation,
     validation_frame_count,
 )
+
+RENDER_DEPS_AVAILABLE = all(
+    importlib.util.find_spec(name) is not None
+    for name in ("imageio", "matplotlib", "numpy")
+)
+
+if RENDER_DEPS_AVAILABLE:
+    import numpy as np
 
 
 class SonicValidationCallbackTests(unittest.TestCase):
@@ -52,6 +64,39 @@ class SonicValidationCallbackTests(unittest.TestCase):
         self.assertEqual(report["encoder_route_first"], 2)
         self.assertEqual(report["encoder_route_last"], 3)
         self.assertEqual(report["encoder_route_counts"], {"2": 2, "3": 1})
+
+    @unittest.skipUnless(RENDER_DEPS_AVAILABLE, "render dependencies are required")
+    def test_render_triplet_video_writes_mp4_with_current_matplotlib(self):
+        frames = 3
+        joints = 14
+        base = np.zeros((frames, joints, 3), dtype=np.float32)
+        base[..., 0] = np.linspace(0.0, 1.0, joints)
+        base[..., 2] = np.linspace(0.0, 0.5, joints)
+        for frame_idx in range(frames):
+            base[frame_idx, :, 1] = frame_idx * 0.02
+        trajectory = {
+            "source_soma": [base[frame_idx] for frame_idx in range(frames)],
+            "target_g1": [
+                base[frame_idx] + np.array([0.0, 0.5, 0.0])
+                for frame_idx in range(frames)
+            ],
+            "inferred_g1": [
+                base[frame_idx] + np.array([0.0, 1.0, 0.0])
+                for frame_idx in range(frames)
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            video_path = Path(tmp) / "triplet.mp4"
+            _render_triplet_video(
+                trajectory=trajectory,
+                video_path=video_path,
+                target_fps=50,
+                duration_sec=frames / 50.0,
+            )
+
+            self.assertTrue(video_path.exists())
+            self.assertGreater(video_path.stat().st_size, 0)
 
 
 class _PolicyWithRoutes:

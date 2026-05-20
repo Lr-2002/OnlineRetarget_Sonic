@@ -548,11 +548,22 @@ def _render_triplet_video(
                 ax = fig.add_subplot(1, 3, panel_idx, projection="3d")
                 _plot_points(ax, points, title, color, bounds)
             fig.tight_layout(pad=0.4)
-            fig.canvas.draw()
-            width, height = fig.canvas.get_width_height()
-            image = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-            writer.append_data(image.reshape(height, width, 3))
+            writer.append_data(_figure_canvas_rgb(fig))
             plt.close(fig)
+
+
+def _figure_canvas_rgb(fig: Any) -> Any:
+    import numpy as np
+
+    fig.canvas.draw()
+    if hasattr(fig.canvas, "buffer_rgba"):
+        rgba = np.asarray(fig.canvas.buffer_rgba(), dtype=np.uint8)
+        return rgba[..., :3].copy()
+    if hasattr(fig.canvas, "tostring_rgb"):
+        width, height = fig.canvas.get_width_height()
+        image = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        return image.reshape(height, width, 3)
+    raise RuntimeError("Matplotlib canvas cannot export RGB image data")
 
 
 def _plot_points(ax: Any, points: Any, title: str, color: str, bounds: tuple[Any, Any, Any]) -> None:
