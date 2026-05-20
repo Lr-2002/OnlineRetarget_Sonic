@@ -127,3 +127,84 @@ real videos at step 20k, train the variants to 1M steps, and write the
 comparison report selecting the best variant. Commit/sync is done for the local
 implementation commit listed above, but the goal is not complete until the
 training and comparison evidence exists.
+
+## Remote Execution Update: 2026-05-21
+
+Current formal run group:
+
+`sonic_native_retarget_1m_20260520T203518Z`
+
+Remote evidence collected from `ssh 5090`:
+
+| Item | Evidence | Status |
+| --- | --- | --- |
+| OnlineRetarget checkout | `/mnt/data_cpfs/code/wxh/OnlineRetarget` is clean on `main`, commit `ea87ad0cd6986c4493856dd1fb030cf543537797` | Covered |
+| Sonic checkout | `/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training`, commit `53e5a44f6373fe70b2bc62c934fa8f98ee810062` | Covered |
+| Manifest | `/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_native_retarget_runs/sonic_native_retarget_1m_20260520T203518Z/_launcher/launch_manifest.json` records `executed: true`, four configs, four GPUs, four tmux sessions | Covered |
+| A1 run | tmux `sonic_native_sonic_native_retarget_1m_20260520T203518Z_A1_concat`, W&B `zbtshia6`, running, W&B config has encoder `A1_concat`, `num_learning_iterations: 1000000`, git SHA fields | Running |
+| A2 run | tmux `sonic_native_sonic_native_retarget_1m_20260520T203518Z_A2_film_contact`, W&B `c9tg1s9d`, running, W&B config has encoder `A2_film_contact`, visual callback config | Running |
+| B1 run | tmux `sonic_native_sonic_native_retarget_1m_20260520T203518Z_B1_adapter`, W&B `8fj9qby9`, running, W&B config has encoder `B1_adapter`, deterministic route config | Running |
+| B2 run | tmux `sonic_native_sonic_native_retarget_1m_20260520T203518Z_B2_expert`, W&B `zsgqemib`, running, W&B config has encoder `B2_expert`, deterministic route config | Running |
+| Remote contract validation | `PYTHONPATH=src /workspace/isaaclab/_isaac_sim/python.sh scripts/validate_sonic_native_retarget_config.py --require-formal --check-paths ...` passed for all four configs | Covered |
+| Runtime errors | Grep over four launcher logs found no `Traceback`, `RuntimeError`, `KeyError`, or `Error executing job` at the audit time | Covered so far |
+| Current progress | Logs showed A1/B1/B2 around learning iteration `127`, A2 around `128`; W&B API showed lastHistoryStep around `145-148` | In progress |
+| 20k-step visual validation | Runs have not reached step `20000`; no real W&B validation videos are expected yet | Missing until reached |
+| 1M-step completion | Runs are far below `1000000` configured trainer iterations | Missing |
+
+Additional Sonic-side evidence:
+
+- `gear_sonic/train_agent_trl.py` instantiates `config.callbacks`.
+- `gear_sonic/trl/callbacks/hv_callback_handler.py` calls callback `on_step_end`
+  with `env`, `model`, and `accelerator`, so
+  `SonicVisualValidationCallback` is not merely dead Hydra config.
+- Sonic motion command / wrapper exposes the panel fields used by the callback:
+  `soma_joints`, `body_pos_w`, `robot_body_pos_w`, `motion_start_time_steps`,
+  and `time_steps`.
+
+Updated conclusion:
+
+The code and remote launch path now satisfy the formal implementation contract
+at config, import, callback, git, W&B-config, and motionlib-path levels. The
+goal is still not complete because the decisive runtime artifacts are not
+available yet: first integrated W&B validation videos at 20k steps, full 1M-step
+completion or reproducible failure reports, and the final A1/A2/B1/B2 comparison
+report.
+
+## Local Loss Guardrail Update: 2026-05-21
+
+One implementation gap was found after the remote launch: the formal
+`G1DynamicsActionLoss` accepted `loss_inputs["action_mean"]` as a fallback when
+`decoded_outputs["g1_dyn"]` was absent. That fallback was too weak for this
+Goal, because it did not force the supervised objective to prove that Sonic's
+Dynamics Decoder actually ran.
+
+The loss now fails fast unless `decoded_outputs` contains the requested
+`g1_dyn` decoder and that decoder emits `action`, `body_action`, or
+`meta_action`. `tests/test_sonic_losses.py` covers the accepted output keys,
+temporal target alignment, missing-decoder failure, missing-action failure, and
+smoothness loss on the `g1_dyn` prediction.
+
+Local verification:
+
+```bash
+PYTHONPATH=src python3 scripts/validate_sonic_native_retarget_config.py --require-formal \
+  configs/sonic_native_retarget_a1_concat_1gpu.json \
+  configs/sonic_native_retarget_a2_film_contact_1gpu.json \
+  configs/sonic_native_retarget_b1_adapter_1gpu.json \
+  configs/sonic_native_retarget_b2_expert_1gpu.json
+
+PYTHONPATH=src python3 -m unittest \
+  tests.test_sonic_losses \
+  tests.test_sonic_encoder_modules \
+  tests.test_sonic_native_contract \
+  tests.test_sonic_native_features \
+  tests.test_sonic_validation_callback
+
+python3 -m compileall -q src/online_retarget tests/test_sonic_losses.py
+```
+
+Observed result: formal config validation passed; compileall passed; local
+unittest reported `43` tests OK with `14` skipped because this local Python does
+not provide `torch`. The Torch-backed loss tests still need remote Isaac/Sonic
+Python verification after the commit is pushed and the remote checkout is
+synced.

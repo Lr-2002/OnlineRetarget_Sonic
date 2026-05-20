@@ -62,15 +62,28 @@ def _decoder_prediction(
     decoder_name: str,
     pred_key: str,
 ) -> torch.Tensor:
-    decoded_outputs = loss_inputs["decoded_outputs"]
-    decoder_output = decoded_outputs.get(decoder_name, {})
+    decoded_outputs = loss_inputs.get("decoded_outputs")
+    if not isinstance(decoded_outputs, dict):
+        raise KeyError("loss_inputs must contain decoded_outputs for Sonic decoder supervision")
+    if decoder_name not in decoded_outputs:
+        available = ", ".join(sorted(decoded_outputs)) or "<none>"
+        raise KeyError(
+            f"required Sonic decoder output {decoder_name!r} is missing; "
+            f"available decoders: {available}"
+        )
+
+    decoder_output = decoded_outputs[decoder_name]
     if pred_key in decoder_output:
         return decoder_output[pred_key]
     if "body_action" in decoder_output:
         return decoder_output["body_action"]
     if "meta_action" in decoder_output:
         return decoder_output["meta_action"]
-    return loss_inputs["action_mean"]
+    available = ", ".join(sorted(decoder_output)) or "<none>"
+    raise KeyError(
+        f"decoder {decoder_name!r} did not produce {pred_key!r}, "
+        f"'body_action', or 'meta_action'; available outputs: {available}"
+    )
 
 
 def _align_pred_target(
