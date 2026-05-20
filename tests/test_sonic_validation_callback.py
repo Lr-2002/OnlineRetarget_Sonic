@@ -7,6 +7,7 @@ from online_retarget.sonic_validation_callback import (
     _clip_report,
     _current_soma_routes,
     _render_triplet_video,
+    _reset_policy_rollout_buffer,
     rank_video_indices,
     should_run_visual_validation,
     validation_frame_count,
@@ -44,6 +45,15 @@ class SonicValidationCallbackTests(unittest.TestCase):
         routes = _current_soma_routes(policy)
 
         self.assertEqual(list(routes), [2, 1])
+
+    def test_validation_resets_rollout_buffer_without_clearing_aux_losses(self):
+        policy = _PolicyWithAuxState()
+
+        _reset_policy_rollout_buffer(policy)
+
+        self.assertEqual(policy.init_rollout_calls, 1)
+        self.assertEqual(policy.clear_rollout_calls, 0)
+        self.assertEqual(policy.aux_losses, {"loss": 1.0})
 
     def test_clip_report_includes_encoder_route_counts(self):
         report = _clip_report(
@@ -102,6 +112,20 @@ class SonicValidationCallbackTests(unittest.TestCase):
 class _PolicyWithRoutes:
     def __init__(self, routes):
         self.actor_module = _ActorModule(routes)
+
+
+class _PolicyWithAuxState:
+    def __init__(self):
+        self.aux_losses = {"loss": 1.0}
+        self.init_rollout_calls = 0
+        self.clear_rollout_calls = 0
+
+    def init_rollout(self):
+        self.init_rollout_calls += 1
+
+    def clear_rollout(self):
+        self.clear_rollout_calls += 1
+        del self.aux_losses
 
 
 class _ActorModule:

@@ -368,12 +368,20 @@ def _collect_rollout(
             env.set_is_training()
         if hasattr(policy, "train_mode"):
             policy.train_mode()
-        if hasattr(policy, "clear_rollout"):
-            policy.clear_rollout()
+        _reset_policy_rollout_buffer(policy)
         if hasattr(model, "train"):
             model.train()
 
     return trajectories
+
+
+def _reset_policy_rollout_buffer(policy: Any) -> None:
+    """Reset inference history without deleting Sonic PPO aux-loss state."""
+
+    if hasattr(policy, "init_rollout"):
+        policy.init_rollout()
+    elif hasattr(policy, "clear_rollout"):
+        policy.clear_rollout()
 
 
 def _reset_env(env: Any, args: Any) -> Any:
