@@ -579,6 +579,24 @@ def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -
                 f"sonic_hydra.args still references forbidden deployable source feature {feature}"
             )
 
+    if "active_encoders=[g1,soma]" in hydra_text:
+        _require(
+            "reencode_smpl_g1_recon=false" in hydra_text,
+            errors,
+            "formal g1+soma runs must disable reencode_smpl_g1_recon",
+        )
+        for loss_name in (
+            "g1_smpl_latent",
+            "g1_teleop_latent",
+            "teleop_smpl_latent",
+            "reencoded_smpl_g1_latent",
+        ):
+            _require(
+                f"~algo.config.actor.backbone.aux_loss_func.{loss_name}" in hydra_text,
+                errors,
+                f"formal g1+soma runs must delete SMPL/teleop aux loss {loss_name}",
+            )
+
     variant_type = str(_mapping(config.get("variant")).get("type", "")).lower()
     if variant_type in {"adapter", "expert"}:
         _require(
