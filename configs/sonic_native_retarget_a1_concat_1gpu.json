@@ -157,7 +157,7 @@
       "++callbacks.online_retarget_visual_val.output_dir=${experiment_dir}/online_retarget_visual_validation",
       "++manager_env.commands.motion.motion_lib_cfg.target_fps=50",
       "++manager_env.commands.motion.motion_lib_cfg.motion_file=/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/robot_filtered_v1",
-      "++manager_env.commands.motion.motion_lib_cfg.filter_motion_keys=^(?!.*__(?:A302|A303|A400|A402|A403|A404|A488|A489|A490|A491|A496|A497|A498|A499|A508|A512|A513|A514|A515|A517|A518|A520|A521|A522|A523|A524|A525|A526|A527|A538|A539|A540|A541)(?:_M)?$).*$",
+      "++manager_env.commands.motion.motion_lib_cfg.filter_motion_keys='^(?!.*__(?:A302|A303|A400|A402|A403|A404|A488|A489|A490|A491|A496|A497|A498|A499|A508|A512|A513|A514|A515|A517|A518|A520|A521|A522|A523|A524|A525|A526|A527|A538|A539|A540|A541)(?:_M)?$).*$'",
       "++manager_env.commands.motion.motion_lib_cfg.remove_motion_keys=[230124__no_see_002__A142_M,240529__neutral_button__press_001__A543,240529__neutral_button__press_001__A543_M,240529__neutral_button__press_001__A544,240529__neutral_button__press_001__A544_M,240529__neutral_button__press_001__A545,240529__neutral_button__press_001__A545_M]",
       "++manager_env.commands.motion.motion_lib_cfg.soma_motion_file=/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/soma_filtered_v1",
       "++manager_env.commands.motion.encoder_sample_probs.g1=1.0",
