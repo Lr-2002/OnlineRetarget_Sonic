@@ -255,7 +255,7 @@ def render_pair(
 
 def main() -> None:
     args = parse_args()
-    config = kin.load_config(Path(args.config))
+    config = kin.read_config(Path(args.config))
     timestamp = kin.timestamp_compact()
     output_dir = Path(args.output_dir) if args.output_dir else Path("outputs/dataset_pair_visual_audit") / timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
