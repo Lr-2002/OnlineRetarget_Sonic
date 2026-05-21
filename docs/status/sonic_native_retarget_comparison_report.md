@@ -41,6 +41,22 @@ evidence from the formal A1/A2/B1/B2 runs, not from smoke runs or dry runs.
 | Checkpoints | Final or best checkpoint path recorded for each variant | pending |
 | Decision | One recommended next-line variant with rationale and risks | pending |
 
+## Early Checkpoint Evidence
+
+Latest monitor snapshot at `2026-05-21T00:12:52Z` found one rolling checkpoint
+per variant:
+
+| Variant | Iteration | Checkpoint count | Latest checkpoint | Meaning |
+| --- | ---: | ---: | --- | --- |
+| A1 | `1216` | `1` | `last.pt` | Rolling checkpoint only |
+| A2 | `1194` | `1` | `last.pt` | Rolling checkpoint only |
+| B1 | `1203` | `1` | `last.pt` | Rolling checkpoint only |
+| B2 | `1207` | `1` | `last.pt` | Rolling checkpoint only |
+
+These files prove checkpoint writing is active, but they are not final or best
+checkpoints for the completion table. Sonic's regular `model_step_*.pt`
+checkpoint is expected later according to the configured save frequency.
+
 ## Metrics Table
 
 Use the same step window for all variants when comparing unfinished runs.
