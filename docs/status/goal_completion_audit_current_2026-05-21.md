@@ -26,6 +26,7 @@ source-side Encoder variant，用于 online human/SOMA/BVH to G1 retargeting。
 | Run group | `sonic_native_retarget_1m_20260520T220222Z` |
 | W&B project | `world_model_xh/OnlineRetarget` |
 | Latest local focused regression | `37` tests passed, `3` skipped |
+| Remote formal config path check | 5090 Isaac Python validation passed with `--require-formal --check-paths`; all warnings empty |
 | AgentHub cadence report | `http://10.1.11.30:5175/runs/online-retarget/20260521-094531-onlineretarget-20k-video-validation-cadence` |
 
 ## Prompt-to-Artifact Checklist
@@ -41,14 +42,14 @@ source-side Encoder variant，用于 online human/SOMA/BVH to G1 retargeting。
 | B2 Expert variant | Active tmux/process for `B2_expert`; W&B run `2r8c0hs0` state `running` | Running |
 | Source inputs exclude target-only `body_pos_w` / `body_quat_w` | Focused regression `tests.test_sonic_native_contract` passed as part of 37-test suite | Covered by test/contract level |
 | Training/validation/inference share feature contract | Focused contract/callback regression passed; formal configs wire common callback and feature terms | Covered at code/config level |
-| Sonic target timeline is 50Hz | Formal configs set `motion_lib_cfg.target_fps=50`; callback uses `target_fps=50` | Covered at config level |
+| Sonic target timeline is 50Hz | Formal configs set `motion_lib_cfg.target_fps=50`; callback uses `target_fps=50`; remote `--check-paths` validator passed | Covered at config/path level |
 | Video validation integrated into training | `SonicVisualValidationCallback` is configured in all formal Hydra args | Covered at config/code level |
 | Video validation every 20k steps | Callback `should_run_visual_validation()` gates on positive multiples of `every_steps`; configs set `every_steps=20000` | Covered at code/config level |
 | 8 videos per validation, 4s inference window | Formal configs set `num_videos=8`, `duration_sec=4.0` | Covered at config level |
 | W&B video upload path exists | Callback uses `wandb.Video`; formal configs set `wandb_upload=true` | Covered at code/config level; real 20k upload missing |
 | Remote launcher checks committed/pushed/synced code | Focused launcher guardrail tests passed | Covered at test level |
 | Long training in tmux | 5090 has four variant tmux sessions plus monitor/watch sessions | Covered |
-| `/home/user/data/motion_data` remains read-only | No writes observed in current commands; formal output roots under `outputs/` | Weakly covered; ongoing audit only |
+| `/home/user/data/motion_data` remains read-only | No writes observed in current commands; formal output roots under `outputs/`; remote path validator passed against configured output paths | Covered for current configs; ongoing runtime audit only |
 | W&B config/metrics visible | W&B API shows all four runs `running` with loss metrics present | Covered for live metric stream |
 | First 20k video bundle exists | `validation_file_count=0`; no `validation_20k_ready.md` | Missing |
 | W&B 20k videos uploaded | no `online_retarget_visual_validation/videos_uploaded` yet | Missing |
@@ -74,6 +75,21 @@ W&B API check around `2026-05-21T01:48Z`:
 | A2 | `o1ldyppd` | `running` | `2080` | `0.3621` |
 | B1 | `ctkd8d87` | `running` | `2091` | `0.3870` |
 | B2 | `2r8c0hs0` | `running` | `2096` | `0.3878` |
+
+Remote config path validation on 5090 using the actual training Python:
+
+```bash
+PYTHONPATH=src /workspace/isaaclab/_isaac_sim/python.sh \
+  scripts/validate_sonic_native_retarget_config.py \
+  --require-formal --check-paths --json \
+  configs/sonic_native_retarget_a1_concat_1gpu.json \
+  configs/sonic_native_retarget_a2_film_contact_1gpu.json \
+  configs/sonic_native_retarget_b1_adapter_1gpu.json \
+  configs/sonic_native_retarget_b2_expert_1gpu.json
+```
+
+Result: all four configs returned `formal=true`, `target_decoder=g1_dyn`,
+`training_lane=sonic_native_retarget`, and `warnings=[]`.
 
 ## Active Automation
 
