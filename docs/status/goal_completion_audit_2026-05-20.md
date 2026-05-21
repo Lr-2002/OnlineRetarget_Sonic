@@ -434,6 +434,25 @@ Observed result: `30` tests passed with `3` skips. These tests cover the
 `20k` visual-validation step gate and formal config contract, but they do not
 replace the required real 20k W&B video artifacts.
 
+Follow-up regression coverage added
+`tests/test_sonic_native_20k_watcher.py`. The focused watcher tests cover:
+
+- Complete `step_00020000` artifacts produce `validation_20k_ready.md`.
+- Complete artifacts under a non-20k step such as `step_00040000` do not trigger
+  the 20k watcher.
+- Failed W&B upload reports do not trigger readiness.
+
+Current combined command:
+
+```bash
+PYTHONPATH=src python3 -m unittest \
+  tests.test_sonic_native_contract \
+  tests.test_sonic_validation_callback \
+  tests.test_sonic_native_20k_watcher -q
+```
+
+Observed result: `33` tests passed with `3` skips.
+
 Resource/process health was also checked on `5090`:
 
 | Variant | GPU | PID | Memory | Evidence |
