@@ -44,6 +44,61 @@ if SRC_ROOT.exists() and str(SRC_ROOT) not in sys.path:
 REQUIRED_NPZ_KEYS = ("joint_pos", "joint_vel", "body_pos_w", "body_quat_w")
 REQUIRED_ROBOT_MOTIONLIB_KEYS = ("dof", "root_rot", "fps")
 REQUIRED_SOMA_MOTIONLIB_KEYS = ("soma_joints", "soma_root_quat", "fps")
+SOMA_JOINT_NAMES = (
+    "Hips",
+    "Spine1",
+    "Spine2",
+    "Chest",
+    "Neck1",
+    "Head",
+    "LeftShoulder",
+    "LeftArm",
+    "LeftForeArm",
+    "LeftHand",
+    "LeftHandThumb1",
+    "LeftHandMiddle1",
+    "RightShoulder",
+    "RightArm",
+    "RightForeArm",
+    "RightHand",
+    "RightHandThumb1",
+    "RightHandMiddle1",
+    "LeftLeg",
+    "LeftShin",
+    "LeftFoot",
+    "LeftToeBase",
+    "RightLeg",
+    "RightShin",
+    "RightFoot",
+    "RightToeBase",
+)
+SOMA_CAPSULE_EDGES = (
+    ("Hips", "Spine1"),
+    ("Spine1", "Spine2"),
+    ("Spine2", "Chest"),
+    ("Chest", "Neck1"),
+    ("Neck1", "Head"),
+    ("Chest", "LeftShoulder"),
+    ("LeftShoulder", "LeftArm"),
+    ("LeftArm", "LeftForeArm"),
+    ("LeftForeArm", "LeftHand"),
+    ("LeftHand", "LeftHandThumb1"),
+    ("LeftHand", "LeftHandMiddle1"),
+    ("Chest", "RightShoulder"),
+    ("RightShoulder", "RightArm"),
+    ("RightArm", "RightForeArm"),
+    ("RightForeArm", "RightHand"),
+    ("RightHand", "RightHandThumb1"),
+    ("RightHand", "RightHandMiddle1"),
+    ("Hips", "LeftLeg"),
+    ("LeftLeg", "LeftShin"),
+    ("LeftShin", "LeftFoot"),
+    ("LeftFoot", "LeftToeBase"),
+    ("Hips", "RightLeg"),
+    ("RightLeg", "RightShin"),
+    ("RightShin", "RightFoot"),
+    ("RightFoot", "RightToeBase"),
+)
 REQUIRED_CONFIG_KEYS = {
     "schema_version",
     "owner",
@@ -465,6 +520,7 @@ def load_soma_motionlib_arrays(row: Mapping[str, Any], config: Mapping[str, Any]
         "joint_pos": dof,
         "joint_vel": finite_difference_velocity(dof, robot_fps),
         "root_rot": root_rot,
+        "joint_names": list(soma.get("joint_names", SOMA_JOINT_NAMES)),
         "fps": np.asarray(robot_fps, dtype=np.float32),
     }
 
@@ -1339,12 +1395,15 @@ def _render_visual_validation_clip(
             render_deps=render_deps,
         )
     else:
-        source_report = _render_missing_panel(
-            render_deps=render_deps,
+        source_report = render_deps["_render_capsule_3d_video"](
+            frames=_soma_motionlib_source_frames(arrays["soma_joints"][:frame_count], arrays.get("joint_names")),
+            edges=_soma_edges(arrays.get("joint_names")),
             video_path=source_video,
-            render_config=render_config,
-            frame_count=frame_count,
-            label="source bvh unavailable",
+            config=render_config,
+            label="source soma motionlib",
+            up_axis=2,
+            capsule_color=(48, 132, 83),
+            key_color=(132, 103, 34),
         )
 
     target_body_pos = arrays["body_pos_w"][:frame_count]
@@ -1823,6 +1882,30 @@ def _sonic_edges(
 ) -> tuple[tuple[str, str], ...]:
     available = set(body_names)
     return tuple((start, end) for start, end in edges if start in available and end in available)
+
+
+def _soma_motionlib_source_frames(
+    soma_joints: np.ndarray,
+    joint_names: Any,
+) -> list[dict[str, tuple[float, float, float]]]:
+    names = list(joint_names) if joint_names else list(SOMA_JOINT_NAMES)
+    usable = min(len(names), soma_joints.shape[1])
+    return [
+        {
+            names[index]: (
+                float(frame[index, 0]),
+                float(frame[index, 1]),
+                float(frame[index, 2]),
+            )
+            for index in range(usable)
+        }
+        for frame in soma_joints
+    ]
+
+
+def _soma_edges(joint_names: Any) -> tuple[tuple[str, str], ...]:
+    names = set(joint_names) if joint_names else set(SOMA_JOINT_NAMES)
+    return tuple((start, end) for start, end in SOMA_CAPSULE_EDGES if start in names and end in names)
 
 
 def _g1_prediction_frames(
