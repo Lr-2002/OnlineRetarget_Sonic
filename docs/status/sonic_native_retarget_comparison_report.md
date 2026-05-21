@@ -82,9 +82,10 @@ Decision rule:
   been generated yet.
 - Smoke-run videos prove callback mechanics only; they do not prove formal
   4-second validation quality.
-- Current ETA to 1M steps is measured in weeks, so the final decision may need
-  an intermediate checkpoint comparison before full completion if training cost
-  becomes unacceptable.
+- Current ETA to 1M Sonic trainer iterations is roughly 70+ days at the latest
+  monitor rate. An intermediate checkpoint comparison may be useful for a
+  research decision, but it must not be treated as `goal.md` completion unless
+  the user explicitly re-scopes the 1M-step acceptance criterion.
 
 ## Latest Monitor Snapshot
 
