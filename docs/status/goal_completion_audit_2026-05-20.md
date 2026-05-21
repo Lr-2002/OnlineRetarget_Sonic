@@ -453,6 +453,25 @@ PYTHONPATH=src python3 -m unittest \
 
 Observed result: `33` tests passed with `3` skips.
 
+Launcher guardrail regression coverage was then added in
+`tests/test_remote_launcher_guardrails.py`. It statically locks the formal
+remote launcher requirements that OnlineRetarget must be clean, must fetch its
+upstream branch, must match `HEAD == FETCH_HEAD`, must check Sonic cleanliness
+for real training, and must propagate OnlineRetarget/Sonic SHA fields into the
+launch command.
+
+Updated combined command:
+
+```bash
+PYTHONPATH=src python3 -m unittest \
+  tests.test_sonic_native_contract \
+  tests.test_sonic_validation_callback \
+  tests.test_sonic_native_20k_watcher \
+  tests.test_remote_launcher_guardrails -q
+```
+
+Observed result: `37` tests passed with `3` skips.
+
 Resource/process health was also checked on `5090`:
 
 | Variant | GPU | PID | Memory | Evidence |

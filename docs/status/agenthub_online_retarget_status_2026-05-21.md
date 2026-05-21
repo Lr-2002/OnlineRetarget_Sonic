@@ -35,8 +35,8 @@ Run group: `sonic_native_retarget_1m_20260520T220222Z`
 
 - Local and remote worktrees: clean on `main`, tracking `origin/main`.
 - Current resource use: A1/A2/B1/B2 are actively computing on GPUs `0/1/2/3`.
-- Contract / watcher regression: `33` tests passed, `3` skipped via
-  `PYTHONPATH=src python3 -m unittest tests.test_sonic_native_contract tests.test_sonic_validation_callback tests.test_sonic_native_20k_watcher -q`.
+- Contract / watcher / launcher regression: `37` tests passed, `3` skipped via
+  `PYTHONPATH=src python3 -m unittest tests.test_sonic_native_contract tests.test_sonic_validation_callback tests.test_sonic_native_20k_watcher tests.test_remote_launcher_guardrails -q`.
 - W&B history is still updating for all four runs. Latest API check saw
   `lastHistoryStep` around `1464-1488`, with metric keys including
   `loss/aux_online_retarget_g1_dyn_action_avg`,
