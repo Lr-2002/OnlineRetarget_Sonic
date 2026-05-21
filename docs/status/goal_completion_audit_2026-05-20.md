@@ -392,18 +392,26 @@ Observed summary:
 
 | Variant | Iteration | Iter/hr | ETA 20k | ETA 1M | Hard error |
 | --- | ---: | ---: | --- | --- | --- |
-| A1_concat | `1046` | `568.4` | `1d 9h` | `73d 5h` | `none` |
-| A2_film_contact | `1026` | `559.2` | `1d 9h` | `74d 10h` | `none` |
-| B1_adapter | `1034` | `563.0` | `1d 9h` | `73d 22h` | `none` |
-| B2_expert | `1038` | `565.3` | `1d 9h` | `73d 15h` | `none` |
+| A1_concat | `1408` | `567.1` | `1d 8h` | `73d 8h` | `none` |
+| A2_film_contact | `1384` | `558.9` | `1d 9h` | `74d 10h` | `none` |
+| B1_adapter | `1395` | `563.0` | `1d 9h` | `73d 21h` | `none` |
+| B2_expert | `1400` | `565.1` | `1d 8h` | `73d 15h` | `none` |
 
 Validation artifact count remains `0`, which is expected because the formal
 video callback is gated at `every_steps=20000`. The current remote
-OnlineRetarget checkout is clean at `9a3954a50ec78832baa19b41defa0331e0877b04`
+OnlineRetarget checkout is clean at `50c81516df3867ab674df630a7368bffdcab4c11`
 and matches its upstream. The launched runs remain traceable to launch commit
 `de7ff733edf5b8cd978882826229b0a7400ac0d2` through the launcher manifest and
 W&B args; later commits only update monitoring/audit surfaces unless a new run
 is launched.
+
+Launch-to-current diff was rechecked from
+`de7ff733edf5b8cd978882826229b0a7400ac0d2` to
+`50c81516df3867ab674df630a7368bffdcab4c11`: it only touches
+`docs/status/*`, `scripts/monitor_sonic_native_retarget_runs.sh`, and
+`scripts/watch_sonic_native_retarget_20k_validation.sh`. No runtime training
+entrypoint, formal config, validation callback, loss, encoder, or feature
+packing code changed after the formal jobs launched.
 
 Focused validation after this status refresh:
 
@@ -416,6 +424,20 @@ PYTHONPATH=src:. python3 -m unittest \
 Observed result: `30` tests passed with `3` skips. These tests cover the
 `20k` visual-validation step gate and formal config contract, but they do not
 replace the required real 20k W&B video artifacts.
+
+Resource/process health was also checked on `5090`:
+
+| Variant | GPU | PID | Memory | Evidence |
+| --- | ---: | ---: | ---: | --- |
+| A1_concat | `0` | `1863886` | `12.5GB` | active `train_agent_trl.py` process |
+| A2_film_contact | `1` | `1863887` | `17.0GB` | active `train_agent_trl.py` process |
+| B1_adapter | `2` | `1863888` | `17.0GB` | active `train_agent_trl.py` process |
+| B2_expert | `3` | `1863889` | `16.8GB` | active `train_agent_trl.py` process |
+
+The process command lines include `active_decoders=[g1_dyn,g1_kin]` and the
+formal `SonicVisualValidationCallback` settings
+`every_steps=20000`, `num_videos=8`, `duration_sec=4.0`, `target_fps=50`, and
+`wandb_upload=true`.
 
 ## W&B And Decoder Runtime Check: 2026-05-21
 

@@ -1,6 +1,6 @@
 # OnlineRetarget Sonic-native Run Status
 
-更新时间：2026-05-21 00:05 UTC
+更新时间：2026-05-21 00:33 UTC
 
 ## 结论
 
@@ -15,19 +15,28 @@ Run group: `sonic_native_retarget_1m_20260520T220222Z`
 
 | Variant | W&B run | Latest iteration | State | Hard error |
 | --- | --- | ---: | --- | --- |
-| A1_concat | `rcuzxotj` | `1146` | running | none |
-| A2_film_contact | `o1ldyppd` | `1124` | running | none |
-| B1_adapter | `ctkd8d87` | `1133` | running | none |
-| B2_expert | `2r8c0hs0` | `1137` | running | none |
+| A1_concat | `rcuzxotj` | `1408` | running | none |
+| A2_film_contact | `o1ldyppd` | `1384` | running | none |
+| B1_adapter | `ctkd8d87` | `1395` | running | none |
+| B2_expert | `2r8c0hs0` | `1400` | running | none |
 
 ## Traceability
 
 - OnlineRetarget launch commit: `de7ff733edf5b8cd978882826229b0a7400ac0d2`
 - Sonic launch commit: `53e5a44f6373fe70b2bc62c934fa8f98ee810062`
-- Current repo / GitHub / remote checkout: `4f15190b1cd8e897eedf6fe6e342b505822fde43`
+- Current repo / GitHub / remote checkout: `50c81516df3867ab674df630a7368bffdcab4c11`
 - W&B nested config key: `online_retarget`
 - Formal decoder path: `g1_dyn` primary, `g1_kin` auxiliary
 - Formal callback: `SonicVisualValidationCallback`
+- Launch-to-current diff: status docs plus monitor/watch scripts only; no runtime
+  training code/config/callback/loss/encoder changes after launch.
+
+## Runtime Health
+
+- Local and remote worktrees: clean on `main`, tracking `origin/main`.
+- Current resource use: A1/A2/B1/B2 are actively computing on GPUs `0/1/2/3`.
+- Contract regression: `30` tests passed, `3` skipped via
+  `PYTHONPATH=src python3 -m unittest tests.test_sonic_native_contract tests.test_sonic_validation_callback -q`.
 
 ## Validation Gate
 
@@ -37,7 +46,7 @@ Current validation state:
 
 - `validation_file_count`: `0`
 - `validation_20k_ready.md`: not created yet
-- Expected first validation: around 1 day 9 hours from the latest monitor snapshot
+- Expected first validation: around 1 day 8-9 hours from the latest monitor snapshot
 - Watcher requirement: wait for `4` W&B upload reports and expected `32` MP4 files
 
 ## Remaining Completion Gates
