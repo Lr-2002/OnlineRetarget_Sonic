@@ -594,8 +594,14 @@ def render_g1_mujoco_panel(
         return {"status": "failed", "message": f"MuJoCo is unavailable: {exc}"}
 
     ffmpeg = shutil.which("ffmpeg")
+    imageio_module = None
+    encode_backend = "ffmpeg_rawvideo"
     if ffmpeg is None:
-        return {"status": "blocked", "message": "ffmpeg is required to encode the MuJoCo render video."}
+        try:
+            import imageio.v2 as imageio_module  # type: ignore[import-not-found]
+        except Exception as exc:
+            return {"status": "blocked", "message": f"imageio is required when ffmpeg is unavailable: {exc}"}
+        encode_backend = "imageio"
 
     model = mujoco.MjModel.from_xml_path(str(model_xml))
     data = mujoco.MjData(model)
@@ -603,6 +609,7 @@ def render_g1_mujoco_panel(
     video_path.parent.mkdir(parents=True, exist_ok=True)
     renderer = None
     process = None
+    writer = None
     frame_sums: list[int] = []
     frame_stds: list[float] = []
     changed_frames = 0
@@ -614,33 +621,36 @@ def render_g1_mujoco_panel(
         scene_option = mujoco.MjvOption()
         mujoco.mjv_defaultOption(scene_option)
         scene_option.frame = mujoco.mjtFrame.mjFRAME_BODY if render_frames else mujoco.mjtFrame.mjFRAME_NONE
-        command = [
-            ffmpeg,
-            "-y",
-            "-f",
-            "rawvideo",
-            "-vcodec",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "-s",
-            f"{width}x{height}",
-            "-r",
-            str(fps),
-            "-i",
-            "-",
-            "-an",
-            "-vcodec",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            str(video_path),
-        ]
-        process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-        if process.stdin is None:
-            return {"status": "failed", "message": "ffmpeg stdin was not available."}
+        if ffmpeg is not None:
+            command = [
+                ffmpeg,
+                "-y",
+                "-f",
+                "rawvideo",
+                "-vcodec",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s",
+                f"{width}x{height}",
+                "-r",
+                str(fps),
+                "-i",
+                "-",
+                "-an",
+                "-vcodec",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                str(video_path),
+            ]
+            process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+            if process.stdin is None:
+                return {"status": "failed", "message": "ffmpeg stdin was not available."}
+        elif imageio_module is not None:
+            writer = imageio_module.get_writer(video_path, fps=fps, codec="libx264", quality=8, macro_block_size=1)
         root_pos = np.asarray(motion["root_pos"], dtype=np.float32)
         root_quat = np.asarray(motion["root_quat"], dtype=np.float32)
         joint_pos = np.asarray(motion["joint_pos"], dtype=np.float32)
@@ -662,17 +672,24 @@ def render_g1_mujoco_panel(
             renderer.update_scene(data, camera=camera, scene_option=scene_option)
             image = renderer.render()
             frame_bytes = image.tobytes()
-            process.stdin.write(frame_bytes)
+            if process is not None and process.stdin is not None:
+                process.stdin.write(frame_bytes)
+            elif writer is not None:
+                writer.append_data(image)
             frame_sums.append(int(image.sum()))
             frame_stds.append(float(image.std()))
             if previous_frame is not None and frame_bytes != previous_frame:
                 changed_frames += 1
             previous_frame = frame_bytes
-        process.stdin.close()
-        stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
-        return_code = process.wait()
-        if return_code != 0:
-            return {"status": "failed", "message": "ffmpeg failed", "ffmpeg_tail": stderr[-800:]}
+        if process is not None:
+            process.stdin.close()
+            stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
+            return_code = process.wait()
+            if return_code != 0:
+                return {"status": "failed", "message": "ffmpeg failed", "ffmpeg_tail": stderr[-800:]}
+        if writer is not None:
+            writer.close()
+            writer = None
         if not video_path.exists() or video_path.stat().st_size == 0:
             return {"status": "failed", "message": "MuJoCo render video was not written."}
         if not frame_stds or max(frame_stds) <= 0.0:
@@ -680,6 +697,7 @@ def render_g1_mujoco_panel(
         return {
             "status": "ok",
             "backend": "mujoco_kinematic_qpos",
+            "encode_backend": encode_backend,
             "video_path": str(video_path),
             "width": width,
             "height": height,
@@ -696,8 +714,12 @@ def render_g1_mujoco_panel(
     except Exception as exc:
         if process is not None and process.poll() is None:
             process.kill()
+        if writer is not None:
+            writer.close()
         return {"status": "failed", "message": f"MuJoCo G1 render failed: {exc}"}
     finally:
+        if writer is not None:
+            writer.close()
         if renderer is not None:
             renderer.close()
 
