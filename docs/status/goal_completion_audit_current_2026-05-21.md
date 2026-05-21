@@ -28,6 +28,7 @@ source-side Encoder variant，用于 online human/SOMA/BVH to G1 retargeting。
 | Latest local focused regression | `37` tests passed, `3` skipped |
 | Remote formal config path check | 5090 Isaac Python validation passed with `--require-formal --check-paths`; all warnings empty |
 | W&B provenance config | all four runs include `online_retarget.git_sha`, `sonic_git_sha`, `encoder_variant`, `run_group`, and `config_path` |
+| Active process source guard | 5090 `/proc` scan over current run group found no `body_pos_w` or `body_quat_w` in active training cmdlines |
 | AgentHub cadence report | `http://10.1.11.30:5175/runs/online-retarget/20260521-094531-onlineretarget-20k-video-validation-cadence` |
 
 ## Prompt-to-Artifact Checklist
@@ -41,7 +42,7 @@ source-side Encoder variant，用于 online human/SOMA/BVH to G1 retargeting。
 | A2 FiLM/Contact variant | Active tmux/process for `A2_film_contact`; W&B run `o1ldyppd` state `running` | Running |
 | B1 Adapter variant | Active tmux/process for `B1_adapter`; W&B run `ctkd8d87` state `running` | Running |
 | B2 Expert variant | Active tmux/process for `B2_expert`; W&B run `2r8c0hs0` state `running` | Running |
-| Source inputs exclude target-only `body_pos_w` / `body_quat_w` | Focused regression `tests.test_sonic_native_contract` passed as part of 37-test suite | Covered by test/contract level |
+| Source inputs exclude target-only `body_pos_w` / `body_quat_w` | Focused regression passed; active 5090 process cmdline scan found no forbidden source fields | Covered by test/contract and active-run evidence |
 | Training/validation/inference share feature contract | Focused contract/callback regression passed; formal configs wire common callback and feature terms | Covered at code/config level |
 | Sonic target timeline is 50Hz | Formal configs set `motion_lib_cfg.target_fps=50`; callback uses `target_fps=50`; remote `--check-paths` validator passed | Covered at config/path level |
 | Video validation integrated into training | `SonicVisualValidationCallback` is configured in all formal Hydra args | Covered at config/code level |
@@ -99,6 +100,10 @@ W&B config provenance check on the four run ids confirmed that every run has:
 - `online_retarget.encoder_variant` matching A1/A2/B1/B2
 - `online_retarget.run_group=sonic_native_retarget_1m_20260520T220222Z`
 - `wandb.wandb_group=sonic_native_retarget_1m_20260520T220222Z`
+
+Active 5090 `/proc` cmdline scan over the current run group found `16`
+parent/child training processes and reported `body_pos_w=False`,
+`body_quat_w=False`, `any_forbidden=False`.
 
 ## Active Automation
 
