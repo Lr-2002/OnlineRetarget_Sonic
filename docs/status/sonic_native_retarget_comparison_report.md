@@ -172,3 +172,17 @@ Observed metric keys include:
 This proves the formal W&B runs are streaming the primary dynamics auxiliary
 loss key. It is still not final comparison evidence because all variants are
 below the 20k visual-validation gate and far below 1M steps.
+
+Latest W&B API sample at around `2026-05-21T01:10Z`:
+
+| Variant | Run ID | State | Last history step | g1_dyn action loss | smoothness | g1_recon | videos uploaded |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| A1 | `rcuzxotj` | `running` | `1748` | `0.4249298573` | `1.5132879019` | `0.9607078433` | pending |
+| A2 | `o1ldyppd` | `running` | `1724` | `0.3671081066` | `1.5134330988` | `0.9453714490` | pending |
+| B1 | `ctkd8d87` | `running` | `1736` | `0.4007171690` | `1.4459726810` | `0.9570316672` | pending |
+| B2 | `2r8c0hs0` | `running` | `1739` | `0.4280258715` | `1.5081157684` | `0.8584457636` | pending |
+
+All four W&B configs still report the formal OnlineRetarget launch commit
+`de7ff733edf5b8cd978882826229b0a7400ac0d2` and Sonic commit
+`53e5a44f6373fe70b2bc62c934fa8f98ee810062`. The visual-validation upload
+metric is still absent, which is expected before step `20000`.

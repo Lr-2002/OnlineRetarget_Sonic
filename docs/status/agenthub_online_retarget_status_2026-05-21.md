@@ -43,6 +43,19 @@ Run group: `sonic_native_retarget_1m_20260520T220222Z`
   `loss/aux_online_retarget_g1_dyn_action_avg`,
   `loss/aux_online_retarget_action_smoothness_avg`, and
   `loss/aux_g1_recon_avg`.
+- Latest W&B API sample around `2026-05-21T01:10Z` still shows all four runs as
+  `running`, with `lastHistoryStep` around `1724-1748`; all four configs report
+  OnlineRetarget launch commit `de7ff733edf5b8cd978882826229b0a7400ac0d2` and
+  Sonic commit `53e5a44f6373fe70b2bc62c934fa8f98ee810062`.
+
+Latest sampled W&B losses:
+
+| Variant | Step | g1_dyn action loss | smoothness | g1_recon |
+| --- | ---: | ---: | ---: | ---: |
+| A1_concat | `1748` | `0.4249298573` | `1.5132879019` | `0.9607078433` |
+| A2_film_contact | `1724` | `0.3671081066` | `1.5134330988` | `0.9453714490` |
+| B1_adapter | `1736` | `0.4007171690` | `1.4459726810` | `0.9570316672` |
+| B2_expert | `1739` | `0.4280258715` | `1.5081157684` | `0.8584457636` |
 
 ## Validation Gate
 
