@@ -79,6 +79,24 @@ print(
 PY
 }
 
+ready_condition_met() {
+  local mp4_count upload_count upload_ok upload_failed upload_skipped upload_other videos_uploaded
+  local upload_paths=()
+  mp4_count="$(validation_files | grep -cE '\.mp4$' || true)"
+  mapfile -t upload_paths < <(upload_reports | sort)
+  upload_count="${#upload_paths[@]}"
+  IFS=$'\t' read -r upload_ok upload_failed upload_skipped upload_other videos_uploaded \
+    < <(upload_status_summary "${upload_paths[@]}")
+
+  [[ "${mp4_count}" -ge "${EXPECTED_MP4_COUNT}" ]] \
+    && [[ "${upload_count}" -ge "${EXPECTED_UPLOAD_REPORTS}" ]] \
+    && [[ "${upload_ok}" -ge "${EXPECTED_UPLOAD_REPORTS}" ]] \
+    && [[ "${upload_failed}" -eq 0 ]] \
+    && [[ "${upload_skipped}" -eq 0 ]] \
+    && [[ "${upload_other}" -eq 0 ]] \
+    && [[ "${videos_uploaded}" -ge "${EXPECTED_MP4_COUNT}" ]]
+}
+
 latest_iteration() {
   local log_file="$1"
   grep -aoE 'Learning iteration[[:space:]]+[0-9]+' "${log_file}" \
@@ -143,8 +161,7 @@ while true; do
       bash "${ROOT}/scripts/monitor_sonic_native_retarget_runs.sh" >/dev/null
   fi
 
-  upload_count="$(upload_reports | wc -l | tr -d ' ')"
-  if [[ "${upload_count}" -ge "${EXPECTED_UPLOAD_REPORTS}" ]]; then
+  if ready_condition_met; then
     write_ready_report
     exit 0
   fi
