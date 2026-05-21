@@ -8,6 +8,7 @@ INTERVAL_SECONDS="${WATCH_INTERVAL_SECONDS:-1800}"
 VALIDATION_STEP="${VALIDATION_STEP:-20000}"
 EXPECTED_UPLOAD_REPORTS="${EXPECTED_UPLOAD_REPORTS:-4}"
 EXPECTED_MP4_COUNT="${EXPECTED_MP4_COUNT:-32}"
+VALIDATION_STEP_DIR="$(printf 'step_%08d' "${VALIDATION_STEP}")"
 
 RUN_ROOT="${ROOT}/outputs/sonic_native_retarget_runs/${RUN_GROUP}"
 LOG_DIR="${RUN_ROOT}/_launcher"
@@ -18,11 +19,14 @@ mkdir -p "${MONITOR_DIR}"
 
 validation_files() {
   if [[ -d "${RUN_ROOT}" ]]; then
-    find "${RUN_ROOT}" -path '*online_retarget_visual_validation*' -type f 2>/dev/null
+    find "${RUN_ROOT}" \
+      -path "*online_retarget_visual_validation/${VALIDATION_STEP_DIR}/*" \
+      -type f \
+      2>/dev/null
   fi
   if [[ -d "${SONIC_ROOT}/logs_rl/OnlineRetarget" ]]; then
     find "${SONIC_ROOT}/logs_rl/OnlineRetarget" \
-      -path "*${RUN_GROUP}*/online_retarget_visual_validation*" \
+      -path "*${RUN_GROUP}*/online_retarget_visual_validation/${VALIDATION_STEP_DIR}/*" \
       -type f \
       2>/dev/null
   fi
@@ -136,6 +140,7 @@ write_ready_report() {
     printf -- '- run_group: `%s`\n' "${RUN_GROUP}"
     printf -- '- min_iteration: `%s`\n' "${min_iter}"
     printf -- '- validation_step: `%s`\n' "${VALIDATION_STEP}"
+    printf -- '- validation_step_dir: `%s`\n' "${VALIDATION_STEP_DIR}"
     printf -- '- expected_mp4_count: `%s`\n' "${EXPECTED_MP4_COUNT}"
     printf -- '- expected_upload_report_count: `%s`\n' "${EXPECTED_UPLOAD_REPORTS}"
     printf -- '- mp4_count: `%s`\n' "${mp4_count}"

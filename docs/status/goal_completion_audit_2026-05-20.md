@@ -362,11 +362,12 @@ Watcher hardening update:
 
 Commit after this initial watcher setup changed the exit condition from "any
 validation file exists" to a strict 20k artifact gate with defaults
-`EXPECTED_UPLOAD_REPORTS=4` and `EXPECTED_MP4_COUNT=32`. The watcher now exits
-only when all of these are true:
+`EXPECTED_UPLOAD_REPORTS=4` and `EXPECTED_MP4_COUNT=32`. The watcher searches
+only the configured validation step directory, for example `step_00020000`, and
+now exits only when all of these are true:
 
-- MP4 count is at least `32`.
-- Upload report count is at least `4`.
+- MP4 count under `step_00020000` is at least `32`.
+- Upload report count under `step_00020000` is at least `4`.
 - W&B upload status count `ok` is at least `4`.
 - W&B upload status counts `failed`, `skipped`, and `other` are all `0`.
 - Total uploaded W&B videos is at least `32`.

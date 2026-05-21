@@ -52,9 +52,9 @@ Current validation state:
 - `validation_file_count`: `0`
 - `validation_20k_ready.md`: not created yet
 - Expected first validation: around 1 day 8-9 hours from the latest monitor snapshot
-- Watcher requirement: wait for `4` W&B upload reports, `32` MP4 files,
-  `4` successful upload statuses, zero failed/skipped/other uploads, and at
-  least `32` uploaded W&B videos
+- Watcher requirement: within `step_00020000`, wait for `4` W&B upload reports,
+  `32` MP4 files, `4` successful upload statuses, zero failed/skipped/other
+  uploads, and at least `32` uploaded W&B videos
 
 ## Remaining Completion Gates
 
