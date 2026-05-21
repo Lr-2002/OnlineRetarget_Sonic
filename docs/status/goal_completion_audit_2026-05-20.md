@@ -349,6 +349,17 @@ The watcher exits after it sees any formal
 `online_retarget_visual_validation` file and writes a compact ready report with
 mp4, clip/rank report, and upload report counts plus sample paths.
 
+Watcher hardening update:
+
+Commit after this initial watcher setup changed the exit condition from "any
+validation file exists" to "the expected W&B upload reports exist" with
+defaults `EXPECTED_UPLOAD_REPORTS=4` and `EXPECTED_MP4_COUNT=32`. The ready
+report now parses `main_upload_report.json` files and records counts for
+`wandb_upload_ok`, `wandb_upload_failed`, `wandb_upload_skipped`,
+`wandb_upload_other`, and total uploaded videos. This is meant to catch the
+important 20k failure mode where local MP4s exist but W&B upload fails or is
+skipped.
+
 Important limitation:
 
 `validation_20k_ready.md` is a trigger for follow-up audit only. It does not
