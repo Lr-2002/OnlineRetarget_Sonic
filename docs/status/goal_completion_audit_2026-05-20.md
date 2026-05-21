@@ -258,8 +258,48 @@ unittest ran `30` tests with `3` skips; launcher shell syntax check passed.
 
 Current conclusion remains unchanged: the implementation and launch contract are
 in place, and the four formal Sonic-native runs are alive, but the Goal is not
-complete until the 20k-step videos, 1M-step completion or reproducible failure
-evidence, and final A1/A2/B1/B2 comparison report exist.
+complete because the integrated 20k videos, 1M outcomes, latency evidence, and
+final comparison decision are still missing.
+
+## Monitoring Update: 2026-05-21 01:03 UTC
+
+Objective restated as completion gates:
+
+1. Keep the Sonic-native A1/A2/B1/B2 runs alive under the formal `g1_dyn`
+   decoder path.
+2. Verify that integrated video validation happens inside training at step
+   `20000`, not through a manual post-hoc render.
+3. Continue until each variant reaches `1000000` Sonic training iterations, or
+   until a reproducible failure report exists with logs, W&B run, and git SHA.
+4. Use dynamics loss, kinematic auxiliary metrics, validation videos, and
+   latency evidence to select the next-line variant.
+
+Latest prompt-to-artifact checklist:
+
+| Requirement | Current evidence | Status |
+| --- | --- | --- |
+| Local, GitHub, and remote OnlineRetarget are synchronized | Local `HEAD`, `origin/main`, and remote `5090` checkout all resolve to `9fea953b1a3fc7735c6b6d3e89f9ac348a10bb0a` | Covered for monitoring state |
+| Four formal runs remain active | Remote tmux lists A1/A2/B1/B2 sessions for `sonic_native_retarget_1m_20260520T220222Z` | Running |
+| No current hard training error | Monitor reports `Hard error: none` for all four variants | Covered so far |
+| Training progress is advancing | Latest monitor: A1 `1693`, A2 `1666`, B1 `1678`, B2 `1682` iterations | Running |
+| Video validation is not running every step | Configs set `callbacks.online_retarget_visual_val.every_steps=20000`; callback only runs on positive multiples of this interval | Covered at code/config level |
+| First 20k validation has completed | `validation_file_count=0`; watcher output `not_ready`; no `validation_20k_ready.md` exists | Missing |
+| 20k watcher checks the correct artifact gate | Watcher now requires `step_00020000`, at least `32` MP4s, `4` successful upload reports, zero failed/skipped/other upload statuses, and at least `32` W&B videos uploaded | Covered at script/test level |
+| Final 1M outcome exists | Current iterations are below `20000`, far below `1000000` | Missing |
+| Final comparison report selects a variant | Report remains pending formal validation, metrics, checkpoints, and latency evidence | Missing |
+
+Latest monitor snapshot:
+
+| Variant | Iteration | Iter/hr | ETA 20k | ETA 1M | Checkpoints | Hard error |
+| --- | ---: | ---: | --- | --- | ---: | --- |
+| A1_concat | `1693` | `566.0` | `1d 8h` | `73d 11h` | `1` | `none` |
+| A2_film_contact | `1666` | `558.2` | `1d 8h` | `74d 12h` | `1` | `none` |
+| B1_adapter | `1678` | `561.9` | `1d 8h` | `74d 0h` | `1` | `none` |
+| B2_expert | `1682` | `563.1` | `1d 8h` | `73d 20h` | `1` | `none` |
+
+Current conclusion: do not mark `goal.md` complete. The next decisive artifact
+is the automatic `step_00020000` visual validation bundle and W&B video upload
+for all four formal variants.
 
 ## Visual Callback Smoke Evidence: 2026-05-21
 

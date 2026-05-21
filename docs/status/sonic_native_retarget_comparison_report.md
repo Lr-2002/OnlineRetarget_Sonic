@@ -105,15 +105,15 @@ Decision rule:
 
 ## Latest Monitor Snapshot
 
-Manual refresh at `2026-05-21T00:33:26Z` for run group
+Manual refresh at `2026-05-21T01:03:53Z` for run group
 `sonic_native_retarget_1m_20260520T220222Z`:
 
 | Variant | Iteration | Iter/hr | ETA 20k | ETA 1M | Validation files | Hard error |
 | --- | ---: | ---: | --- | --- | ---: | --- |
-| A1 | `1408` | `567.1` | `1d 8h` | `73d 8h` | `0` | `none` |
-| A2 | `1384` | `558.9` | `1d 9h` | `74d 10h` | `0` | `none` |
-| B1 | `1395` | `563.0` | `1d 9h` | `73d 21h` | `0` | `none` |
-| B2 | `1400` | `565.1` | `1d 8h` | `73d 15h` | `0` | `none` |
+| A1 | `1693` | `566.0` | `1d 8h` | `73d 11h` | `0` | `none` |
+| A2 | `1666` | `558.2` | `1d 8h` | `74d 12h` | `0` | `none` |
+| B1 | `1678` | `561.9` | `1d 8h` | `74d 0h` | `0` | `none` |
+| B2 | `1682` | `563.1` | `1d 8h` | `73d 20h` | `0` | `none` |
 
 No 20k validation evidence is expected yet. This report remains pending until
 formal validation videos, W&B uploads, checkpoints, metrics, and latency
@@ -121,9 +121,10 @@ measurements exist.
 
 Runtime health check at the same audit point confirmed A1/A2/B1/B2 are actively
 computing on GPUs `0/1/2/3`. Local and remote OnlineRetarget checkouts are clean
-at `50c81516df3867ab674df630a7368bffdcab4c11`; the diff from launch commit
+at `9fea953b1a3fc7735c6b6d3e89f9ac348a10bb0a`; the diff from launch commit
 `de7ff733edf5b8cd978882826229b0a7400ac0d2` to current head only updates status
-docs and monitor/watch scripts, not training runtime code.
+docs, monitor/watch scripts, and regression tests for launcher/watcher
+guardrails, not training runtime code.
 
 ## W&B Config Evidence
 

@@ -1,6 +1,6 @@
 # OnlineRetarget Sonic-native Run Status
 
-更新时间：2026-05-21 00:33 UTC
+更新时间：2026-05-21 01:03 UTC
 
 ## 结论
 
@@ -15,21 +15,22 @@ Run group: `sonic_native_retarget_1m_20260520T220222Z`
 
 | Variant | W&B run | Latest iteration | State | Hard error |
 | --- | --- | ---: | --- | --- |
-| A1_concat | `rcuzxotj` | `1408` | running | none |
-| A2_film_contact | `o1ldyppd` | `1384` | running | none |
-| B1_adapter | `ctkd8d87` | `1395` | running | none |
-| B2_expert | `2r8c0hs0` | `1400` | running | none |
+| A1_concat | `rcuzxotj` | `1693` | running | none |
+| A2_film_contact | `o1ldyppd` | `1666` | running | none |
+| B1_adapter | `ctkd8d87` | `1678` | running | none |
+| B2_expert | `2r8c0hs0` | `1682` | running | none |
 
 ## Traceability
 
 - OnlineRetarget launch commit: `de7ff733edf5b8cd978882826229b0a7400ac0d2`
 - Sonic launch commit: `53e5a44f6373fe70b2bc62c934fa8f98ee810062`
-- Current repo / GitHub / remote checkout: `50c81516df3867ab674df630a7368bffdcab4c11`
+- Current repo / GitHub / remote checkout: `9fea953b1a3fc7735c6b6d3e89f9ac348a10bb0a`
 - W&B nested config key: `online_retarget`
 - Formal decoder path: `g1_dyn` primary, `g1_kin` auxiliary
 - Formal callback: `SonicVisualValidationCallback`
-- Launch-to-current diff: status docs plus monitor/watch scripts only; no runtime
-  training code/config/callback/loss/encoder changes after launch.
+- Launch-to-current diff: status docs, monitor/watch scripts, and guardrail
+  regression tests only; no runtime training code/config/callback/loss/encoder
+  changes after launch.
 
 ## Runtime Health
 
@@ -51,7 +52,7 @@ Current validation state:
 
 - `validation_file_count`: `0`
 - `validation_20k_ready.md`: not created yet
-- Expected first validation: around 1 day 8-9 hours from the latest monitor snapshot
+- Expected first validation: around 1 day 8 hours from the latest monitor snapshot
 - Watcher requirement: within `step_00020000`, wait for `4` W&B upload reports,
   `32` MP4 files, `4` successful upload statuses, zero failed/skipped/other
   uploads, and at least `32` uploaded W&B videos
