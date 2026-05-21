@@ -28,10 +28,13 @@ if str(SRC_ROOT) not in sys.path:
 from online_retarget.data.bones_seed import G1_JOINT_COLUMNS  # noqa: E402
 from online_retarget.data.review_clips import (  # noqa: E402
     ReviewClipExportConfig,
+    _capsule_scene_bounds,
+    _draw_capsule_3d_frame,
     _euler_xyz_to_quat_wxyz,
     _render_capsule_3d_video,
     _source_capsule_body_names,
     _source_capsule_edges_from_motion,
+    _z_up_frames,
 )
 from online_retarget.web_pipeline import (  # noqa: E402
     DEFAULT_ROOT_HEIGHT,
@@ -452,6 +455,17 @@ def render_source_bvh_panel(
         capsule_color=(48, 132, 83),
         key_color=(132, 103, 34),
     )
+    if report.get("status") == "blocked" and "ffmpeg" in str(report.get("message", "")).lower():
+        report = render_capsule_3d_video_imageio(
+            frames=frames,
+            edges=edges,
+            video_path=video_path,
+            config=config,
+            label="source bvh",
+            up_axis=1,
+            capsule_color=(48, 132, 83),
+            key_color=(132, 103, 34),
+        )
     report.update(
         {
             "source_fps": source_fps,
@@ -462,6 +476,75 @@ def render_source_bvh_panel(
         }
     )
     return report
+
+
+def render_capsule_3d_video_imageio(
+    *,
+    frames: Sequence[Mapping[str, tuple[float, float, float]]],
+    edges: Sequence[tuple[str, str]],
+    video_path: Path,
+    config: ReviewClipExportConfig,
+    label: str,
+    up_axis: int,
+    capsule_color: tuple[int, int, int],
+    key_color: tuple[int, int, int],
+) -> dict[str, object]:
+    try:
+        import imageio.v2 as imageio
+    except Exception as exc:
+        return {"status": "blocked", "message": f"imageio is required when ffmpeg is unavailable: {exc}"}
+    if not frames:
+        return {"status": "blocked", "message": "No frames were available for 3D capsule rendering."}
+    z_up_frames = _z_up_frames(frames, up_axis=up_axis)
+    bounds = _capsule_scene_bounds(z_up_frames)
+    width = int(config.render_width)
+    height = int(config.render_height)
+    fps = int(max(1, min(240, round(float(config.fps)))))
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    frame_sums: list[int] = []
+    changed_frames = 0
+    previous_frame: bytes | None = None
+    try:
+        with imageio.get_writer(video_path, fps=fps, codec="libx264", quality=8, macro_block_size=1) as writer:
+            for frame_index, frame in enumerate(z_up_frames):
+                image = _draw_capsule_3d_frame(
+                    frame,
+                    frame_index,
+                    bounds,
+                    edges,
+                    width,
+                    height,
+                    label=label,
+                    capsule_color=capsule_color,
+                    key_color=key_color,
+                )
+                array = np.frombuffer(bytes(image), dtype=np.uint8).reshape(height, width, 3)
+                writer.append_data(array)
+                frame_bytes = array.tobytes()
+                frame_sums.append(int(array.sum()))
+                if previous_frame is not None and frame_bytes != previous_frame:
+                    changed_frames += 1
+                previous_frame = frame_bytes
+    except Exception as exc:
+        return {"status": "failed", "message": f"imageio capsule render failed: {exc}"}
+    if not video_path.exists() or video_path.stat().st_size == 0:
+        return {"status": "failed", "message": "imageio capsule video was not written."}
+    return {
+        "status": "ok",
+        "message": "Encoded 3D capsule review video with imageio.",
+        "video_path": str(video_path),
+        "width": width,
+        "height": height,
+        "fps": fps,
+        "frames": len(z_up_frames),
+        "capsule_edges": len(edges),
+        "changed_frames": changed_frames,
+        "frame_sum_min": min(frame_sums),
+        "frame_sum_max": max(frame_sums),
+        "render_backend": "imageio_perspective_capsules",
+        "up_axis": up_axis,
+        "ground_z": 0.0,
+    }
 
 
 def time_align_frames(
@@ -676,7 +759,7 @@ def set_mujoco_state_by_joint_names(
 def combine_two_videos(inputs: Sequence[Path], output: Path, fps: int) -> dict[str, Any]:
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
-        return {"status": "blocked", "message": "ffmpeg is required"}
+        return combine_two_videos_imageio(inputs, output, fps=fps)
     missing = [str(path) for path in inputs if not path.exists() or path.stat().st_size == 0]
     if missing:
         return {"status": "failed", "message": "missing input panel", "missing": missing}
@@ -704,6 +787,70 @@ def combine_two_videos(inputs: Sequence[Path], output: Path, fps: int) -> dict[s
     if result.returncode != 0:
         return {"status": "failed", "message": "ffmpeg failed", "ffmpeg_tail": result.stderr[-800:]}
     return {"status": "ok", "video_path": str(output), "bytes": output.stat().st_size, "fps": max(1, fps)}
+
+
+def combine_two_videos_imageio(inputs: Sequence[Path], output: Path, *, fps: int) -> dict[str, Any]:
+    try:
+        import imageio.v2 as imageio
+    except Exception as exc:
+        return {"status": "blocked", "message": f"imageio is required when ffmpeg is unavailable: {exc}"}
+    missing = [str(path) for path in inputs if not path.exists() or path.stat().st_size == 0]
+    if missing:
+        return {"status": "failed", "message": "missing input panel", "missing": missing}
+    output.parent.mkdir(parents=True, exist_ok=True)
+    frame_count = 0
+    changed_frames = 0
+    previous_frame: bytes | None = None
+    try:
+        readers = [imageio.get_reader(path) for path in inputs]
+        try:
+            with imageio.get_writer(output, fps=max(1, fps), codec="libx264", quality=8, macro_block_size=1) as writer:
+                for left, right in zip(readers[0], readers[1]):
+                    left_arr = np.asarray(left[..., :3], dtype=np.uint8)
+                    right_arr = np.asarray(right[..., :3], dtype=np.uint8)
+                    if left_arr.shape[0] != right_arr.shape[0]:
+                        right_arr = resize_frame_to_height(right_arr, left_arr.shape[0])
+                    if left_arr.shape[1] != right_arr.shape[1]:
+                        right_arr = resize_frame_to_width(right_arr, left_arr.shape[1])
+                    frame = np.concatenate([left_arr, right_arr], axis=1)
+                    writer.append_data(frame)
+                    frame_bytes = frame.tobytes()
+                    if previous_frame is not None and frame_bytes != previous_frame:
+                        changed_frames += 1
+                    previous_frame = frame_bytes
+                    frame_count += 1
+        finally:
+            for reader in readers:
+                reader.close()
+    except Exception as exc:
+        return {"status": "failed", "message": f"imageio hstack failed: {exc}"}
+    if not output.exists() or output.stat().st_size == 0:
+        return {"status": "failed", "message": "combined video was not written"}
+    return {
+        "status": "ok",
+        "video_path": str(output),
+        "bytes": output.stat().st_size,
+        "fps": max(1, fps),
+        "frames": frame_count,
+        "changed_frames": changed_frames,
+        "backend": "imageio_hstack",
+    }
+
+
+def resize_frame_to_height(frame: np.ndarray, height: int) -> np.ndarray:
+    width = max(1, int(round(frame.shape[1] * (height / max(1, frame.shape[0])))))
+    return resize_frame_nearest(frame, height=height, width=width)
+
+
+def resize_frame_to_width(frame: np.ndarray, width: int) -> np.ndarray:
+    height = max(1, int(round(frame.shape[0] * (width / max(1, frame.shape[1])))))
+    return resize_frame_nearest(frame, height=height, width=width)
+
+
+def resize_frame_nearest(frame: np.ndarray, *, height: int, width: int) -> np.ndarray:
+    y_idx = np.linspace(0, frame.shape[0] - 1, height).round().astype(np.int64)
+    x_idx = np.linspace(0, frame.shape[1] - 1, width).round().astype(np.int64)
+    return frame[y_idx][:, x_idx]
 
 
 if __name__ == "__main__":

@@ -167,7 +167,7 @@ def main() -> None:
     previous_frame = None
     frame_sums: list[int] = []
 
-    with imageio.get_writer(target_video, fps=motion["fps"], codec="libx264", quality=8) as writer:
+    with imageio.get_writer(target_video, fps=motion["fps"], codec="libx264", quality=8, macro_block_size=1) as writer:
         for frame_index in range(motion["frame_count"]):
             root_pos = motion["root_pos"][frame_index].copy()
             root_quat = motion["root_quat"][frame_index]
