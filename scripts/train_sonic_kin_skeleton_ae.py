@@ -1395,15 +1395,12 @@ def _render_visual_validation_clip(
             render_deps=render_deps,
         )
     else:
-        source_report = render_deps["_render_capsule_3d_video"](
-            frames=_soma_motionlib_source_frames(arrays["soma_joints"][:frame_count], arrays.get("joint_names")),
-            edges=_soma_edges(arrays.get("joint_names")),
+        source_report = _render_missing_panel(
+            render_deps=render_deps,
             video_path=source_video,
-            config=render_config,
-            label="source soma motionlib",
-            up_axis=2,
-            capsule_color=(48, 132, 83),
-            key_color=(132, 103, 34),
+            render_config=render_config,
+            frame_count=frame_count,
+            label="source bvh unavailable",
         )
 
     target_body_pos = arrays["body_pos_w"][:frame_count]
@@ -1543,12 +1540,15 @@ def _render_motionlib_visual_validation_clip(
             render_deps=render_deps,
         )
     else:
-        source_report = _render_missing_panel(
-            render_deps=render_deps,
+        source_report = render_deps["_render_capsule_3d_video"](
+            frames=_soma_motionlib_source_frames(arrays["soma_joints"][:frame_count], arrays.get("joint_names")),
+            edges=_soma_edges(arrays.get("joint_names")),
             video_path=source_video,
-            render_config=render_config,
-            frame_count=frame_count,
-            label="source bvh unavailable",
+            config=render_config,
+            label="source soma motionlib",
+            up_axis=2,
+            capsule_color=(48, 132, 83),
+            key_color=(132, 103, 34),
         )
 
     root_pos = robot_root["root_pos"][:frame_count]
