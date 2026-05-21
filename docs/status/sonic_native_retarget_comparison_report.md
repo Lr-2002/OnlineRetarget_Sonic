@@ -101,3 +101,27 @@ Manual refresh at `2026-05-20T23:54:58Z` for run group
 No 20k validation evidence is expected yet. This report remains pending until
 formal validation videos, W&B uploads, checkpoints, metrics, and latency
 measurements exist.
+
+## W&B Config Evidence
+
+Remote W&B API check at the current audit point:
+
+| Variant | Run ID | State | Last history step | Config path |
+| --- | --- | --- | ---: | --- |
+| A1 | `rcuzxotj` | `running` | `1090` | `/mnt/data_cpfs/code/wxh/OnlineRetarget/configs/sonic_native_retarget_a1_concat_1gpu.json` |
+| A2 | `o1ldyppd` | `running` | `1070` | `/mnt/data_cpfs/code/wxh/OnlineRetarget/configs/sonic_native_retarget_a2_film_contact_1gpu.json` |
+| B1 | `ctkd8d87` | `running` | `1078` | `/mnt/data_cpfs/code/wxh/OnlineRetarget/configs/sonic_native_retarget_b1_adapter_1gpu.json` |
+| B2 | `2r8c0hs0` | `running` | `1082` | `/mnt/data_cpfs/code/wxh/OnlineRetarget/configs/sonic_native_retarget_b2_expert_1gpu.json` |
+
+The traceability fields are stored under W&B config key `online_retarget`, not
+as top-level W&B config keys. That nested object records:
+
+- `contract=sonic_native_retarget`
+- `run_group=sonic_native_retarget_1m_20260520T220222Z`
+- OnlineRetarget launch commit
+  `de7ff733edf5b8cd978882826229b0a7400ac0d2`
+- Sonic launch commit `53e5a44f6373fe70b2bc62c934fa8f98ee810062`
+- The per-run encoder variant and formal config path
+
+Launcher logs also confirm all four variants initialized the Sonic `g1_dyn`
+decoder and filtered active decoders to `g1_dyn` plus `g1_kin`.

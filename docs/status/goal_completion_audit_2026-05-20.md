@@ -396,3 +396,46 @@ PYTHONPATH=src:. python3 -m unittest \
 Observed result: `30` tests passed with `3` skips. These tests cover the
 `20k` visual-validation step gate and formal config contract, but they do not
 replace the required real 20k W&B video artifacts.
+
+## W&B And Decoder Runtime Check: 2026-05-21
+
+Remote W&B API check used the Isaac/Sonic Python on host `5090` and inspected
+the formal run IDs `rcuzxotj`, `o1ldyppd`, `ctkd8d87`, and `2r8c0hs0`.
+
+Runtime evidence:
+
+| Variant | W&B run | State | Last history step | Nested W&B config evidence |
+| --- | --- | --- | ---: | --- |
+| A1_concat | `rcuzxotj` | `running` | `1090` | `online_retarget.encoder_variant=A1_concat`, `git_sha=de7ff733edf5b8cd978882826229b0a7400ac0d2`, `sonic_git_sha=53e5a44f6373fe70b2bc62c934fa8f98ee810062` |
+| A2_film_contact | `o1ldyppd` | `running` | `1070` | `online_retarget.encoder_variant=A2_film_contact`, same run group and SHA fields |
+| B1_adapter | `ctkd8d87` | `running` | `1078` | `online_retarget.encoder_variant=B1_adapter`, same run group and SHA fields |
+| B2_expert | `2r8c0hs0` | `running` | `1082` | `online_retarget.encoder_variant=B2_expert`, same run group and SHA fields |
+
+The W&B top-level config does not expose `encoder_variant` directly; it is
+stored under the nested `online_retarget` config object. The callback config is
+also present under `callbacks.online_retarget_visual_val` for all four runs,
+with `every_steps=20000`, `num_videos=8`, `duration_sec=4`, `target_fps=50`,
+and `wandb_upload=true`.
+
+Launcher logs for all four variants show:
+
+- W&B run setup and remote project/run URL.
+- `Initialized g1_dyn decoder with input features: ['token_flattened',
+  'proprioception'] and output features: ['action']`.
+- `Active decoders filtered to: ['g1_dyn', 'g1_kin']` or the same set in the
+  opposite order.
+
+Launch commit `de7ff733edf5b8cd978882826229b0a7400ac0d2` was checked directly:
+it already contains the strict `G1DynamicsActionLoss` implementation that
+requires `loss_inputs["decoded_outputs"]["g1_dyn"]` and does not fall back to a
+generic action mean. Therefore the currently running formal jobs are not missing
+the dynamics-decoder guardrail because of later monitor/audit commits.
+
+One non-blocking W&B warning appears in the launcher logs:
+
+`Step cannot be set when using tensorboard syncing. Please use run.define_metric(...)`
+
+This warning is not a hard error and the runs remain `running`. It should be
+rechecked at the first 20k validation event to confirm videos are uploaded and
+visible in W&B, even if W&B assigns its own internal step while tensorboard sync
+is enabled.
