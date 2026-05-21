@@ -244,6 +244,16 @@ def quat_normalize(q: np.ndarray) -> np.ndarray:
     return q / np.where(norm < 1e-8, 1.0, norm)
 
 
+def robot_root_rot_to_wxyz(root_rot: np.ndarray, config: Mapping[str, Any]) -> np.ndarray:
+    fmt = str(config.get("input_data", {}).get("robot_root_rot_format", "xyzw")).lower()
+    root_rot = np.asarray(root_rot, dtype=np.float32)
+    if fmt == "xyzw":
+        return quat_normalize(root_rot[..., [3, 0, 1, 2]])
+    if fmt == "wxyz":
+        return quat_normalize(root_rot)
+    raise ValueError(f"unsupported input_data.robot_root_rot_format: {fmt}")
+
+
 def quat_conjugate(q: np.ndarray) -> np.ndarray:
     out = q.copy()
     out[..., 1:] *= -1.0
@@ -494,7 +504,7 @@ def load_soma_motionlib_arrays(row: Mapping[str, Any], config: Mapping[str, Any]
     _require_motionlib_keys(soma, REQUIRED_SOMA_MOTIONLIB_KEYS, soma_path)
 
     dof = np.asarray(robot["dof"], dtype=np.float32)
-    root_rot = np.asarray(robot["root_rot"], dtype=np.float32)
+    root_rot = robot_root_rot_to_wxyz(np.asarray(robot["root_rot"], dtype=np.float32), config)
     robot_fps = float(robot.get("fps") or input_cfg.get("target_fps") or 50.0)
     soma_fps = float(soma.get("fps") or input_cfg.get("source_fps") or robot_fps)
     target_len = min(dof.shape[0], root_rot.shape[0])
@@ -1772,7 +1782,7 @@ def _load_motionlib_robot_root(row: Mapping[str, Any], config: Mapping[str, Any]
     _, robot = _single_motionlib_entry(robot_path)
     dof = np.asarray(robot["dof"], dtype=np.float32)
     root_pos = np.asarray(robot.get("root_trans_offset", np.zeros((dof.shape[0], 3), dtype=np.float32)), dtype=np.float32)
-    root_quat = quat_normalize(np.asarray(robot["root_rot"], dtype=np.float32))
+    root_quat = robot_root_rot_to_wxyz(np.asarray(robot["root_rot"], dtype=np.float32), config)
     target_len = min(dof.shape[0], root_pos.shape[0], root_quat.shape[0])
     return {"root_pos": root_pos[:target_len], "root_quat": root_quat[:target_len]}
 

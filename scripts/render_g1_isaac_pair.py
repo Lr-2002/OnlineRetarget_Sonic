@@ -38,6 +38,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--source-position-scale", type=float, default=None)
     parser.add_argument("--root-position-scale", type=float, default=0.01, help="CSV root position scale only.")
     parser.add_argument("--angle-scale", type=float, default=float(3.141592653589793 / 180.0), help="CSV angle scale only.")
+    parser.add_argument(
+        "--root-rot-format",
+        choices=("auto", "wxyz", "xyzw"),
+        default="auto",
+        help="Quaternion order for root_rot arrays. Auto treats motionlib/root_rot as xyzw.",
+    )
     parser.add_argument("--preserve-world-root", action="store_true")
     parser.add_argument("--camera-mode", choices=("trajectory", "follow", "fixed"), default="trajectory")
     parser.add_argument("--camera-offset", type=float, nargs=3, default=(2.5, -3.0, 1.6))
@@ -129,6 +135,7 @@ def main() -> None:
         duration_sec=args_cli.duration_sec,
         root_position_scale=args_cli.root_position_scale,
         angle_scale=args_cli.angle_scale,
+        root_rot_format=args_cli.root_rot_format,
     )
     if not args_cli.preserve_world_root:
         motion = zero_initial_root_xy(motion)
@@ -226,6 +233,7 @@ def main() -> None:
         "camera_mode": args_cli.camera_mode,
         "root_xy_preserved": True,
         "initial_root_xy_zeroed": not args_cli.preserve_world_root,
+        "root_quat_format": motion.get("root_quat_format"),
         "target_root_xy_span_m": root_xy_span(motion["root_pos"]),
         "source_position_scale": source_scale,
         "source_render": source_report,

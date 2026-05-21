@@ -97,6 +97,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--root-position-scale", type=float, default=0.01, help="CSV root position scale only.")
     parser.add_argument("--angle-scale", type=float, default=math.pi / 180.0, help="CSV angle scale only.")
     parser.add_argument(
+        "--root-rot-format",
+        choices=("auto", "wxyz", "xyzw"),
+        default="auto",
+        help="Quaternion order for root_rot arrays. Auto treats motionlib/root_rot as xyzw and *_quat fields as wxyz.",
+    )
+    parser.add_argument(
         "--preserve-world-root",
         action="store_true",
         help="Do not subtract the first target root XY before rendering.",
@@ -132,6 +138,7 @@ def main() -> None:
         duration_sec=args.duration_sec,
         root_position_scale=args.root_position_scale,
         angle_scale=args.angle_scale,
+        root_rot_format=args.root_rot_format,
     )
     if not args.preserve_world_root:
         g1_motion = zero_initial_root_xy(g1_motion)
@@ -176,6 +183,7 @@ def main() -> None:
         "source_position_scale": source_scale,
         "root_xy_preserved": True,
         "initial_root_xy_zeroed": not args.preserve_world_root,
+        "root_quat_format": g1_motion.get("root_quat_format"),
         "camera_mode": args.camera_mode,
         "source_xy_span_m": source_report.get("source_xy_span_m"),
         "target_root_xy_span_m": g1_motion["root_xy_span_m"],
@@ -207,12 +215,13 @@ def load_g1_motion(
     duration_sec: float,
     root_position_scale: float,
     angle_scale: float,
+    root_rot_format: str,
 ) -> dict[str, Any]:
     resolved = detect_g1_format(path, fmt)
     if resolved == "motionlib":
-        motion = load_motionlib_g1(path)
+        motion = load_motionlib_g1(path, root_rot_format=root_rot_format)
     elif resolved == "npz":
-        motion = load_npz_g1(path)
+        motion = load_npz_g1(path, root_rot_format=root_rot_format)
     elif resolved == "csv":
         motion = load_csv_g1(path, root_position_scale=root_position_scale, angle_scale=angle_scale)
     else:
@@ -233,7 +242,7 @@ def detect_g1_format(path: Path, fmt: str) -> str:
     raise ValueError(f"cannot infer G1 motion format from suffix: {path}")
 
 
-def load_motionlib_g1(path: Path) -> dict[str, Any]:
+def load_motionlib_g1(path: Path, *, root_rot_format: str) -> dict[str, Any]:
     import joblib
 
     loaded = joblib.load(path)
@@ -244,7 +253,11 @@ def load_motionlib_g1(path: Path) -> dict[str, Any]:
     if not isinstance(entry, Mapping):
         raise ValueError(f"motionlib entry must be a mapping: {path}")
     joint_pos = np.asarray(entry["dof"], dtype=np.float32)
-    root_quat = normalize_quat_array(np.asarray(entry["root_rot"], dtype=np.float32))
+    root_quat, root_quat_format = root_rot_to_wxyz(
+        np.asarray(entry["root_rot"], dtype=np.float32),
+        requested_format=root_rot_format,
+        auto_format="xyzw",
+    )
     root_pos = np.asarray(
         entry.get("root_trans_offset", default_root_pos(joint_pos.shape[0])),
         dtype=np.float32,
@@ -258,10 +271,11 @@ def load_motionlib_g1(path: Path) -> dict[str, Any]:
         fps=fps,
         joint_names=joint_names,
         source_format="motionlib",
+        root_quat_format=root_quat_format,
     )
 
 
-def load_npz_g1(path: Path) -> dict[str, Any]:
+def load_npz_g1(path: Path, *, root_rot_format: str) -> dict[str, Any]:
     with np.load(path, allow_pickle=False) as data:
         joint_pos = np.asarray(data["joint_pos"], dtype=np.float32)
         fps = float(np.asarray(data["fps"]).reshape(-1)[0]) if "fps" in data else 50.0
@@ -275,12 +289,19 @@ def load_npz_g1(path: Path) -> dict[str, Any]:
             root_pos = default_root_pos(joint_pos.shape[0])
         if "root_quat" in data:
             root_quat = np.asarray(data["root_quat"], dtype=np.float32)
+            root_quat_format = "wxyz"
         elif "root_rot" in data:
-            root_quat = np.asarray(data["root_rot"], dtype=np.float32)
+            root_quat, root_quat_format = root_rot_to_wxyz(
+                np.asarray(data["root_rot"], dtype=np.float32),
+                requested_format=root_rot_format,
+                auto_format="xyzw",
+            )
         elif "body_quat_w" in data:
             root_quat = np.asarray(data["body_quat_w"][:, 0, :], dtype=np.float32)
+            root_quat_format = "wxyz"
         else:
             root_quat = identity_quat(joint_pos.shape[0])
+            root_quat_format = "wxyz"
     return make_g1_motion(
         joint_pos=joint_pos,
         root_pos=root_pos,
@@ -288,6 +309,7 @@ def load_npz_g1(path: Path) -> dict[str, Any]:
         fps=fps,
         joint_names=SONIC_JOINT_NAMES,
         source_format="npz",
+        root_quat_format=root_quat_format,
     )
 
 
@@ -319,6 +341,7 @@ def load_csv_g1(path: Path, *, root_position_scale: float, angle_scale: float) -
         fps=50.0,
         joint_names=joint_names,
         source_format="csv",
+        root_quat_format="wxyz",
     )
 
 
@@ -330,6 +353,7 @@ def make_g1_motion(
     fps: float,
     joint_names: Sequence[str],
     source_format: str,
+    root_quat_format: str,
 ) -> dict[str, Any]:
     target_len = min(joint_pos.shape[0], root_pos.shape[0], root_quat.shape[0])
     if target_len <= 0:
@@ -348,8 +372,23 @@ def make_g1_motion(
         "fps": float(fps),
         "frame_count": int(target_len),
         "source_format": source_format,
+        "root_quat_format": root_quat_format,
         "root_xy_span_m": root_xy_span(root_pos),
     }
+
+
+def root_rot_to_wxyz(
+    root_rot: np.ndarray,
+    *,
+    requested_format: str,
+    auto_format: str,
+) -> tuple[np.ndarray, str]:
+    quat_format = auto_format if requested_format == "auto" else requested_format
+    if quat_format == "xyzw":
+        return normalize_quat_array(root_rot[..., [3, 0, 1, 2]]), quat_format
+    if quat_format == "wxyz":
+        return normalize_quat_array(root_rot), quat_format
+    raise ValueError(f"unsupported root rotation format: {requested_format}")
 
 
 def limit_g1_motion(motion: dict[str, Any], *, max_frames: int, duration_sec: float) -> dict[str, Any]:
@@ -472,7 +511,7 @@ def render_source_bvh_panel(
             "target_fps": fps,
             "source_frames": len(raw_frames),
             "aligned_frames": len(frames),
-            "source_xy_span_m": source_xy_span_from_frames(frames),
+            "source_xy_span_m": source_xy_span_from_frames(frames, up_axis=1),
         }
     )
     return report
@@ -564,7 +603,11 @@ def time_align_frames(
     return aligned
 
 
-def source_xy_span_from_frames(frames: Sequence[Mapping[str, tuple[float, float, float]]]) -> float:
+def source_xy_span_from_frames(
+    frames: Sequence[Mapping[str, tuple[float, float, float]]],
+    *,
+    up_axis: int = 1,
+) -> float:
     if len(frames) <= 1:
         return 0.0
     root_name = "Hips" if "Hips" in frames[0] else next(iter(frames[0]), "")
@@ -574,7 +617,13 @@ def source_xy_span_from_frames(frames: Sequence[Mapping[str, tuple[float, float,
     last = frames[-1].get(root_name)
     if first is None or last is None:
         return 0.0
-    return float(math.hypot(float(last[0]) - float(first[0]), float(last[2]) - float(first[2])))
+    horizontal_a, horizontal_b = (0, 2) if up_axis == 1 else (0, 1)
+    return float(
+        math.hypot(
+            float(last[horizontal_a]) - float(first[horizontal_a]),
+            float(last[horizontal_b]) - float(first[horizontal_b]),
+        )
+    )
 
 
 def render_g1_mujoco_panel(

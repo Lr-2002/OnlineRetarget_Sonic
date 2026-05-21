@@ -12,7 +12,8 @@
     "source_fps": 120.0,
     "target_fps": 50.0,
     "max_duration_delta_sec": 0.05,
-    "max_clips": 20000
+    "max_clips": 20000,
+    "robot_root_rot_format": "xyzw"
   },
   "output_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_kin_soma_motionlib_runs/{run_group}/B1_adapter",
   "validation_command": "CONFIG=configs/sonic_kin_soma_motionlib_b1_adapter_1gpu.json CUDA_VISIBLE_DEVICES=2 scripts/remote_start_sonic_kin_skeleton_4x1gpu.sh",

@@ -6,6 +6,16 @@ import scripts.train_sonic_kin_skeleton_ae as sonic_train
 
 
 class SonicKinTrainTimingTests(unittest.TestCase):
+    def test_robot_root_rot_to_wxyz_converts_gmr_xyzw_motionlib_quat(self):
+        root_rot_xyzw = np.asarray([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+
+        converted = sonic_train.robot_root_rot_to_wxyz(
+            root_rot_xyzw,
+            {"input_data": {"robot_root_rot_format": "xyzw"}},
+        )
+
+        np.testing.assert_allclose(converted, np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32))
+
     def test_time_align_frame_maps_maps_target_time_to_source_time(self):
         frames = [{"Hips": (float(index), 0.0, 0.0)} for index in range(20)]
 
