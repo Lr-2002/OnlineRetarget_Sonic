@@ -331,6 +331,15 @@ expected to resolve under Sonic's `logs_rl/OnlineRetarget` tree. Commit
 `0aa5482` extended the monitor to search both locations while filtering by
 `run_group`, so formal 20k validation artifacts should not be missed.
 
+Monitor checkpoint update:
+
+The monitor now also searches Sonic and OnlineRetarget output roots for
+variant-scoped checkpoint files (`last.pt`, `model_step_*.pt`, `*.ckpt`, and
+`*.pth`) and records `checkpoint_count` plus `latest_checkpoint` in the JSONL
+status stream and Markdown summary. This supports the Goal's required checkpoint
+evidence, but checkpoint presence alone still does not satisfy the 1M-step or
+visual-validation acceptance gates.
+
 ## 20k Validation Watcher Update: 2026-05-21
 
 A no-GPU watcher was added and started on 5090:

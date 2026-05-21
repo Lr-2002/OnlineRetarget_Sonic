@@ -53,6 +53,38 @@ validation_files() {
   fi
 }
 
+checkpoint_files_for_variant() {
+  local variant="$1"
+  if [[ -d "${RUN_ROOT}" ]]; then
+    find "${RUN_ROOT}" \
+      -path "*${variant}*" \
+      -type f \
+      \( -name 'last.pt' -o -name 'model_step_*.pt' -o -name '*.ckpt' -o -name '*.pth' \) \
+      2>/dev/null
+  fi
+  if [[ -d "${SONIC_ROOT}/logs_rl/OnlineRetarget" ]]; then
+    find "${SONIC_ROOT}/logs_rl/OnlineRetarget" \
+      -path "*${variant}*${RUN_GROUP}*" \
+      -type f \
+      \( -name 'last.pt' -o -name 'model_step_*.pt' -o -name '*.ckpt' -o -name '*.pth' \) \
+      2>/dev/null
+  fi
+}
+
+checkpoint_count_for_variant() {
+  local variant="$1"
+  checkpoint_files_for_variant "${variant}" \
+    | wc -l \
+    | tr -d ' '
+}
+
+latest_checkpoint_for_variant() {
+  local variant="$1"
+  checkpoint_files_for_variant "${variant}" \
+    | sort \
+    | tail -n 1
+}
+
 rate_fields() {
   local variant="$1"
   local iter="$2"
@@ -133,16 +165,21 @@ write_snapshot() {
     printf -- '- validation_search_roots: `%s`, `%s`\n\n' \
       "${RUN_ROOT}" \
       "${SONIC_ROOT}/logs_rl/OnlineRetarget"
-    printf '| Variant | Iteration | Iter/hr | ETA 20k | ETA 1M | Log mtime UTC | Hard error |\n'
-    printf '| --- | ---: | ---: | --- | --- | --- | --- |\n'
+    printf '| Variant | Iteration | Iter/hr | ETA 20k | ETA 1M | Checkpoints | Latest checkpoint | Log mtime UTC | Hard error |\n'
+    printf '| --- | ---: | ---: | --- | --- | ---: | --- | --- | --- |\n'
   } > "${tmp}"
 
   for log_file in "${LOG_DIR}"/*.log; do
     local variant iter mtime error_text error_label iter_per_hour eta_20k eta_1m iter_per_hour_json
+    local checkpoint_count latest_checkpoint latest_checkpoint_label
     variant="${log_file##*/}"
     variant="${variant%.log}"
     iter="$(latest_iteration "${log_file}" || true)"
     iter="${iter:-0}"
+    checkpoint_count="$(checkpoint_count_for_variant "${variant}")"
+    latest_checkpoint="$(latest_checkpoint_for_variant "${variant}")"
+    latest_checkpoint_label="${latest_checkpoint##*/}"
+    latest_checkpoint_label="${latest_checkpoint_label:-none}"
     mtime="$(date -u -d "@$(stat -c %Y "${log_file}")" +%Y-%m-%dT%H:%M:%SZ)"
     error_text="$(hard_error "${log_file}")"
     if [[ -z "${error_text}" ]]; then
@@ -157,24 +194,28 @@ write_snapshot() {
       iter_per_hour_json="${iter_per_hour}"
     fi
 
-    printf '{"time_utc":"%s","variant":"%s","iteration":%s,"iter_per_hour":%s,"eta_20k":%s,"eta_1m":%s,"log_mtime_utc":"%s","hard_error":%s,"validation_file_count":%s}\n' \
+    printf '{"time_utc":"%s","variant":"%s","iteration":%s,"iter_per_hour":%s,"eta_20k":%s,"eta_1m":%s,"checkpoint_count":%s,"latest_checkpoint":%s,"log_mtime_utc":"%s","hard_error":%s,"validation_file_count":%s}\n' \
       "${ts}" \
       "${variant}" \
       "${iter}" \
       "${iter_per_hour_json}" \
       "$(printf '%s' "${eta_20k}" | json_escape)" \
       "$(printf '%s' "${eta_1m}" | json_escape)" \
+      "${checkpoint_count}" \
+      "$(printf '%s' "${latest_checkpoint}" | json_escape)" \
       "${mtime}" \
       "$(printf '%s' "${error_text}" | json_escape)" \
       "${validation_count}" \
       >> "${STATUS_JSONL}"
 
-    printf '| `%s` | %s | %s | `%s` | `%s` | `%s` | `%s` |\n' \
+    printf '| `%s` | %s | %s | `%s` | `%s` | %s | `%s` | `%s` | `%s` |\n' \
       "${variant}" \
       "${iter}" \
       "${iter_per_hour}" \
       "${eta_20k}" \
       "${eta_1m}" \
+      "${checkpoint_count}" \
+      "${latest_checkpoint_label}" \
       "${mtime}" \
       "${error_label}" \
       >> "${tmp}"
