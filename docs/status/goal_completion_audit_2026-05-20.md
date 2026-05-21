@@ -459,6 +459,14 @@ also present under `callbacks.online_retarget_visual_val` for all four runs,
 with `every_steps=20000`, `num_videos=8`, `duration_sec=4`, `target_fps=50`,
 and `wandb_upload=true`.
 
+Follow-up W&B API check found all four run histories still updating at around
+steps `1464-1488`. Summary metric keys include
+`loss/aux_online_retarget_g1_dyn_action_avg`,
+`loss/aux_online_retarget_action_smoothness_avg`,
+`loss/aux_g1_recon_avg`, `loss/total_aux_loss_avg`, and PPO losses. This covers
+the existence of the primary dynamics auxiliary loss stream, but not the final
+1M-step comparison or the missing 20k validation videos.
+
 Launcher logs for all four variants show:
 
 - W&B run setup and remote project/run URL.

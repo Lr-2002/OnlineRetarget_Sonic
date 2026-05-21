@@ -35,8 +35,8 @@ evidence from the formal A1/A2/B1/B2 runs, not from smoke runs or dry runs.
 | --- | --- | --- |
 | 20k visual validation | 8 synchronized 4s videos per formal run at step 20000, uploaded to W&B | pending |
 | 1M training outcome | Each variant reaches 1M Sonic training steps, or has a reproducible failure log with W&B run and git SHA | pending |
-| Dynamics objective | W&B has `online_retarget_g1_dyn_action` metrics for all variants | pending |
-| Kinematics auxiliary | W&B has G1 kinematic auxiliary metrics for all variants | pending |
+| Dynamics objective | W&B has `online_retarget_g1_dyn_action` metrics for all variants | streaming; final pending |
+| Kinematics auxiliary | W&B has G1 kinematic auxiliary metrics for all variants | streaming; final pending |
 | Latency | Batch size 1 inference latency measured for all viable variants | pending |
 | Checkpoints | Final or best checkpoint path recorded for each variant | pending |
 | Decision | One recommended next-line variant with rationale and risks | pending |
@@ -148,3 +148,26 @@ as top-level W&B config keys. That nested object records:
 
 Launcher logs also confirm all four variants initialized the Sonic `g1_dyn`
 decoder and filtered active decoders to `g1_dyn` plus `g1_kin`.
+
+## W&B Metric Stream Evidence
+
+Remote W&B API check for project `world_model_xh/OnlineRetarget`:
+
+| Variant | Run ID | State | Last history step | Retarget metric keys present |
+| --- | --- | --- | ---: | --- |
+| A1 | `rcuzxotj` | `running` | `1488` | yes |
+| A2 | `o1ldyppd` | `running` | `1464` | yes |
+| B1 | `ctkd8d87` | `running` | `1475` | yes |
+| B2 | `2r8c0hs0` | `running` | `1481` | yes |
+
+Observed metric keys include:
+
+- `loss/aux_online_retarget_g1_dyn_action_avg`
+- `loss/aux_online_retarget_action_smoothness_avg`
+- `loss/aux_g1_recon_avg`
+- `loss/total_aux_loss_avg`
+- PPO loss keys
+
+This proves the formal W&B runs are streaming the primary dynamics auxiliary
+loss key. It is still not final comparison evidence because all variants are
+below the 20k visual-validation gate and far below 1M steps.
