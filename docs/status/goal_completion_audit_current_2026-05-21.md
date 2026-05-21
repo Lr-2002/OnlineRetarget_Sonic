@@ -27,6 +27,7 @@ source-side Encoder variant，用于 online human/SOMA/BVH to G1 retargeting。
 | W&B project | `world_model_xh/OnlineRetarget` |
 | Latest local focused regression | `37` tests passed, `3` skipped |
 | Remote formal config path check | 5090 Isaac Python validation passed with `--require-formal --check-paths`; all warnings empty |
+| W&B provenance config | all four runs include `online_retarget.git_sha`, `sonic_git_sha`, `encoder_variant`, `run_group`, and `config_path` |
 | AgentHub cadence report | `http://10.1.11.30:5175/runs/online-retarget/20260521-094531-onlineretarget-20k-video-validation-cadence` |
 
 ## Prompt-to-Artifact Checklist
@@ -50,7 +51,7 @@ source-side Encoder variant，用于 online human/SOMA/BVH to G1 retargeting。
 | Remote launcher checks committed/pushed/synced code | Focused launcher guardrail tests passed | Covered at test level |
 | Long training in tmux | 5090 has four variant tmux sessions plus monitor/watch sessions | Covered |
 | `/home/user/data/motion_data` remains read-only | No writes observed in current commands; formal output roots under `outputs/`; remote path validator passed against configured output paths | Covered for current configs; ongoing runtime audit only |
-| W&B config/metrics visible | W&B API shows all four runs `running` with loss metrics present | Covered for live metric stream |
+| W&B config/metrics visible | W&B API shows all four runs `running`; configs include provenance fields; loss metrics are present | Covered for live config/metric stream |
 | First 20k video bundle exists | `validation_file_count=0`; no `validation_20k_ready.md` | Missing |
 | W&B 20k videos uploaded | no `online_retarget_visual_validation/videos_uploaded` yet | Missing |
 | Each variant reaches 1M or reproducibly fails | current steps are around `2k`, far below `1M` | Missing |
@@ -90,6 +91,14 @@ PYTHONPATH=src /workspace/isaaclab/_isaac_sim/python.sh \
 
 Result: all four configs returned `formal=true`, `target_decoder=g1_dyn`,
 `training_lane=sonic_native_retarget`, and `warnings=[]`.
+
+W&B config provenance check on the four run ids confirmed that every run has:
+
+- `online_retarget.git_sha=de7ff733edf5b8cd978882826229b0a7400ac0d2`
+- `online_retarget.sonic_git_sha=53e5a44f6373fe70b2bc62c934fa8f98ee810062`
+- `online_retarget.encoder_variant` matching A1/A2/B1/B2
+- `online_retarget.run_group=sonic_native_retarget_1m_20260520T220222Z`
+- `wandb.wandb_group=sonic_native_retarget_1m_20260520T220222Z`
 
 ## Active Automation
 
