@@ -576,3 +576,20 @@ This warning is not a hard error and the runs remain `running`. It should be
 rechecked at the first 20k validation event to confirm videos are uploaded and
 visible in W&B, even if W&B assigns its own internal step while tensorboard sync
 is enabled.
+
+## 2k Checkpoint Evidence: 2026-05-21
+
+Latest monitor snapshot at `2026-05-21T01:40:24Z`:
+
+| Variant | Iteration | Checkpoints | Latest checkpoint | Hard error |
+| --- | ---: | ---: | --- | --- |
+| A1_concat | `2029` | `2` | `model_step_002000.pt` | `none` |
+| A2_film_contact | `2000` | `2` | `model_step_002000.pt` | `none` |
+| B1_adapter | `2011` | `2` | `model_step_002000.pt` | `none` |
+| B2_expert | `2015` | `2` | `model_step_002000.pt` | `none` |
+
+This proves all four formal Sonic-native variants have reached the first
+numbered checkpoint boundary and regular checkpoint writing is active. It is
+not completion evidence for `goal.md`: `validation_file_count` remains `0`,
+`validation_20k_ready.md` is not ready, and all runs are far below the
+`1000000`-step acceptance gate.

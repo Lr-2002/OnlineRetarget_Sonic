@@ -43,19 +43,19 @@ evidence from the formal A1/A2/B1/B2 runs, not from smoke runs or dry runs.
 
 ## Early Checkpoint Evidence
 
-Latest monitor snapshot at `2026-05-21T00:12:52Z` found one rolling checkpoint
-per variant:
+Latest monitor snapshot at `2026-05-21T01:40:24Z` confirmed all four formal
+variants crossed the first numbered checkpoint gate at step `2000`:
 
 | Variant | Iteration | Checkpoint count | Latest checkpoint | Meaning |
 | --- | ---: | ---: | --- | --- |
-| A1 | `1216` | `1` | `last.pt` | Rolling checkpoint only |
-| A2 | `1194` | `1` | `last.pt` | Rolling checkpoint only |
-| B1 | `1203` | `1` | `last.pt` | Rolling checkpoint only |
-| B2 | `1207` | `1` | `last.pt` | Rolling checkpoint only |
+| A1 | `2029` | `2` | `model_step_002000.pt` | First numbered checkpoint |
+| A2 | `2000` | `2` | `model_step_002000.pt` | First numbered checkpoint |
+| B1 | `2011` | `2` | `model_step_002000.pt` | First numbered checkpoint |
+| B2 | `2015` | `2` | `model_step_002000.pt` | First numbered checkpoint |
 
-These files prove checkpoint writing is active, but they are not final or best
-checkpoints for the completion table. Sonic's regular `model_step_*.pt`
-checkpoint is expected later according to the configured save frequency.
+These files prove regular Sonic checkpoint writing is active for all four
+formal variants. They are still early progress artifacts, not final or best
+checkpoints for the completion table.
 
 ## Metrics Table
 
@@ -105,15 +105,15 @@ Decision rule:
 
 ## Latest Monitor Snapshot
 
-Manual refresh at `2026-05-21T01:03:53Z` for run group
+Manual refresh at `2026-05-21T01:40:24Z` for run group
 `sonic_native_retarget_1m_20260520T220222Z`:
 
 | Variant | Iteration | Iter/hr | ETA 20k | ETA 1M | Validation files | Hard error |
 | --- | ---: | ---: | --- | --- | ---: | --- |
-| A1 | `1693` | `566.0` | `1d 8h` | `73d 11h` | `0` | `none` |
-| A2 | `1666` | `558.2` | `1d 8h` | `74d 12h` | `0` | `none` |
-| B1 | `1678` | `561.9` | `1d 8h` | `74d 0h` | `0` | `none` |
-| B2 | `1682` | `563.1` | `1d 8h` | `73d 20h` | `0` | `none` |
+| A1 | `2029` | `563.2` | `1d 7h` | `73d 19h` | `0` | `none` |
+| A2 | `2000` | `556.4` | `1d 8h` | `74d 17h` | `0` | `none` |
+| B1 | `2011` | `559.0` | `1d 8h` | `74d 9h` | `0` | `none` |
+| B2 | `2015` | `560.0` | `1d 8h` | `74d 6h` | `0` | `none` |
 
 No 20k validation evidence is expected yet. This report remains pending until
 formal validation videos, W&B uploads, checkpoints, metrics, and latency

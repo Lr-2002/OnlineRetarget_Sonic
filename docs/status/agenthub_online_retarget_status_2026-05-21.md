@@ -1,6 +1,6 @@
 # OnlineRetarget Sonic-native Run Status
 
-更新时间：2026-05-21 01:03 UTC
+更新时间：2026-05-21 01:40 UTC
 
 ## 结论
 
@@ -15,10 +15,14 @@ Run group: `sonic_native_retarget_1m_20260520T220222Z`
 
 | Variant | W&B run | Latest iteration | State | Hard error |
 | --- | --- | ---: | --- | --- |
-| A1_concat | `rcuzxotj` | `1693` | running | none |
-| A2_film_contact | `o1ldyppd` | `1666` | running | none |
-| B1_adapter | `ctkd8d87` | `1678` | running | none |
-| B2_expert | `2r8c0hs0` | `1682` | running | none |
+| A1_concat | `rcuzxotj` | `2029` | running | none |
+| A2_film_contact | `o1ldyppd` | `2000` | running | none |
+| B1_adapter | `ctkd8d87` | `2011` | running | none |
+| B2_expert | `2r8c0hs0` | `2015` | running | none |
+
+All four variants have written the first numbered Sonic checkpoint:
+`model_step_002000.pt`. This is progress evidence only; it is not a 20k
+validation or final model-selection artifact.
 
 ## Traceability
 
