@@ -42,6 +42,8 @@ if SRC_ROOT.exists() and str(SRC_ROOT) not in sys.path:
 
 
 REQUIRED_NPZ_KEYS = ("joint_pos", "joint_vel", "body_pos_w", "body_quat_w")
+REQUIRED_ROBOT_MOTIONLIB_KEYS = ("dof", "root_rot", "fps")
+REQUIRED_SOMA_MOTIONLIB_KEYS = ("soma_joints", "soma_root_quat", "fps")
 REQUIRED_CONFIG_KEYS = {
     "schema_version",
     "owner",
@@ -208,6 +210,20 @@ def quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return quat_normalize(out)
 
 
+def quat_mul_raw(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    aw, ax, ay, az = np.moveaxis(a, -1, 0)
+    bw, bx, by, bz = np.moveaxis(b, -1, 0)
+    return np.stack(
+        [
+            aw * bw - ax * bx - ay * by - az * bz,
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+        ],
+        axis=-1,
+    )
+
+
 def quat_to_matrix(q: np.ndarray) -> np.ndarray:
     q = quat_normalize(q)
     w, x, y, z = np.moveaxis(q, -1, 0)
@@ -292,12 +308,170 @@ def build_features(
     )
 
 
+def finite_difference_velocity(values: np.ndarray, fps: float) -> np.ndarray:
+    vel = np.zeros_like(values, dtype=np.float32)
+    if values.shape[0] <= 1:
+        return vel
+    vel[1:] = (values[1:] - values[:-1]) * float(fps)
+    vel[0] = vel[1]
+    return vel
+
+
+def resample_soma_array(
+    data: np.ndarray,
+    fps_source: float,
+    fps_target: float,
+    *,
+    target_len: int | None = None,
+) -> np.ndarray:
+    if data.shape[0] <= 1 or fps_source <= 0 or fps_target <= 0 or abs(fps_source - fps_target) < 1e-6:
+        out = data.astype(np.float32, copy=False)
+    else:
+        duration = (data.shape[0] - 1) / float(fps_source)
+        target_times = np.arange(0.0, duration, 1.0 / float(fps_target), dtype=np.float32)
+        if target_times.shape[0] <= 1:
+            out = data[:1].astype(np.float32, copy=False)
+        else:
+            phase = target_times / duration
+            src_pos = phase * (data.shape[0] - 1)
+            idx0 = np.floor(src_pos).astype(np.int64)
+            idx1 = np.minimum(idx0 + 1, data.shape[0] - 1)
+            blend = (src_pos - idx0).astype(np.float32)
+            while blend.ndim < data.ndim:
+                blend = blend[..., None]
+            out = data[idx0] * (1.0 - blend) + data[idx1] * blend
+            out = out.astype(np.float32, copy=False)
+
+    if target_len is None or out.shape[0] == target_len:
+        return out
+    if out.shape[0] > target_len:
+        return out[:target_len]
+    pad = np.repeat(out[-1:], target_len - out.shape[0], axis=0)
+    return np.concatenate([out, pad], axis=0).astype(np.float32, copy=False)
+
+
+def build_soma_motionlib_features(
+    arrays: dict[str, np.ndarray],
+    frame_indices: np.ndarray,
+    window: int,
+    step: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    soma_joints = arrays["soma_joints"]
+    soma_root_quat = quat_normalize(arrays["soma_root_quat"])
+    dof = arrays["joint_pos"]
+    joint_vel = arrays["joint_vel"]
+    root_rot = quat_normalize(arrays["root_rot"])
+    total_frames = min(
+        soma_joints.shape[0],
+        soma_root_quat.shape[0],
+        dof.shape[0],
+        joint_vel.shape[0],
+        root_rot.shape[0],
+    )
+    idx = future_indices(frame_indices, total_frames, window, step)
+
+    root_rot_t = np.swapaxes(quat_to_matrix(soma_root_quat[idx]), -1, -2)
+    soma_local = np.einsum("nwij,nwbj->nwbi", root_rot_t, soma_joints[idx])
+    soma_root_ori6d = relative_root_rot6d(soma_root_quat, frame_indices, idx)
+    motion = np.concatenate(
+        [
+            soma_local.reshape(frame_indices.shape[0], -1),
+            soma_root_ori6d.reshape(frame_indices.shape[0], -1),
+        ],
+        axis=-1,
+    )
+
+    skeleton_anchor = soma_local[:, 0]
+    skeleton_lengths = np.linalg.norm(skeleton_anchor, axis=-1)
+    skeleton = np.concatenate(
+        [skeleton_anchor.reshape(frame_indices.shape[0], -1), skeleton_lengths],
+        axis=-1,
+    )
+
+    command = np.concatenate([dof[idx], joint_vel[idx]], axis=-1)
+    target_root_ori6d = relative_root_rot6d(root_rot, frame_indices, idx)
+    target = np.concatenate(
+        [command.reshape(frame_indices.shape[0], -1), target_root_ori6d.reshape(frame_indices.shape[0], -1)],
+        axis=-1,
+    )
+    return (
+        motion.astype(np.float32, copy=False),
+        skeleton.astype(np.float32, copy=False),
+        target.astype(np.float32, copy=False),
+    )
+
+
 def load_arrays(path: Path) -> dict[str, np.ndarray]:
     with np.load(path) as loaded:
         return {key: loaded[key].astype(np.float32, copy=False) for key in REQUIRED_NPZ_KEYS}
 
 
+def _import_joblib():
+    import joblib
+
+    return joblib
+
+
+def _single_motionlib_entry(path: Path) -> tuple[str, Mapping[str, Any]]:
+    loaded = _import_joblib().load(path)
+    if not isinstance(loaded, Mapping) or not loaded:
+        raise ValueError(f"motionlib file must contain a non-empty mapping: {path}")
+    key = path.stem
+    if key in loaded:
+        return key, loaded[key]
+    first_key = next(iter(loaded))
+    return str(first_key), loaded[first_key]
+
+
+def _require_motionlib_keys(entry: Mapping[str, Any], keys: Sequence[str], path: Path) -> None:
+    missing = [key for key in keys if key not in entry]
+    if missing:
+        raise ValueError(f"{path} is missing required motionlib keys: {', '.join(missing)}")
+
+
+def load_soma_motionlib_arrays(row: Mapping[str, Any], config: Mapping[str, Any]) -> dict[str, np.ndarray]:
+    input_cfg = config["input_data"]
+    robot_path = Path(input_cfg["robot_motion_dir"]) / str(row["robot_relative_path"])
+    soma_path = Path(input_cfg["soma_motion_dir"]) / str(row["soma_relative_path"])
+    _, robot = _single_motionlib_entry(robot_path)
+    _, soma = _single_motionlib_entry(soma_path)
+    _require_motionlib_keys(robot, REQUIRED_ROBOT_MOTIONLIB_KEYS, robot_path)
+    _require_motionlib_keys(soma, REQUIRED_SOMA_MOTIONLIB_KEYS, soma_path)
+
+    dof = np.asarray(robot["dof"], dtype=np.float32)
+    root_rot = np.asarray(robot["root_rot"], dtype=np.float32)
+    robot_fps = float(robot.get("fps") or input_cfg.get("target_fps") or 50.0)
+    soma_fps = float(soma.get("fps") or input_cfg.get("source_fps") or robot_fps)
+    target_len = min(dof.shape[0], root_rot.shape[0])
+    soma_joints = resample_soma_array(
+        np.asarray(soma["soma_joints"], dtype=np.float32),
+        soma_fps,
+        robot_fps,
+        target_len=target_len,
+    )
+    soma_root_quat = quat_normalize(
+        resample_soma_array(
+            np.asarray(soma["soma_root_quat"], dtype=np.float32),
+            soma_fps,
+            robot_fps,
+            target_len=target_len,
+        )
+    )
+    dof = dof[:target_len]
+    root_rot = root_rot[:target_len]
+    return {
+        "soma_joints": soma_joints,
+        "soma_root_quat": soma_root_quat,
+        "joint_pos": dof,
+        "joint_vel": finite_difference_velocity(dof, robot_fps),
+        "root_rot": root_rot,
+        "fps": np.asarray(robot_fps, dtype=np.float32),
+    }
+
+
 def index_path_from_config(config: dict[str, Any]) -> Path:
+    if config["input_data"].get("format") == "soma_motionlib":
+        return Path(config["input_data"]["robot_motion_dir"])
     indexing = config["input_data"].get("indexing", {})
     raw_path = indexing.get("index_csv") or indexing.get("prebuilt_index_jsonl")
     if not raw_path:
@@ -419,6 +593,66 @@ def rows_from_csv_index(config: dict[str, Any], data_root: Path) -> tuple[list[d
     return rows, skipped
 
 
+def rows_from_soma_motionlib_pair(config: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
+    input_cfg = config["input_data"]
+    robot_dir = Path(input_cfg["robot_motion_dir"])
+    soma_dir = Path(input_cfg["soma_motion_dir"])
+    max_clips = int(input_cfg.get("max_clips", 0))
+    max_duration_delta = float(input_cfg.get("max_duration_delta_sec", 0.05))
+    rows: list[dict[str, Any]] = []
+    skipped = 0
+    for robot_path in sorted(robot_dir.glob("*.pkl")):
+        if robot_path.name == "metadata.pkl":
+            continue
+        soma_path = soma_dir / robot_path.name
+        if not soma_path.exists():
+            skipped += 1
+            continue
+        try:
+            _, robot = _single_motionlib_entry(robot_path)
+            _, soma = _single_motionlib_entry(soma_path)
+            _require_motionlib_keys(robot, REQUIRED_ROBOT_MOTIONLIB_KEYS, robot_path)
+            _require_motionlib_keys(soma, REQUIRED_SOMA_MOTIONLIB_KEYS, soma_path)
+            robot_frames = int(np.asarray(robot["dof"]).shape[0])
+            soma_frames = int(np.asarray(soma["soma_joints"]).shape[0])
+            target_fps = float(robot.get("fps") or input_cfg.get("target_fps") or 50.0)
+            source_fps = float(soma.get("fps") or input_cfg.get("source_fps") or target_fps)
+            if robot_frames <= 1 or soma_frames <= 1 or target_fps <= 0 or source_fps <= 0:
+                skipped += 1
+                continue
+            source_duration = soma_frames / source_fps
+            target_duration = robot_frames / target_fps
+            if target_fps >= source_fps or abs(source_duration - target_duration) > max_duration_delta:
+                skipped += 1
+                continue
+        except Exception:
+            skipped += 1
+            continue
+
+        rows.append(
+            {
+                "path": str(robot_path),
+                "relative_path": robot_path.name,
+                "robot_relative_path": robot_path.name,
+                "soma_relative_path": soma_path.name,
+                "frame_count": robot_frames,
+                "source_frame_count": soma_frames,
+                "source_fps": source_fps,
+                "target_fps": target_fps,
+                "source_duration_sec": source_duration,
+                "target_duration_sec": target_duration,
+                "source_bvh": str(soma.get("source_bvh", "")),
+                "source_soma_proportional_path": str(soma.get("source_bvh", "")),
+                "filename": robot_path.stem,
+                "actor_uid": "",
+                "category": "",
+            }
+        )
+        if max_clips > 0 and len(rows) >= max_clips:
+            break
+    return rows, skipped
+
+
 def source_target_timing_summary(
     source: Mapping[str, Any],
     *,
@@ -475,6 +709,8 @@ def _optional_float(value: Any) -> float | None:
 
 
 def rows_from_index(config: dict[str, Any], data_root: Path) -> tuple[list[dict[str, Any]], int]:
+    if config["input_data"].get("format") == "soma_motionlib":
+        return rows_from_soma_motionlib_pair(config)
     indexing = config["input_data"].get("indexing", {})
     if indexing.get("index_csv"):
         return rows_from_csv_index(config, data_root)
@@ -499,7 +735,9 @@ def split_rows(rows: list[dict[str, Any]], validation_ratio: float, hash_salt: s
 class KinWindowDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]):
     def __init__(self, rows: list[dict[str, Any]], split: str, config: dict[str, Any]) -> None:
         self.rows = [row for row in rows if row["split"] == split]
-        self.data_root = Path(config["input_data"]["data_root"])
+        self.config = config
+        self.input_format = str(config["input_data"].get("format", "npz"))
+        self.data_root = Path(config["input_data"].get("data_root", config["input_data"].get("robot_motion_dir", ".")))
         self.window = int(config["features"]["future_window_frames"])
         self.step = int(config["features"]["future_step"])
         self.frame_stride = int(config["training"]["frame_stride"])
@@ -523,19 +761,32 @@ class KinWindowDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]])
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         row_idx, start, stop = self.samples[index]
         row = self.rows[row_idx]
-        arrays = load_arrays(self.data_root / row["relative_path"])
-        total_frames = min(
-            arrays["joint_pos"].shape[0],
-            arrays["joint_vel"].shape[0],
-            arrays["body_pos_w"].shape[0],
-            arrays["body_quat_w"].shape[0],
-        )
+        if self.input_format == "soma_motionlib":
+            arrays = load_soma_motionlib_arrays(row, self.config)
+            total_frames = min(
+                arrays["soma_joints"].shape[0],
+                arrays["soma_root_quat"].shape[0],
+                arrays["joint_pos"].shape[0],
+                arrays["joint_vel"].shape[0],
+                arrays["root_rot"].shape[0],
+            )
+        else:
+            arrays = load_arrays(self.data_root / row["relative_path"])
+            total_frames = min(
+                arrays["joint_pos"].shape[0],
+                arrays["joint_vel"].shape[0],
+                arrays["body_pos_w"].shape[0],
+                arrays["body_quat_w"].shape[0],
+            )
         stop = min(stop, total_frames)
         if start >= stop:
             start = 0
             stop = total_frames
         frame_indices = np.arange(start, stop, self.frame_stride, dtype=np.int64)
-        motion, skeleton, target = build_features(arrays, frame_indices, self.window, self.step)
+        if self.input_format == "soma_motionlib":
+            motion, skeleton, target = build_soma_motionlib_features(arrays, frame_indices, self.window, self.step)
+        else:
+            motion, skeleton, target = build_features(arrays, frame_indices, self.window, self.step)
         return torch.from_numpy(motion), torch.from_numpy(skeleton), torch.from_numpy(target)
 
 
@@ -1031,6 +1282,21 @@ def _render_visual_validation_clip(
     render_deps: Mapping[str, Any],
     g1_model: Any,
 ) -> dict[str, Any]:
+    if config["input_data"].get("format") == "soma_motionlib":
+        return _render_motionlib_visual_validation_clip(
+            model=model,
+            row=row,
+            stats=stats,
+            device=device,
+            config=config,
+            output_dir=output_dir,
+            index=index,
+            step=step,
+            joint_dim=joint_dim,
+            render_deps=render_deps,
+            g1_model=g1_model,
+        )
+
     cfg = config.get("visual_validation", {})
     clip_name = _safe_filename(str(row.get("filename") or Path(str(row["relative_path"])).stem))
     clip_dir = output_dir / f"{index:02d}_{clip_name}"
@@ -1165,6 +1431,154 @@ def _render_visual_validation_clip(
     }
 
 
+def _render_motionlib_visual_validation_clip(
+    *,
+    model: nn.Module,
+    row: Mapping[str, Any],
+    stats: dict[str, torch.Tensor],
+    device: torch.device,
+    config: dict[str, Any],
+    output_dir: Path,
+    index: int,
+    step: int,
+    joint_dim: int,
+    render_deps: Mapping[str, Any],
+    g1_model: Any,
+) -> dict[str, Any]:
+    cfg = config.get("visual_validation", {})
+    clip_name = _safe_filename(str(row.get("filename") or Path(str(row["relative_path"])).stem))
+    clip_dir = output_dir / f"{index:02d}_{clip_name}"
+    clip_dir.mkdir(parents=True, exist_ok=True)
+
+    source_video = clip_dir / "source_soma_bvh_capsules.mp4"
+    dataset_video = clip_dir / "dataset_g1_capsules.mp4"
+    inference_video = clip_dir / "inference_g1_capsules.mp4"
+    combined_video = clip_dir / "source_dataset_inference.mp4"
+    metadata_path = clip_dir / "metadata.json"
+
+    arrays = load_soma_motionlib_arrays(row, config)
+    robot_root = _load_motionlib_robot_root(row, config)
+    fps = float(arrays["fps"])
+    total_frames = min(arrays["joint_pos"].shape[0], robot_root["root_pos"].shape[0], robot_root["root_quat"].shape[0])
+    requested_frames = max(1, int(round(float(cfg.get("duration_sec", 4.0)) * fps)))
+    frame_count = min(total_frames, requested_frames)
+    render_width = int(cfg.get("width", 640))
+    render_height = int(cfg.get("height", 360))
+    render_config = render_deps["ReviewClipExportConfig"](
+        render_max_frames=frame_count,
+        render_width=render_width,
+        render_height=render_height,
+        fps=fps,
+        source_position_scale=float(cfg.get("source_position_scale", 0.01)),
+        model_xml=Path(str(cfg.get("g1_model_xml", ""))),
+    )
+
+    source_bvh = _resolve_source_bvh(row, config, output_dir)
+    if source_bvh is not None:
+        source_report = _render_time_aligned_source_bvh(
+            source_bvh,
+            source_video,
+            render_config=render_config,
+            target_fps=fps,
+            frame_count=frame_count,
+            render_deps=render_deps,
+        )
+    else:
+        source_report = _render_missing_panel(
+            render_deps=render_deps,
+            video_path=source_video,
+            render_config=render_config,
+            frame_count=frame_count,
+            label="source bvh unavailable",
+        )
+
+    root_pos = robot_root["root_pos"][:frame_count]
+    root_quat = robot_root["root_quat"][:frame_count]
+    dataset_frames = _g1_prediction_frames(
+        arrays["joint_pos"][:frame_count],
+        root_pos=root_pos,
+        root_quat=root_quat,
+        g1_model=g1_model,
+        render_deps=render_deps,
+    )
+    dataset_report = render_deps["_render_capsule_3d_video"](
+        frames=dataset_frames,
+        edges=_g1_edges(g1_model, render_deps["G1_CAPSULE_IGNORE_BODIES"]),
+        video_path=dataset_video,
+        config=render_config,
+        label="dataset g1 fk",
+        up_axis=2,
+        capsule_color=(61, 107, 160),
+        key_color=(139, 91, 41),
+    )
+
+    predicted_joint_pos = _predict_motionlib_visual_joint_pos(
+        model=model,
+        arrays=arrays,
+        frame_count=frame_count,
+        stats=stats,
+        device=device,
+        config=config,
+        joint_dim=joint_dim,
+    )
+    inference_frames = _g1_prediction_frames(
+        predicted_joint_pos,
+        root_pos=root_pos,
+        root_quat=root_quat,
+        g1_model=g1_model,
+        render_deps=render_deps,
+    )
+    inference_report = render_deps["_render_capsule_3d_video"](
+        frames=inference_frames,
+        edges=_g1_edges(g1_model, render_deps["G1_CAPSULE_IGNORE_BODIES"]),
+        video_path=inference_video,
+        config=render_config,
+        label="inference g1 fk",
+        up_axis=2,
+        capsule_color=(142, 77, 117),
+        key_color=(122, 89, 35),
+    )
+
+    combine_report = _combine_panel_videos(
+        (source_video, dataset_video, inference_video),
+        combined_video,
+        fps=int(round(fps)),
+    )
+    metadata = {
+        "step": step,
+        "index": index,
+        "filename": row.get("filename", ""),
+        "relative_path": row.get("relative_path", ""),
+        "source_bvh": str(source_bvh) if source_bvh is not None else "",
+        "fps": fps,
+        "frames": frame_count,
+        "duration_sec": frame_count / fps if fps > 0 else 0.0,
+        "source_render": source_report,
+        "dataset_render": dataset_report,
+        "inference_render": inference_report,
+        "combine": combine_report,
+        "combined_video": str(combined_video),
+        "note": (
+            "Panels are source SOMA proportional BVH capsules, paired dataset G1 FK from robot motionlib, "
+            "and model inference rendered by G1 MJCF FK from predicted joint_pos."
+        ),
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return {
+        "index": index,
+        "filename": row.get("filename", ""),
+        "relative_path": row.get("relative_path", ""),
+        "fps": fps,
+        "frames": frame_count,
+        "source_status": source_report.get("status"),
+        "dataset_status": dataset_report.get("status"),
+        "inference_status": inference_report.get("status"),
+        "combined_status": combine_report.get("status"),
+        "combined_video": str(combined_video),
+        "metadata": str(metadata_path),
+    }
+
+
 def _render_time_aligned_source_bvh(
     bvh_path: Path,
     video_path: Path,
@@ -1265,6 +1679,43 @@ def _predict_visual_joint_pos(
         pred_n = model(motion_n, skeleton_n)
         pred_raw = pred_n * stats["target_std"] + stats["target_mean"]
     return pred_raw[:, :joint_dim].detach().cpu().numpy().astype(np.float32, copy=False)
+
+
+def _predict_motionlib_visual_joint_pos(
+    *,
+    model: nn.Module,
+    arrays: Mapping[str, np.ndarray],
+    frame_count: int,
+    stats: dict[str, torch.Tensor],
+    device: torch.device,
+    config: dict[str, Any],
+    joint_dim: int,
+) -> np.ndarray:
+    frame_indices = np.arange(frame_count, dtype=np.int64)
+    motion, skeleton, _ = build_soma_motionlib_features(
+        dict(arrays),
+        frame_indices,
+        int(config["features"]["future_window_frames"]),
+        int(config["features"]["future_step"]),
+    )
+    with torch.no_grad():
+        motion_t = torch.from_numpy(motion).to(device)
+        skeleton_t = torch.from_numpy(skeleton).to(device)
+        motion_n = (motion_t - stats["motion_mean"]) / stats["motion_std"]
+        skeleton_n = (skeleton_t - stats["skeleton_mean"]) / stats["skeleton_std"]
+        pred_n = model(motion_n, skeleton_n)
+        pred_raw = pred_n * stats["target_std"] + stats["target_mean"]
+    return pred_raw[:, :joint_dim].detach().cpu().numpy().astype(np.float32, copy=False)
+
+
+def _load_motionlib_robot_root(row: Mapping[str, Any], config: Mapping[str, Any]) -> dict[str, np.ndarray]:
+    robot_path = Path(config["input_data"]["robot_motion_dir"]) / str(row["robot_relative_path"])
+    _, robot = _single_motionlib_entry(robot_path)
+    dof = np.asarray(robot["dof"], dtype=np.float32)
+    root_pos = np.asarray(robot.get("root_trans_offset", np.zeros((dof.shape[0], 3), dtype=np.float32)), dtype=np.float32)
+    root_quat = quat_normalize(np.asarray(robot["root_rot"], dtype=np.float32))
+    target_len = min(dof.shape[0], root_pos.shape[0], root_quat.shape[0])
+    return {"root_pos": root_pos[:target_len], "root_quat": root_quat[:target_len]}
 
 
 def _load_visual_npz(path: Path) -> tuple[dict[str, np.ndarray], float]:
@@ -1603,6 +2054,26 @@ def write_manifest(
 ) -> dict[str, Any]:
     source_root = Path(config["source_repo"])
     control_root = Path.cwd()
+    if config["input_data"].get("format") == "soma_motionlib":
+        data_snapshot: dict[str, Any] = {
+            "format": "soma_motionlib",
+            "robot_motion_dir": config["input_data"]["robot_motion_dir"],
+            "soma_motion_dir": config["input_data"]["soma_motion_dir"],
+            "row_count": len(rows),
+            "skipped_index_rows": skipped_index_rows,
+            "train_chunks": len(train_dataset),
+            "validation_chunks": len(validation_dataset),
+        }
+    else:
+        data_snapshot = {
+            "format": "npz",
+            "data_root": config["input_data"]["data_root"],
+            "index": file_stats(index_path_from_config(config)),
+            "row_count": len(rows),
+            "skipped_index_rows": skipped_index_rows,
+            "train_chunks": len(train_dataset),
+            "validation_chunks": len(validation_dataset),
+        }
     manifest = {
         "run_id": f"sonic-kin-skeleton-{config['variant']['name']}-{timestamp_compact()}",
         "run_group": run_group,
@@ -1624,14 +2095,7 @@ def write_manifest(
             "skeleton": skeleton_dim,
             "target": target_dim,
         },
-        "data_snapshot": {
-            "data_root": config["input_data"]["data_root"],
-            "index": file_stats(index_path_from_config(config)),
-            "row_count": len(rows),
-            "skipped_index_rows": skipped_index_rows,
-            "train_chunks": len(train_dataset),
-            "validation_chunks": len(validation_dataset),
-        },
+        "data_snapshot": data_snapshot,
         "metrics_path": str(output_dir / "loss_curve.csv"),
         "notes": config["purpose"],
     }
@@ -1681,11 +2145,17 @@ def validate_runtime(config: dict[str, Any], output_dir: Path) -> None:
     required_gpu_count = int(config["runtime"].get("required_gpu_count", 1))
     if torch.cuda.device_count() < required_gpu_count:
         raise RuntimeError(f"expected at least {required_gpu_count} visible GPU(s), found {torch.cuda.device_count()}")
-    data_root = Path(config["input_data"]["data_root"])
-    if not data_root.exists():
-        raise FileNotFoundError(f"data_root is missing: {data_root}")
-    if not index_path_from_config(config).exists():
-        raise FileNotFoundError(f"index is missing: {index_path_from_config(config)}")
+    if config["input_data"].get("format") == "soma_motionlib":
+        for key in ("robot_motion_dir", "soma_motion_dir"):
+            path = Path(config["input_data"][key])
+            if not path.exists():
+                raise FileNotFoundError(f"{key} is missing: {path}")
+    else:
+        data_root = Path(config["input_data"]["data_root"])
+        if not data_root.exists():
+            raise FileNotFoundError(f"data_root is missing: {data_root}")
+        if not index_path_from_config(config).exists():
+            raise FileNotFoundError(f"index is missing: {index_path_from_config(config)}")
     source_root = Path(config["source_repo"])
     if config["runtime"].get("require_committed_code", True):
         control_root = Path.cwd()
@@ -1726,7 +2196,8 @@ def main() -> None:
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    rows, skipped = rows_from_index(config, Path(config["input_data"]["data_root"]))
+    data_root = Path(config["input_data"].get("data_root", config["input_data"].get("robot_motion_dir", ".")))
+    rows, skipped = rows_from_index(config, data_root)
     split_rows(rows, float(config["split"]["validation_ratio"]), str(config["split"]["hash_salt"]))
     train_dataset = KinWindowDataset(rows, "train", config)
     validation_dataset = KinWindowDataset(rows, "validation", config)

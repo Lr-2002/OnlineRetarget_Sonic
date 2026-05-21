@@ -13,10 +13,10 @@ if [[ -n "${CONFIG:-}" ]]; then
   CONFIGS=("${CONFIG}")
 else
   CONFIGS=(
-    "configs/sonic_kin_skeleton_a1_concat_1gpu.json"
-    "configs/sonic_kin_skeleton_a2_film_1gpu.json"
-    "configs/sonic_kin_skeleton_b1_adapter_1gpu.json"
-    "configs/sonic_kin_skeleton_b2_expert_1gpu.json"
+    "configs/sonic_kin_soma_motionlib_a1_concat_1gpu.json"
+    "configs/sonic_kin_soma_motionlib_a2_film_1gpu.json"
+    "configs/sonic_kin_soma_motionlib_b1_adapter_1gpu.json"
+    "configs/sonic_kin_soma_motionlib_b2_expert_1gpu.json"
   )
 fi
 

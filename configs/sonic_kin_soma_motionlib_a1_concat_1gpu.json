@@ -1,0 +1,102 @@
+{
+  "schema_version": "1.0.0",
+  "owner": "OnlineRetarget",
+  "training_lane": "soma_motionlib_kin_only",
+  "purpose": "A1: one-GPU concat-conditioned supervised SONIC g1_kin target prediction from paired SOMA motionlib. Kinematics only; no PPO, no dynamics decoder, no Isaac rollout.",
+  "source_repo": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training",
+  "source_rev": "53e5a44f6373fe70b2bc62c934fa8f98ee810062",
+  "input_data": {
+    "format": "soma_motionlib",
+    "robot_motion_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/robot_soma_paired_v1",
+    "soma_motion_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/soma_filtered_v1",
+    "source_fps": 120.0,
+    "target_fps": 50.0,
+    "max_duration_delta_sec": 0.05,
+    "max_clips": 20000
+  },
+  "output_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_kin_soma_motionlib_runs/{run_group}/A1_concat",
+  "validation_command": "CONFIG=configs/sonic_kin_soma_motionlib_a1_concat_1gpu.json CUDA_VISIBLE_DEVICES=0 scripts/remote_start_sonic_kin_skeleton_4x1gpu.sh",
+  "expected_artifacts": [
+    "manifest.json",
+    "loss_curve.csv",
+    "stats/normalization.pt",
+    "checkpoints/latest.pt",
+    "logs/train.log"
+  ],
+  "variant": {
+    "name": "A1_concat",
+    "family": "A",
+    "type": "concat",
+    "gpu_slot": "A1"
+  },
+  "features": {
+    "future_window_frames": 10,
+    "future_step": 5,
+    "motion_feature": "soma_joints_multi_future_local_nonflat_plus_soma_root_ori_b_multi_future",
+    "skeleton_feature": "anchor_frame_soma_root_local_joint_positions_plus_joint_distances"
+  },
+  "split": {
+    "validation_ratio": 0.005,
+    "hash_salt": "sonic-kin-soma-motionlib-20260521"
+  },
+  "normalization": {
+    "max_frames": 200000,
+    "frames_per_chunk": 1024
+  },
+  "model": {
+    "hidden_dim": 512,
+    "num_layers": 3,
+    "dropout": 0.0
+  },
+  "training": {
+    "seed": 2026052111,
+    "max_steps": 1000000,
+    "batch_frames": 4096,
+    "frame_stride": 1,
+    "loader_chunk_frames": 2048,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.00001,
+    "grad_clip_norm": 1.0,
+    "precision": "bf16",
+    "num_workers": 2,
+    "log_every": 20,
+    "validate_every": 200,
+    "validation_batches": 16,
+    "checkpoint_every": 500,
+    "keep_last_checkpoints": 5,
+    "command_loss_weight": 1.0,
+    "anchor_loss_weight": 1.0
+  },
+  "visual_validation": {
+    "enabled": true,
+    "every_steps": 2000,
+    "num_videos": 8,
+    "duration_sec": 4.0,
+    "width": 640,
+    "height": 360,
+    "source_position_scale": 0.01,
+    "source_bvh_roots": [
+      "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/source_bvh_cache",
+      "/home/user/data/motion_data"
+    ],
+    "source_bvh_cache": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/source_bvh_cache",
+    "source_bvh_tar": "/home/user/data/motion_data/back_data/soma_proportional.tar",
+    "g1_model_xml": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training/gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml"
+  },
+  "runtime": {
+    "required_gpu_count": 1,
+    "write_root": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs",
+    "forbid_write_roots": ["/home/user/data/motion_data", "/mnt/data_oss"],
+    "require_committed_code": true,
+    "require_latest_code": true
+  },
+  "wandb": {
+    "enabled": true,
+    "project": "OnlineRetarget",
+    "entity": null,
+    "group": "sonic_kin_soma_motionlib_{run_group}",
+    "name": "A1_concat_{run_group}",
+    "dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/wandb",
+    "tags": ["sonic-kin-only", "soma-motionlib", "A1", "concat"]
+  }
+}
