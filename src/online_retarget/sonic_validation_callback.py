@@ -45,14 +45,21 @@ def should_run_visual_validation(
     every_steps: int = DEFAULT_EVERY_STEPS,
     *,
     last_step: int | None = None,
+    now: float | None = None,
+    every_seconds: float | None = None,
+    last_time: float | None = None,
 ) -> bool:
-    """Return true exactly on positive multiples of ``every_steps``."""
+    """Return true on step or optional wall-clock validation cadence."""
 
-    if every_steps <= 0 or global_step <= 0:
+    if global_step <= 0:
         return False
     if last_step == global_step:
         return False
-    return global_step % every_steps == 0
+    if every_steps > 0 and global_step % every_steps == 0:
+        return True
+    if every_seconds is None or every_seconds <= 0 or now is None or last_time is None:
+        return False
+    return now - last_time >= every_seconds
 
 
 def rank_video_indices(num_videos: int, rank: int, world_size: int) -> tuple[int, ...]:
@@ -84,6 +91,8 @@ class SonicVisualValidationCallback(TrainerCallback):
         wandb_upload: bool = True,
         log_prefix: str = DEFAULT_LOG_PREFIX,
         fail_on_render_error: bool = False,
+        every_minutes: float | None = None,
+        every_seconds: float | None = None,
     ) -> None:
         super().__init__()
         self.every_steps = int(every_steps)
@@ -94,17 +103,29 @@ class SonicVisualValidationCallback(TrainerCallback):
         self.wandb_upload = bool(wandb_upload)
         self.log_prefix = log_prefix
         self.fail_on_render_error = bool(fail_on_render_error)
+        if every_seconds is not None:
+            self.every_seconds = float(every_seconds)
+        elif every_minutes is not None:
+            self.every_seconds = float(every_minutes) * 60.0
+        else:
+            self.every_seconds = None
         self._last_step: int | None = None
+        self._last_validation_time: float = time.time()
 
     def on_step_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
         step = int(getattr(state, "global_step", 0))
+        now = time.time()
         if not should_run_visual_validation(
             step,
             self.every_steps,
             last_step=self._last_step,
+            now=now,
+            every_seconds=self.every_seconds,
+            last_time=self._last_validation_time,
         ):
             return control
         self._last_step = step
+        self._last_validation_time = now
 
         env = kwargs.get("env")
         model = kwargs.get("model")

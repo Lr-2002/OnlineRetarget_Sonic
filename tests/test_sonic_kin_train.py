@@ -85,3 +85,61 @@ class SonicKinTrainTimingTests(unittest.TestCase):
         self.assertEqual(skeleton.shape, (2, 26 * 3 + 26))
         self.assertEqual(target.shape, (2, 3 * (29 + 29) + 3 * 6))
         np.testing.assert_allclose(target[0, :29], dof[0])
+
+    def test_soma_motionlib_feature_builder_can_target_root_pos_and_rot_w(self):
+        frames = 8
+        soma_joints = np.zeros((frames, 26, 3), dtype=np.float32)
+        identity = np.zeros((frames, 4), dtype=np.float32)
+        identity[:, 0] = 1.0
+        dof = np.arange(frames * 29, dtype=np.float32).reshape(frames, 29) * 0.01
+        root_pos = np.stack(
+            [
+                np.linspace(0.0, 0.7, frames, dtype=np.float32),
+                np.zeros(frames, dtype=np.float32),
+                np.ones(frames, dtype=np.float32),
+            ],
+            axis=-1,
+        )
+        arrays = {
+            "soma_joints": soma_joints,
+            "soma_root_quat": identity.copy(),
+            "joint_pos": dof,
+            "joint_vel": sonic_train.finite_difference_velocity(dof, 50.0),
+            "root_pos": root_pos,
+            "root_rot": identity.copy(),
+        }
+        config = {"features": {"include_root_pos_target": True}}
+
+        _, _, target = sonic_train.build_soma_motionlib_features(
+            arrays,
+            np.asarray([0, 1], dtype=np.int64),
+            window=3,
+            step=1,
+            config=config,
+        )
+
+        command_dim = 3 * (29 + 29)
+        root_pos_start = command_dim
+        root_rot_start = command_dim + 3 * 3
+        self.assertEqual(target.shape, (2, command_dim + 3 * 3 + 3 * 6))
+        np.testing.assert_allclose(target[0, root_pos_start : root_pos_start + 3], root_pos[0])
+        np.testing.assert_allclose(
+            target[0, root_rot_start : root_rot_start + 6],
+            np.asarray([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32),
+        )
+
+    def test_kin_visual_validation_due_accepts_wall_clock_cadence(self):
+        config = {
+            "visual_validation": {
+                "enabled": True,
+                "every_steps": 20000,
+                "every_minutes": 60,
+            }
+        }
+
+        self.assertFalse(
+            sonic_train.visual_validation_due(config, 499, now=3599.0, last_time=0.0)
+        )
+        self.assertTrue(
+            sonic_train.visual_validation_due(config, 500, now=3600.0, last_time=0.0)
+        )

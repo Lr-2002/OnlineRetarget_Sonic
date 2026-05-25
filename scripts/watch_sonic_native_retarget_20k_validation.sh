@@ -87,7 +87,9 @@ ready_condition_met() {
   local mp4_count upload_count upload_ok upload_failed upload_skipped upload_other videos_uploaded
   local upload_paths=()
   mp4_count="$(validation_files | grep -cE '\.mp4$' || true)"
-  mapfile -t upload_paths < <(upload_reports | sort)
+  while IFS= read -r upload_path; do
+    upload_paths+=("${upload_path}")
+  done < <(upload_reports | sort)
   upload_count="${#upload_paths[@]}"
   IFS=$'\t' read -r upload_ok upload_failed upload_skipped upload_other videos_uploaded \
     < <(upload_status_summary "${upload_paths[@]}")
@@ -128,7 +130,9 @@ write_ready_report() {
   min_iter="$(min_iteration)"
   mp4_count="$(validation_files | grep -cE '\.mp4$' || true)"
   report_count="$(validation_files | grep -cE 'clip_[0-9]+_report\.json$|rank_report\.json$' || true)"
-  mapfile -t upload_paths < <(upload_reports | sort)
+  while IFS= read -r upload_path; do
+    upload_paths+=("${upload_path}")
+  done < <(upload_reports | sort)
   upload_count="${#upload_paths[@]}"
   IFS=$'\t' read -r upload_ok upload_failed upload_skipped upload_other videos_uploaded \
     < <(upload_status_summary "${upload_paths[@]}")

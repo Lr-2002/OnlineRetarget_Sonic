@@ -109,6 +109,7 @@
   "visual_validation": {
     "enabled": true,
     "every_steps": 20000,
+    "every_minutes": 60,
     "num_videos": 8,
     "duration_sec": 4.0,
     "wandb_upload": true,
@@ -147,6 +148,7 @@
       "algo.config.num_learning_iterations=1000000",
       "++callbacks.online_retarget_visual_val._target_=online_retarget.sonic_validation_callback.SonicVisualValidationCallback",
       "++callbacks.online_retarget_visual_val.every_steps=20000",
+      "++callbacks.online_retarget_visual_val.every_minutes=60",
       "++callbacks.online_retarget_visual_val.num_videos=8",
       "++callbacks.online_retarget_visual_val.duration_sec=4.0",
       "++callbacks.online_retarget_visual_val.target_fps=50",

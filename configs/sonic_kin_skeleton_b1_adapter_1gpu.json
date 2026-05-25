@@ -35,7 +35,9 @@
     "future_window_frames": 10,
     "future_step": 5,
     "motion_feature": "root_local_body_pos_plus_root_ori6d_plus_root_z",
-    "skeleton_feature": "anchor_frame_root_local_body_pos_plus_root_distance"
+    "skeleton_feature": "anchor_frame_root_local_body_pos_plus_root_distance",
+    "target_feature": "command_multi_future_nonflat_plus_root_pos_w_mf_plus_root_rot_w_mf",
+    "include_root_pos_target": true
   },
   "split": {
     "validation_ratio": 0.005,
@@ -73,6 +75,7 @@
   "visual_validation": {
     "enabled": true,
     "every_steps": 20000,
+    "every_minutes": 60,
     "num_videos": 8,
     "duration_sec": 4.0,
     "width": 640,

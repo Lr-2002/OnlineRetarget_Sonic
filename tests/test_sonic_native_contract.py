@@ -111,6 +111,16 @@ class SonicNativeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "visual validation callback"):
             validate_config(config, require_formal=True)
 
+    def test_formal_config_requires_hourly_visual_callback_cadence(self):
+        config = _base_formal_config()
+        config["visual_validation"].pop("every_minutes")
+        config["sonic_hydra"]["args"] = [
+            arg for arg in config["sonic_hydra"]["args"] if "every_minutes" not in arg
+        ]
+
+        with self.assertRaisesRegex(ContractError, "60 minute"):
+            validate_config(config, require_formal=True)
+
     def test_adapter_and_expert_configs_require_deterministic_route_wiring(self):
         config = _base_formal_config()
         config["variant"]["type"] = "adapter"
@@ -401,6 +411,7 @@ def _base_formal_config():
             "visual_validation": {
                 "enabled": True,
                 "every_steps": 20000,
+                "every_minutes": 60,
                 "num_videos": 8,
                 "duration_sec": 4.0,
                 "wandb_upload": True,
@@ -443,6 +454,7 @@ def _base_formal_config():
                     "algo.config.num_learning_iterations=1000000",
                     "++callbacks.online_retarget_visual_val._target_=online_retarget.sonic_validation_callback.SonicVisualValidationCallback",
                     "++callbacks.online_retarget_visual_val.every_steps=20000",
+                    "++callbacks.online_retarget_visual_val.every_minutes=60",
                     "++callbacks.online_retarget_visual_val.num_videos=8",
                     "++callbacks.online_retarget_visual_val.duration_sec=4.0",
                 ],

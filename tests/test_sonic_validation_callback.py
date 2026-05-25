@@ -29,6 +29,36 @@ class SonicValidationCallbackTests(unittest.TestCase):
         self.assertTrue(should_run_visual_validation(20000, 20000))
         self.assertFalse(should_run_visual_validation(20000, 20000, last_step=20000))
 
+    def test_visual_validation_can_run_on_wall_clock_interval(self):
+        self.assertFalse(
+            should_run_visual_validation(
+                499,
+                20000,
+                now=100.0,
+                every_seconds=3600.0,
+                last_time=99.0,
+            )
+        )
+        self.assertTrue(
+            should_run_visual_validation(
+                500,
+                20000,
+                now=3700.0,
+                every_seconds=3600.0,
+                last_time=99.0,
+            )
+        )
+        self.assertFalse(
+            should_run_visual_validation(
+                500,
+                20000,
+                last_step=500,
+                now=3700.0,
+                every_seconds=3600.0,
+                last_time=99.0,
+            )
+        )
+
     def test_rank_video_indices_split_global_clips(self):
         self.assertEqual(rank_video_indices(8, 0, 4), (0, 4))
         self.assertEqual(rank_video_indices(8, 1, 4), (1, 5))

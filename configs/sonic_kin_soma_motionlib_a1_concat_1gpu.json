@@ -34,7 +34,9 @@
     "future_window_frames": 10,
     "future_step": 5,
     "motion_feature": "soma_joints_multi_future_local_nonflat_plus_soma_root_ori_b_multi_future",
-    "skeleton_feature": "anchor_frame_soma_root_local_joint_positions_plus_joint_distances"
+    "skeleton_feature": "anchor_frame_soma_root_local_joint_positions_plus_joint_distances",
+    "target_feature": "command_multi_future_nonflat_plus_root_pos_w_mf_plus_root_rot_w_mf",
+    "include_root_pos_target": true
   },
   "split": {
     "validation_ratio": 0.005,
@@ -71,6 +73,7 @@
   "visual_validation": {
     "enabled": true,
     "every_steps": 250000,
+    "every_minutes": 60,
     "num_videos": 8,
     "duration_sec": 4.0,
     "width": 640,

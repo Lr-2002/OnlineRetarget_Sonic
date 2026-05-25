@@ -24,6 +24,7 @@ FORBIDDEN_SOURCE_FEATURES = ("body_pos_w", "body_quat_w")
 FORBIDDEN_DEPLOYABLE_SONIC_SOURCE_FEATURES = ("joint_pos_multi_future_wrist_for_soma",)
 TARGET_FPS = 50.0
 VISUAL_VALIDATION_EVERY_STEPS = 20_000
+VISUAL_VALIDATION_MAX_INTERVAL_MINUTES = 60.0
 VISUAL_VALIDATION_NUM_VIDEOS = 8
 VISUAL_VALIDATION_DURATION_SEC = 4.0
 FORMAL_MAX_STEPS = 1_000_000
@@ -204,6 +205,13 @@ def validate_config(
         _optional_int(visual.get("every_steps")) == VISUAL_VALIDATION_EVERY_STEPS,
         errors,
         "visual_validation.every_steps must be 20000",
+    )
+    wall_clock_minutes = _visual_validation_wall_clock_minutes(visual)
+    _require(
+        wall_clock_minutes is not None
+        and 0 < wall_clock_minutes <= VISUAL_VALIDATION_MAX_INTERVAL_MINUTES,
+        errors,
+        "visual_validation.every_minutes/every_seconds must request <=60 minute cadence",
     )
     _require(
         _optional_int(visual.get("num_videos")) == VISUAL_VALIDATION_NUM_VIDEOS,
@@ -455,6 +463,16 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _visual_validation_wall_clock_minutes(visual: Mapping[str, Any]) -> float | None:
+    minutes = _optional_float(visual.get("every_minutes"))
+    if minutes is not None:
+        return minutes
+    seconds = _optional_float(visual.get("every_seconds"))
+    if seconds is not None:
+        return seconds / 60.0
+    return None
+
+
 def _require(condition: Any, errors: list[str], message: str) -> None:
     if not condition:
         errors.append(message)
@@ -564,6 +582,11 @@ def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -
         f"every_steps={VISUAL_VALIDATION_EVERY_STEPS}" in hydra_text,
         errors,
         "visual validation callback must run every 20000 steps",
+    )
+    _require(
+        "every_minutes=60" in hydra_text or "every_seconds=3600" in hydra_text,
+        errors,
+        "visual validation callback must also run on a <=60 minute wall-clock cadence",
     )
     _require(
         f"num_videos={VISUAL_VALIDATION_NUM_VIDEOS}" in hydra_text,

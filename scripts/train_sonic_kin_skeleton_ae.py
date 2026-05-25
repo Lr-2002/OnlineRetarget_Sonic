@@ -2,10 +2,12 @@
 """Train skeleton-conditioned kin-only retargeting MLPs.
 
 This is a supervised, simulator-free training lane.  It predicts the same
-kinematic target fields used by SONIC's ``g1_kin`` decoder:
+kinematic target fields used by SONIC's ``g1_kin`` decoder, with an opt-in root
+pose target for OnlineRetarget diagnostics:
 
 * ``command_multi_future_nonflat``: 29 joint positions + 29 joint velocities
-* ``motion_anchor_ori_b_mf_nonflat``: 6D root orientation per future frame
+* ``root_pos_w_mf``: G1 root position per future frame when enabled
+* ``root_rot_w_mf`` or legacy ``motion_anchor_ori_b_mf_nonflat``: 6D root orientation
 """
 
 from __future__ import annotations
@@ -320,8 +322,48 @@ def relative_root_rot6d(root_quat: np.ndarray, frame_indices: np.ndarray, idx: n
     base = quat_normalize(root_quat[frame_indices])
     refs = quat_normalize(root_quat[idx])
     rel = quat_mul(quat_conjugate(base[:, None, :]), refs)
-    mat = quat_to_matrix(rel)
-    return mat[..., :, :2].reshape(frame_indices.shape[0], idx.shape[1], 6)
+    return quat_to_rot6d(rel).reshape(frame_indices.shape[0], idx.shape[1], 6)
+
+
+def quat_to_rot6d(root_quat: np.ndarray) -> np.ndarray:
+    mat = quat_to_matrix(root_quat)
+    return mat[..., :, :2].reshape(*mat.shape[:-2], 6)
+
+
+def include_root_pos_target(config: Mapping[str, Any]) -> bool:
+    features = config.get("features", {})
+    if not isinstance(features, Mapping):
+        return False
+    explicit = features.get("include_root_pos_target")
+    if explicit is not None:
+        return bool(explicit)
+    target_text = " ".join(
+        str(features.get(key, ""))
+        for key in ("target_feature", "target_features", "target_pose_feature")
+    )
+    return "root_pos" in target_text
+
+
+def root_pose_target_dim(config: Mapping[str, Any], window: int) -> int:
+    per_frame = 9 if include_root_pos_target(config) else 6
+    return int(window) * per_frame
+
+
+def target_command_dim(target_dim: int, window: int, config: Mapping[str, Any]) -> int:
+    return int(target_dim) - root_pose_target_dim(config, window)
+
+
+def visual_validation_interval_seconds(config: Mapping[str, Any]) -> float | None:
+    cfg = config.get("visual_validation", {})
+    if not isinstance(cfg, Mapping):
+        return None
+    every_seconds = cfg.get("every_seconds")
+    if every_seconds not in ("", None):
+        return float(every_seconds)
+    every_minutes = cfg.get("every_minutes")
+    if every_minutes not in ("", None):
+        return float(every_minutes) * 60.0
+    return None
 
 
 def build_features(
@@ -329,6 +371,7 @@ def build_features(
     frame_indices: np.ndarray,
     window: int,
     step: int,
+    config: Mapping[str, Any] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     joint_pos = arrays["joint_pos"]
     joint_vel = arrays["joint_vel"]
@@ -342,7 +385,8 @@ def build_features(
     root_rot0_t = np.swapaxes(quat_to_matrix(root_quat0), -1, -2)
     rel_body_pos = body_pos[idx] - root_pos0[:, None, None, :]
     local_body_pos = np.einsum("nij,nwbj->nwbi", root_rot0_t, rel_body_pos)
-    root_ori6d = relative_root_rot6d(body_quat[:, 0], frame_indices, idx)
+    root_quat = body_quat[:, 0]
+    root_ori6d = relative_root_rot6d(root_quat, frame_indices, idx)
     root_z_rel = (body_pos[idx, 0, 2] - root_pos0[:, None, 2])[..., None]
 
     motion = np.concatenate(
@@ -362,6 +406,23 @@ def build_features(
     )
 
     command = np.concatenate([joint_pos[idx], joint_vel[idx]], axis=-1)
+    if config is not None and include_root_pos_target(config):
+        target_root_pos = body_pos[idx, 0]
+        target_root_ori6d = quat_to_rot6d(root_quat[idx])
+        target = np.concatenate(
+            [
+                command.reshape(frame_indices.shape[0], -1),
+                target_root_pos.reshape(frame_indices.shape[0], -1),
+                target_root_ori6d.reshape(frame_indices.shape[0], -1),
+            ],
+            axis=-1,
+        )
+        return (
+            motion.astype(np.float32, copy=False),
+            skeleton.astype(np.float32, copy=False),
+            target.astype(np.float32, copy=False),
+        )
+
     target = np.concatenate(
         [command.reshape(frame_indices.shape[0], -1), root_ori6d.reshape(frame_indices.shape[0], -1)],
         axis=-1,
@@ -420,18 +481,23 @@ def build_soma_motionlib_features(
     frame_indices: np.ndarray,
     window: int,
     step: int,
+    config: Mapping[str, Any] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     soma_joints = arrays["soma_joints"]
     soma_root_quat = quat_normalize(arrays["soma_root_quat"])
     dof = arrays["joint_pos"]
     joint_vel = arrays["joint_vel"]
     root_rot = quat_normalize(arrays["root_rot"])
+    root_pos = arrays.get("root_pos")
+    if root_pos is None:
+        root_pos = np.zeros((dof.shape[0], 3), dtype=np.float32)
     total_frames = min(
         soma_joints.shape[0],
         soma_root_quat.shape[0],
         dof.shape[0],
         joint_vel.shape[0],
         root_rot.shape[0],
+        root_pos.shape[0],
     )
     idx = future_indices(frame_indices, total_frames, window, step)
 
@@ -454,6 +520,23 @@ def build_soma_motionlib_features(
     )
 
     command = np.concatenate([dof[idx], joint_vel[idx]], axis=-1)
+    if config is not None and include_root_pos_target(config):
+        target_root_pos = root_pos[idx]
+        target_root_ori6d = quat_to_rot6d(root_rot[idx])
+        target = np.concatenate(
+            [
+                command.reshape(frame_indices.shape[0], -1),
+                target_root_pos.reshape(frame_indices.shape[0], -1),
+                target_root_ori6d.reshape(frame_indices.shape[0], -1),
+            ],
+            axis=-1,
+        )
+        return (
+            motion.astype(np.float32, copy=False),
+            skeleton.astype(np.float32, copy=False),
+            target.astype(np.float32, copy=False),
+        )
+
     target_root_ori6d = relative_root_rot6d(root_rot, frame_indices, idx)
     target = np.concatenate(
         [command.reshape(frame_indices.shape[0], -1), target_root_ori6d.reshape(frame_indices.shape[0], -1)],
@@ -505,9 +588,13 @@ def load_soma_motionlib_arrays(row: Mapping[str, Any], config: Mapping[str, Any]
 
     dof = np.asarray(robot["dof"], dtype=np.float32)
     root_rot = robot_root_rot_to_wxyz(np.asarray(robot["root_rot"], dtype=np.float32), config)
+    root_pos = np.asarray(
+        robot.get("root_trans_offset", np.zeros((dof.shape[0], 3), dtype=np.float32)),
+        dtype=np.float32,
+    )
     robot_fps = float(robot.get("fps") or input_cfg.get("target_fps") or 50.0)
     soma_fps = float(soma.get("fps") or input_cfg.get("source_fps") or robot_fps)
-    target_len = min(dof.shape[0], root_rot.shape[0])
+    target_len = min(dof.shape[0], root_rot.shape[0], root_pos.shape[0])
     soma_joints = resample_soma_array(
         np.asarray(soma["soma_joints"], dtype=np.float32),
         soma_fps,
@@ -524,11 +611,13 @@ def load_soma_motionlib_arrays(row: Mapping[str, Any], config: Mapping[str, Any]
     )
     dof = dof[:target_len]
     root_rot = root_rot[:target_len]
+    root_pos = root_pos[:target_len]
     return {
         "soma_joints": soma_joints,
         "soma_root_quat": soma_root_quat,
         "joint_pos": dof,
         "joint_vel": finite_difference_velocity(dof, robot_fps),
+        "root_pos": root_pos,
         "root_rot": root_rot,
         "joint_names": list(soma.get("joint_names", SOMA_JOINT_NAMES)),
         "fps": np.asarray(robot_fps, dtype=np.float32),
@@ -834,6 +923,7 @@ class KinWindowDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]])
                 arrays["soma_root_quat"].shape[0],
                 arrays["joint_pos"].shape[0],
                 arrays["joint_vel"].shape[0],
+                arrays["root_pos"].shape[0],
                 arrays["root_rot"].shape[0],
             )
         else:
@@ -850,9 +940,21 @@ class KinWindowDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]])
             stop = total_frames
         frame_indices = np.arange(start, stop, self.frame_stride, dtype=np.int64)
         if self.input_format == "soma_motionlib":
-            motion, skeleton, target = build_soma_motionlib_features(arrays, frame_indices, self.window, self.step)
+            motion, skeleton, target = build_soma_motionlib_features(
+                arrays,
+                frame_indices,
+                self.window,
+                self.step,
+                self.config,
+            )
         else:
-            motion, skeleton, target = build_features(arrays, frame_indices, self.window, self.step)
+            motion, skeleton, target = build_features(
+                arrays,
+                frame_indices,
+                self.window,
+                self.step,
+                self.config,
+            )
         return torch.from_numpy(motion), torch.from_numpy(skeleton), torch.from_numpy(target)
 
 
@@ -1067,6 +1169,8 @@ def loss_and_metrics(
     stats: dict[str, torch.Tensor],
     command_dim: int,
     joint_dim: int,
+    root_pose_dim: int,
+    root_pos_enabled: bool,
     command_weight: float,
     anchor_weight: float,
 ) -> tuple[torch.Tensor, dict[str, float]]:
@@ -1087,6 +1191,13 @@ def loss_and_metrics(
         joint_error = command_raw.reshape(command_raw.shape[0], -1, command_frame_dim)
         joint_pos_error = joint_error[..., :joint_dim]
         joint_vel_error = joint_error[..., joint_dim:]
+        root_pos_rmse = float("nan")
+        root_rot6d_error = anchor_raw.reshape(anchor_raw.shape[0], -1, 6)
+        if root_pos_enabled:
+            window = root_pose_dim // 9
+            root_pose = anchor_raw.reshape(anchor_raw.shape[0], window, 9)
+            root_pos_rmse = float(torch.sqrt(torch.mean(root_pose[..., :3] ** 2)).item())
+            root_rot6d_error = root_pose[..., 3:]
         metrics = {
             "loss": float(loss.detach().item()),
             "command_mse_norm": float(command_loss.detach().item()),
@@ -1094,6 +1205,8 @@ def loss_and_metrics(
             "joint_pos_rmse_raw": float(torch.sqrt(torch.mean(joint_pos_error**2)).item()),
             "joint_vel_rmse_raw": float(torch.sqrt(torch.mean(joint_vel_error**2)).item()),
             "anchor_rmse_raw": float(torch.sqrt(torch.mean(anchor_raw**2)).item()),
+            "root_pos_rmse_raw": root_pos_rmse,
+            "root_rot6d_rmse_raw": float(torch.sqrt(torch.mean(root_rot6d_error**2)).item()),
         }
     return loss, metrics
 
@@ -1106,6 +1219,7 @@ def validate(
     config: dict[str, Any],
     command_dim: int,
     joint_dim: int,
+    root_pose_dim: int,
 ) -> dict[str, float]:
     model.eval()
     rows = []
@@ -1128,6 +1242,8 @@ def validate(
                 stats,
                 command_dim,
                 joint_dim,
+                root_pose_dim,
+                include_root_pos_target(config),
                 command_weight,
                 anchor_weight,
             )
@@ -1138,12 +1254,23 @@ def validate(
     return {f"validation/{key}": float(np.mean([row[key] for row in rows])) for key in rows[0]}
 
 
-def visual_validation_due(config: dict[str, Any], step: int) -> bool:
+def visual_validation_due(
+    config: dict[str, Any],
+    step: int,
+    *,
+    now: float | None = None,
+    last_time: float | None = None,
+) -> bool:
     cfg = config.get("visual_validation", {})
     if not cfg.get("enabled", False):
         return False
     every_steps = int(cfg.get("every_steps", 0))
-    return every_steps > 0 and step > 0 and step % every_steps == 0
+    if every_steps > 0 and step > 0 and step % every_steps == 0:
+        return True
+    every_seconds = visual_validation_interval_seconds(config)
+    if every_seconds is None or every_seconds <= 0 or now is None or last_time is None:
+        return False
+    return step > 0 and now - last_time >= every_seconds
 
 
 def run_visual_validation(
@@ -1429,7 +1556,7 @@ def _render_visual_validation_clip(
         key_color=(139, 91, 41),
     )
 
-    predicted_joint_pos = _predict_visual_joint_pos(
+    prediction = _predict_visual_g1_state(
         model=model,
         arrays=arrays,
         frame_count=frame_count,
@@ -1437,11 +1564,14 @@ def _render_visual_validation_clip(
         device=device,
         config=config,
         joint_dim=joint_dim,
+        fallback_root_pos=arrays["body_pos_w"][:frame_count, 0],
+        fallback_root_quat=arrays["body_quat_w"][:frame_count, 0],
     )
     inference_frames = _g1_prediction_frames(
-        predicted_joint_pos,
-        root_pos=arrays["body_pos_w"][:frame_count, 0],
-        root_quat=arrays["body_quat_w"][:frame_count, 0],
+        prediction["joint_pos"],
+        root_pos=prediction["root_pos"],
+        root_quat=prediction.get("root_quat"),
+        root_euler=prediction.get("root_euler"),
         g1_model=g1_model,
         render_deps=render_deps,
     )
@@ -1581,7 +1711,7 @@ def _render_motionlib_visual_validation_clip(
         key_color=(139, 91, 41),
     )
 
-    predicted_joint_pos = _predict_motionlib_visual_joint_pos(
+    prediction = _predict_motionlib_visual_g1_state(
         model=model,
         arrays=arrays,
         frame_count=frame_count,
@@ -1589,11 +1719,14 @@ def _render_motionlib_visual_validation_clip(
         device=device,
         config=config,
         joint_dim=joint_dim,
+        fallback_root_pos=root_pos,
+        fallback_root_quat=root_quat,
     )
     inference_frames = _g1_prediction_frames(
-        predicted_joint_pos,
-        root_pos=root_pos,
-        root_quat=root_quat,
+        prediction["joint_pos"],
+        root_pos=prediction["root_pos"],
+        root_quat=prediction.get("root_quat"),
+        root_euler=prediction.get("root_euler"),
         g1_model=g1_model,
         render_deps=render_deps,
     )
@@ -1723,7 +1856,7 @@ def _time_align_frame_maps(
     return [frames[index] for index in indices], indices
 
 
-def _predict_visual_joint_pos(
+def _predict_visual_g1_state(
     *,
     model: nn.Module,
     arrays: Mapping[str, np.ndarray],
@@ -1732,25 +1865,31 @@ def _predict_visual_joint_pos(
     device: torch.device,
     config: dict[str, Any],
     joint_dim: int,
-) -> np.ndarray:
+    fallback_root_pos: np.ndarray,
+    fallback_root_quat: np.ndarray,
+) -> dict[str, np.ndarray]:
     frame_indices = np.arange(frame_count, dtype=np.int64)
     motion, skeleton, _ = build_features(
         dict(arrays),
         frame_indices,
         int(config["features"]["future_window_frames"]),
         int(config["features"]["future_step"]),
+        config,
     )
-    with torch.no_grad():
-        motion_t = torch.from_numpy(motion).to(device)
-        skeleton_t = torch.from_numpy(skeleton).to(device)
-        motion_n = (motion_t - stats["motion_mean"]) / stats["motion_std"]
-        skeleton_n = (skeleton_t - stats["skeleton_mean"]) / stats["skeleton_std"]
-        pred_n = model(motion_n, skeleton_n)
-        pred_raw = pred_n * stats["target_std"] + stats["target_mean"]
-    return pred_raw[:, :joint_dim].detach().cpu().numpy().astype(np.float32, copy=False)
+    return _predict_g1_state_from_features(
+        model=model,
+        motion=motion,
+        skeleton=skeleton,
+        stats=stats,
+        device=device,
+        config=config,
+        joint_dim=joint_dim,
+        fallback_root_pos=fallback_root_pos,
+        fallback_root_quat=fallback_root_quat,
+    )
 
 
-def _predict_motionlib_visual_joint_pos(
+def _predict_motionlib_visual_g1_state(
     *,
     model: nn.Module,
     arrays: Mapping[str, np.ndarray],
@@ -1759,14 +1898,42 @@ def _predict_motionlib_visual_joint_pos(
     device: torch.device,
     config: dict[str, Any],
     joint_dim: int,
-) -> np.ndarray:
+    fallback_root_pos: np.ndarray,
+    fallback_root_quat: np.ndarray,
+) -> dict[str, np.ndarray]:
     frame_indices = np.arange(frame_count, dtype=np.int64)
     motion, skeleton, _ = build_soma_motionlib_features(
         dict(arrays),
         frame_indices,
         int(config["features"]["future_window_frames"]),
         int(config["features"]["future_step"]),
+        config,
     )
+    return _predict_g1_state_from_features(
+        model=model,
+        motion=motion,
+        skeleton=skeleton,
+        stats=stats,
+        device=device,
+        config=config,
+        joint_dim=joint_dim,
+        fallback_root_pos=fallback_root_pos,
+        fallback_root_quat=fallback_root_quat,
+    )
+
+
+def _predict_g1_state_from_features(
+    *,
+    model: nn.Module,
+    motion: np.ndarray,
+    skeleton: np.ndarray,
+    stats: dict[str, torch.Tensor],
+    device: torch.device,
+    config: dict[str, Any],
+    joint_dim: int,
+    fallback_root_pos: np.ndarray,
+    fallback_root_quat: np.ndarray,
+) -> dict[str, np.ndarray]:
     with torch.no_grad():
         motion_t = torch.from_numpy(motion).to(device)
         skeleton_t = torch.from_numpy(skeleton).to(device)
@@ -1774,7 +1941,28 @@ def _predict_motionlib_visual_joint_pos(
         skeleton_n = (skeleton_t - stats["skeleton_mean"]) / stats["skeleton_std"]
         pred_n = model(motion_n, skeleton_n)
         pred_raw = pred_n * stats["target_std"] + stats["target_mean"]
-    return pred_raw[:, :joint_dim].detach().cpu().numpy().astype(np.float32, copy=False)
+    pred = pred_raw.detach().cpu().numpy().astype(np.float32, copy=False)
+    state = {
+        "joint_pos": pred[:, :joint_dim],
+        "root_pos": fallback_root_pos.astype(np.float32, copy=False),
+        "root_quat": fallback_root_quat.astype(np.float32, copy=False),
+    }
+    if include_root_pos_target(config):
+        window = int(config["features"]["future_window_frames"])
+        command_dim = window * joint_dim * 2
+        root_pos = pred[:, command_dim : command_dim + window * 3].reshape(pred.shape[0], window, 3)
+        root_rot_start = command_dim + window * 3
+        root_rot6d = pred[:, root_rot_start : root_rot_start + window * 6].reshape(
+            pred.shape[0],
+            window,
+            6,
+        )
+        state = {
+            "joint_pos": pred[:, :joint_dim],
+            "root_pos": root_pos[:, 0].astype(np.float32, copy=False),
+            "root_euler": _rot6d_to_euler_xyz_batch(root_rot6d[:, 0]),
+        }
+    return state
 
 
 def _load_motionlib_robot_root(row: Mapping[str, Any], config: Mapping[str, Any]) -> dict[str, np.ndarray]:
@@ -1922,19 +2110,24 @@ def _g1_prediction_frames(
     predicted_joint_pos: np.ndarray,
     *,
     root_pos: np.ndarray,
-    root_quat: np.ndarray,
+    root_quat: np.ndarray | None = None,
+    root_euler: np.ndarray | None = None,
     g1_model: Any,
     render_deps: Mapping[str, Any],
 ) -> list[dict[str, tuple[float, float, float]]]:
     frames: list[dict[str, tuple[float, float, float]]] = []
     ignored = set(render_deps["G1_CAPSULE_IGNORE_BODIES"])
     fk = render_deps["g1_fk_body_positions"]
-    for joints, root, quat in zip(predicted_joint_pos, root_pos, root_quat):
+    if root_euler is None:
+        if root_quat is None:
+            raise ValueError("root_quat or root_euler is required")
+        root_euler = np.asarray([_quat_wxyz_to_euler_xyz(quat) for quat in root_quat], dtype=np.float32)
+    for joints, root, euler in zip(predicted_joint_pos, root_pos, root_euler):
         body_points = fk(
             g1_model,
             [float(value) for value in joints],
             root_position=[float(value) for value in root],
-            root_euler=_quat_wxyz_to_euler_xyz(quat),
+            root_euler=[float(value) for value in euler],
             include_empty_body_origin=True,
         )
         frame: dict[str, tuple[float, float, float]] = {}
@@ -1968,8 +2161,32 @@ def _centroid(points: Sequence[Sequence[float]]) -> tuple[float, float, float]:
     )
 
 
+def _rot6d_to_euler_xyz_batch(rot6d: np.ndarray) -> np.ndarray:
+    matrix = _rot6d_to_matrix(rot6d)
+    return np.asarray([_matrix_to_euler_xyz(item) for item in matrix], dtype=np.float32)
+
+
+def _rot6d_to_matrix(rot6d: np.ndarray) -> np.ndarray:
+    values = np.asarray(rot6d, dtype=np.float64).reshape(-1, 6)
+    a1 = values[:, [0, 2, 4]]
+    a2 = values[:, [1, 3, 5]]
+    b1 = _normalize_vectors(a1)
+    b2 = _normalize_vectors(a2 - np.sum(b1 * a2, axis=-1, keepdims=True) * b1)
+    b3 = np.cross(b1, b2)
+    return np.stack([b1, b2, b3], axis=-1)
+
+
+def _normalize_vectors(values: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(values, axis=-1, keepdims=True)
+    return values / np.where(norm < 1e-8, 1.0, norm)
+
+
 def _quat_wxyz_to_euler_xyz(quat: Sequence[float]) -> list[float]:
     matrix = quat_to_matrix(np.asarray(quat, dtype=np.float64).reshape(1, 4))[0]
+    return _matrix_to_euler_xyz(matrix)
+
+
+def _matrix_to_euler_xyz(matrix: np.ndarray) -> list[float]:
     sy = float(np.clip(matrix[0, 2], -1.0, 1.0))
     y = math.asin(sy)
     cy = math.cos(y)
@@ -2085,6 +2302,8 @@ def write_loss_header(path: Path) -> None:
                 "train_joint_pos_rmse_raw",
                 "train_joint_vel_rmse_raw",
                 "train_anchor_rmse_raw",
+                "train_root_pos_rmse_raw",
+                "train_root_rot6d_rmse_raw",
             ]
         )
 
@@ -2102,6 +2321,8 @@ def append_loss_row(path: Path, step: int, elapsed: float, metrics: dict[str, fl
                 f"{metrics['joint_pos_rmse_raw']:.10f}",
                 f"{metrics['joint_vel_rmse_raw']:.10f}",
                 f"{metrics['anchor_rmse_raw']:.10f}",
+                f"{metrics.get('root_pos_rmse_raw', float('nan')):.10f}",
+                f"{metrics.get('root_rot6d_rmse_raw', float('nan')):.10f}",
             ]
         )
 
@@ -2301,11 +2522,11 @@ def main() -> None:
     motion_dim = int(stats["motion_mean"].numel())
     skeleton_dim = int(stats["skeleton_mean"].numel())
     target_dim = int(stats["target_mean"].numel())
-    anchor_dim = window * 6
-    command_dim = target_dim - anchor_dim
+    root_pose_dim = root_pose_target_dim(config, window)
+    command_dim = target_command_dim(target_dim, window, config)
     if command_dim <= 0 or command_dim % (window * 2) != 0:
         raise ValueError(
-            f"target_dim={target_dim} is incompatible with window={window} and root 6D anchor target"
+            f"target_dim={target_dim} is incompatible with window={window} and root pose target"
         )
     joint_dim = command_dim // (window * 2)
     model = make_model(motion_dim, skeleton_dim, target_dim, config).to(device)
@@ -2365,6 +2586,7 @@ def main() -> None:
     rng = torch.Generator(device=device)
     rng.manual_seed(seed + 20260520)
     start = time.perf_counter()
+    last_visual_validation_time = start
     step = 0
 
     print(
@@ -2408,6 +2630,8 @@ def main() -> None:
                     stats,
                     command_dim,
                     joint_dim,
+                    root_pose_dim,
+                    include_root_pos_target(config),
                     command_weight,
                     anchor_weight,
                 )
@@ -2430,13 +2654,23 @@ def main() -> None:
                     wandb_run.log(log_payload, step=step)
 
             if step % validate_every == 0 or step == 1:
-                val_metrics = validate(model, val_loader, stats, device, config, command_dim, joint_dim)
+                val_metrics = validate(
+                    model,
+                    val_loader,
+                    stats,
+                    device,
+                    config,
+                    command_dim,
+                    joint_dim,
+                    root_pose_dim,
+                )
                 if val_metrics:
                     print(json.dumps({"event": "validation", "step": step, **val_metrics}, sort_keys=True), flush=True)
                     if wandb_run is not None:
                         wandb_run.log(val_metrics, step=step)
 
-            if visual_validation_due(config, step):
+            now = time.perf_counter()
+            if visual_validation_due(config, step, now=now, last_time=last_visual_validation_time):
                 try:
                     visual_metrics = run_visual_validation(
                         model=model,
@@ -2468,6 +2702,7 @@ def main() -> None:
                     )
                 if wandb_run is not None and visual_metrics:
                     wandb_run.log(visual_metrics, step=step)
+                last_visual_validation_time = now
 
             if step % checkpoint_every == 0 or step == 1:
                 save_checkpoint(output_dir, model, optimizer, step, metrics, keep_last)
