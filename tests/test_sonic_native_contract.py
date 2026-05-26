@@ -121,6 +121,17 @@ class SonicNativeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "60 minute"):
             validate_config(config, require_formal=True)
 
+    def test_formal_config_requires_motionlib_tracking_body_subset(self):
+        config = _base_formal_config()
+        config["sonic_hydra"]["args"] = [
+            arg
+            for arg in config["sonic_hydra"]["args"]
+            if "motion_lib_cfg.body_names" not in arg
+        ]
+
+        with self.assertRaisesRegex(ContractError, "motion_lib_cfg.body_names"):
+            validate_config(config, require_formal=True)
+
     def test_adapter_and_expert_configs_require_deterministic_route_wiring(self):
         config = _base_formal_config()
         config["variant"]["type"] = "adapter"
@@ -432,6 +443,7 @@ def _base_formal_config():
                     "++manager_env.observations.tokenizer.soma_morphology.params.registry_csv=/tmp/skeleton_registry.csv",
                     "++manager_env.commands.motion.motion_lib_cfg.motion_file=/tmp/robot_motionlib",
                     "++manager_env.commands.motion.motion_lib_cfg.soma_motion_file=/tmp/soma_motionlib",
+                    "++manager_env.commands.motion.motion_lib_cfg.body_names=[pelvis,left_hip_roll_link,left_knee_link,left_ankle_roll_link,right_hip_roll_link,right_knee_link,right_ankle_roll_link,torso_link,left_shoulder_roll_link,left_elbow_link,left_wrist_yaw_link,right_shoulder_roll_link,right_elbow_link,right_wrist_yaw_link]",
                     "++manager_env.commands.motion.encoder_sample_probs.g1=0.0",
                     "++manager_env.commands.motion.encoder_sample_probs.teleop=0.0",
                     "++manager_env.commands.motion.encoder_sample_probs.smpl=0.0",

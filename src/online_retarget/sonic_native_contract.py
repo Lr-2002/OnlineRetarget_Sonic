@@ -30,6 +30,22 @@ VISUAL_VALIDATION_DURATION_SEC = 4.0
 FORMAL_MAX_STEPS = 1_000_000
 MOTION_FILE_SENTINELS = ("dummy", "zeros")
 ACTOR_UID_PATTERN = re.compile(r"A\d{3,}")
+TRACKING_BODY_NAMES = (
+    "pelvis",
+    "left_hip_roll_link",
+    "left_knee_link",
+    "left_ankle_roll_link",
+    "right_hip_roll_link",
+    "right_knee_link",
+    "right_ankle_roll_link",
+    "torso_link",
+    "left_shoulder_roll_link",
+    "left_elbow_link",
+    "left_wrist_yaw_link",
+    "right_shoulder_roll_link",
+    "right_elbow_link",
+    "right_wrist_yaw_link",
+)
 
 
 class ContractError(ValueError):
@@ -629,6 +645,15 @@ def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -
         soma_sample_prob is not None and soma_sample_prob > 0.0,
         errors,
         "formal retarget source sampling must enable encoder_sample_probs.soma",
+    )
+    motion_lib_body_names = _parse_hydra_list(
+        hydra.get("manager_env.commands.motion.motion_lib_cfg.body_names")
+    )
+    _require(
+        motion_lib_body_names == TRACKING_BODY_NAMES,
+        errors,
+        "formal retarget configs must set motion_lib_cfg.body_names to the 14 "
+        "SONIC tracking bodies",
     )
     _require(
         "reencode_smpl_g1_recon=false" in hydra_text,
