@@ -35,6 +35,10 @@ FORMAL_RUNTIME_BACKBONE = (
 FORMAL_KINEMATIC_ACTION_OUTPUT = "command_multi_future_nonflat"
 FORBIDDEN_FORMAL_DECODERS = ("g1_dyn",)
 FORBIDDEN_FORMAL_LOSS_TOKENS = ("action", "dynamics")
+FORMAL_FORBIDDEN_DECODER_DELETE_PATHS = tuple(
+    f"algo.config.actor.backbone.decoders.{decoder}"
+    for decoder in FORBIDDEN_FORMAL_DECODERS
+)
 MOTION_FILE_SENTINELS = ("dummy", "zeros")
 ACTOR_UID_PATTERN = re.compile(r"A\d{3,}")
 TRACKING_BODY_NAMES = (
@@ -212,10 +216,13 @@ def validate_config(
         f"decoder targets must be exactly [{FORMAL_TARGET_DECODER}]",
     )
     for decoder in FORBIDDEN_FORMAL_DECODERS:
-        config_text = _all_string_values(config).lower()
-        if decoder in decoder_targets or _contains_token(config_text, decoder):
+        forbidden_refs = list(_forbidden_decoder_refs(config, decoder))
+        if decoder in decoder_targets:
+            forbidden_refs.append("decoder_targets")
+        if forbidden_refs:
             errors.append(
-                f"{decoder} is forbidden in formal kin-only retarget configs"
+                f"{decoder} is forbidden in formal kin-only retarget configs: "
+                + ", ".join(dict.fromkeys(forbidden_refs))
             )
     forbidden_target_refs = _forbidden_action_target_refs(config)
     if forbidden_target_refs:
@@ -327,6 +334,91 @@ def validate_file(
         require_formal=require_formal,
         check_paths=check_paths,
     )
+
+
+def validate_resolved_runtime_file(path: str | Path) -> None:
+    """Reject forbidden evidence in a resolved Hydra runtime config file."""
+
+    validate_resolved_runtime_config(load_config(path), path=path)
+
+
+def validate_resolved_runtime_config(
+    config: Mapping[str, Any],
+    *,
+    path: str | Path | None = None,
+) -> None:
+    """Validate a composed Hydra config emitted by the runtime.
+
+    Formal JSON configs only prove the launcher intends a kin-only run.  The
+    resolved Hydra ``config.yaml`` is the evidence MLOps inspects after launch,
+    so reject inherited decoder blocks there as a separate contract surface.
+    """
+
+    errors: list[str] = []
+    online_retarget = _mapping(config.get("online_retarget"))
+    _require(
+        online_retarget.get("contract") == FORMAL_TRAINING_LANE,
+        errors,
+        f"online_retarget.contract must be {FORMAL_TRAINING_LANE}",
+    )
+    backbone = _mapping(_nested_get(config, ("algo", "config", "actor", "backbone")))
+    _require(
+        backbone.get("_target_") == FORMAL_RUNTIME_BACKBONE,
+        errors,
+        "resolved runtime config must use the OnlineRetarget kinematic action backbone",
+    )
+    active_encoders = _parse_hydra_list(backbone.get("active_encoders"))
+    _require(
+        active_encoders == ("soma",),
+        errors,
+        "resolved runtime config must keep active_encoders=[soma]",
+    )
+    active_decoders = _parse_hydra_list(backbone.get("active_decoders"))
+    _require(
+        active_decoders == (FORMAL_TARGET_DECODER,),
+        errors,
+        f"resolved runtime config must keep active_decoders=[{FORMAL_TARGET_DECODER}]",
+    )
+    decoders = _mapping(backbone.get("decoders"))
+    for decoder in FORBIDDEN_FORMAL_DECODERS:
+        if decoder in decoders:
+            errors.append(
+                f"resolved runtime config must not contain "
+                f"algo.config.actor.backbone.decoders.{decoder}"
+            )
+    _require(
+        _optional_bool(
+            _nested_get(
+                config,
+                (
+                    "callbacks",
+                    "online_retarget_visual_val",
+                    "use_evaluation_mode",
+                ),
+            )
+        )
+        is False,
+        errors,
+        "resolved runtime config must keep readable validation out of Sonic "
+        "evaluation-mode motion loading",
+    )
+    _require(
+        _optional_bool(
+            _nested_get(
+                config,
+                (
+                    "callbacks",
+                    "online_retarget_visual_val",
+                    "empty_cuda_cache",
+                ),
+            )
+        )
+        is True,
+        errors,
+        "resolved runtime config must clear cached CUDA blocks around visual validation",
+    )
+    if errors:
+        raise ContractError(_format_errors(path, errors))
 
 
 def result_to_dict(result: ConfigValidationResult) -> dict[str, Any]:
@@ -477,6 +569,26 @@ def _forbidden_action_target_refs(config: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(refs))
 
 
+def _forbidden_decoder_refs(config: Mapping[str, Any], decoder: str) -> Iterable[str]:
+    for path, value in _iter_strings(config):
+        if not _contains_token(value.lower(), decoder):
+            continue
+        if _is_allowed_hydra_delete_arg(path, value):
+            continue
+        yield f"{'.'.join(path)}={value!r}"
+
+
+def _is_allowed_hydra_delete_arg(path: Sequence[str], value: str) -> bool:
+    if len(path) < 3 or path[0] != "sonic_hydra" or path[1] != "args":
+        return False
+    stripped = value.strip()
+    return (
+        stripped.startswith("~")
+        and "=" not in stripped
+        and stripped[1:] in FORMAL_FORBIDDEN_DECODER_DELETE_PATHS
+    )
+
+
 def _forbidden_action_dynamics_loss_refs(config: Mapping[str, Any]) -> tuple[str, ...]:
     refs: list[str] = []
     for path, value in _iter_strings(_mapping(config.get("losses")), ("losses",)):
@@ -547,6 +659,20 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value in {"", None}:
+        return None
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes"}:
+            return True
+        if lowered in {"false", "0", "no"}:
+            return False
+    return None
 
 
 def _visual_validation_wall_clock_minutes(visual: Mapping[str, Any]) -> float | None:
@@ -645,8 +771,22 @@ def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -
         "sonic_hydra.args must inject soma_morphology into the SONIC tokenizer/encoder",
     )
     for decoder in FORBIDDEN_FORMAL_DECODERS:
-        if _contains_token(hydra_text, decoder):
-            errors.append(f"sonic_hydra.args must not reference forbidden decoder {decoder}")
+        forbidden_hydra_refs = [
+            value
+            for path, value in _iter_strings(sonic_hydra.get("args"), ("sonic_hydra", "args"))
+            if _contains_token(value, decoder) and not _is_allowed_hydra_delete_arg(path, value)
+        ]
+        if forbidden_hydra_refs:
+            errors.append(
+                f"sonic_hydra.args must not reference forbidden decoder {decoder}: "
+                + ", ".join(forbidden_hydra_refs)
+            )
+        delete_key = f"algo.config.actor.backbone.decoders.{decoder}"
+        _require(
+            delete_key in hydra_deletes,
+            errors,
+            f"formal retarget runs must delete inherited decoder {delete_key}",
+        )
     if "g1_target_action" in hydra_text:
         errors.append("sonic_hydra.args must not inject g1_target_action in kin-only runs")
     _require(
@@ -694,6 +834,16 @@ def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -
         == ("0", "6"),
         errors,
         "visual validation callback must render readable clip_00 and clip_06",
+    )
+    _require(
+        hydra.get("callbacks.online_retarget_visual_val.use_evaluation_mode") == "false",
+        errors,
+        "visual validation callback must avoid Sonic evaluation-mode motion loading",
+    )
+    _require(
+        hydra.get("callbacks.online_retarget_visual_val.empty_cuda_cache") == "true",
+        errors,
+        "visual validation callback must clear cached CUDA blocks around validation",
     )
     for feature in FORBIDDEN_DEPLOYABLE_SONIC_SOURCE_FEATURES:
         if _contains_token(hydra_text, feature):

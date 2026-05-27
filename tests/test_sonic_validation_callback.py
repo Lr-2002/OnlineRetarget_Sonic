@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from online_retarget.sonic_validation_callback import (
+    SonicVisualValidationCallback,
     _clip_report,
     _current_soma_routes,
     _render_triplet_video,
@@ -77,6 +78,12 @@ class SonicValidationCallbackTests(unittest.TestCase):
     def test_validation_frame_count_uses_sonic_target_frequency(self):
         self.assertEqual(validation_frame_count(4.0, 50), 200)
         self.assertEqual(validation_frame_count(0.0, 50), 1)
+
+    def test_callback_defaults_avoid_evaluation_motion_loading(self):
+        callback = SonicVisualValidationCallback()
+
+        self.assertFalse(callback.use_evaluation_mode)
+        self.assertTrue(callback.empty_cuda_cache)
 
     def test_current_soma_routes_uses_last_temporal_route(self):
         policy = _PolicyWithRoutes([[0, 1, 2], [3, 2, 1]])

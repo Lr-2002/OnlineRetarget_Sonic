@@ -108,6 +108,8 @@ class SonicVisualValidationCallback(TrainerCallback):
         readable_render_width: int = DEFAULT_READABLE_WIDTH,
         readable_render_height: int = DEFAULT_READABLE_HEIGHT,
         readable_wandb_upload: bool = True,
+        use_evaluation_mode: bool = False,
+        empty_cuda_cache: bool = True,
     ) -> None:
         super().__init__()
         self.every_steps = int(every_steps)
@@ -124,6 +126,8 @@ class SonicVisualValidationCallback(TrainerCallback):
         self.readable_render_width = int(readable_render_width)
         self.readable_render_height = int(readable_render_height)
         self.readable_wandb_upload = bool(readable_wandb_upload)
+        self.use_evaluation_mode = bool(use_evaluation_mode)
+        self.empty_cuda_cache = bool(empty_cuda_cache)
         if every_seconds is not None:
             self.every_seconds = float(every_seconds)
         elif every_minutes is not None:
@@ -228,14 +232,21 @@ class SonicVisualValidationCallback(TrainerCallback):
             }
 
         frame_count = validation_frame_count(self.duration_sec, self.target_fps)
-        trajectories = _collect_rollout(
-            env=env,
-            model=model,
-            args=args,
-            specs=specs,
-            frame_count=frame_count,
-            target_fps=self.target_fps,
-        )
+        if self.empty_cuda_cache:
+            _empty_cuda_cache()
+        try:
+            trajectories = _collect_rollout(
+                env=env,
+                model=model,
+                args=args,
+                specs=specs,
+                frame_count=frame_count,
+                target_fps=self.target_fps,
+                use_evaluation_mode=self.use_evaluation_mode,
+            )
+        finally:
+            if self.empty_cuda_cache:
+                _empty_cuda_cache()
 
         clip_reports = []
         ok_count = 0
@@ -399,6 +410,7 @@ def _collect_rollout(
     specs: Sequence[ValidationClipSpec],
     frame_count: int,
     target_fps: float,
+    use_evaluation_mode: bool = False,
 ) -> dict[int, dict[str, Any]]:
     import torch
 
@@ -409,8 +421,9 @@ def _collect_rollout(
         policy.eval()
     if hasattr(policy, "eval_mode"):
         policy.eval_mode()
-    if hasattr(env, "set_is_evaluating"):
-        env.set_is_evaluating(True, global_rank=getattr(args, "global_rank", 0))
+    entered_evaluation_mode = False
+    if use_evaluation_mode:
+        entered_evaluation_mode = _set_env_evaluation_mode(env, True, args)
 
     obs = _reset_env(env, args)
     if hasattr(policy, "init_rollout"):
@@ -448,8 +461,8 @@ def _collect_rollout(
                 actor_state = {"obs": obs, "obs_dict": obs, "actions": actions}
                 obs, _rewards, dones, _extras = env.step(actor_state)
     finally:
-        if hasattr(env, "set_is_evaluating"):
-            env.set_is_evaluating(False)
+        if entered_evaluation_mode:
+            _set_env_evaluation_mode(env, False, args)
         if hasattr(env, "set_is_training"):
             env.set_is_training()
         if hasattr(policy, "train_mode"):
@@ -459,6 +472,43 @@ def _collect_rollout(
             model.train()
 
     return trajectories
+
+
+def _empty_cuda_cache() -> None:
+    """Release cached CUDA blocks before/after validation side work."""
+
+    try:
+        import torch
+    except Exception:  # pragma: no cover - torch is optional in local tests.
+        return
+    cuda = getattr(torch, "cuda", None)
+    if cuda is None or not callable(getattr(cuda, "is_available", None)):
+        return
+    try:
+        if cuda.is_available():
+            cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _set_env_evaluation_mode(env: Any, enabled: bool, args: Any) -> bool:
+    setter = getattr(env, "set_is_evaluating", None)
+    if setter is None:
+        return False
+    global_rank = getattr(args, "global_rank", 0)
+    for call in (
+        lambda: setter(is_evaluating=enabled, global_rank=global_rank),
+        lambda: setter(is_evaluating=enabled, log_info=False),
+        lambda: setter(enabled, global_rank=global_rank),
+        lambda: setter(enabled),
+    ):
+        try:
+            call()
+            return True
+        except TypeError:
+            continue
+    setter(enabled)
+    return True
 
 
 def _reset_policy_rollout_buffer(policy: Any) -> None:

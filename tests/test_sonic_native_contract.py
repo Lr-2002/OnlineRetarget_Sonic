@@ -5,7 +5,12 @@ from copy import deepcopy
 from pathlib import Path
 import tempfile
 
-from online_retarget.sonic_native_contract import ContractError, validate_config, validate_file
+from online_retarget.sonic_native_contract import (
+    ContractError,
+    validate_config,
+    validate_file,
+    validate_resolved_runtime_config,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,7 +90,6 @@ class SonicNativeContractTests(unittest.TestCase):
     def test_rejects_g1_soma_latent_aux_loss_in_formal_retarget(self):
         config = _base_formal_config()
         config["sonic_hydra"]["online_retarget_aux_losses"] = [
-            "online_retarget_g1_dyn_action",
             "g1_soma_latent",
         ]
 
@@ -111,6 +115,26 @@ class SonicNativeContractTests(unittest.TestCase):
         ]
 
         with self.assertRaisesRegex(ContractError, "active_decoders=\\[g1_kin\\]"):
+            validate_config(config, require_formal=True)
+
+    def test_formal_config_requires_deleting_inherited_g1_dyn_decoder(self):
+        config = _base_formal_config()
+        config["sonic_hydra"]["args"] = [
+            arg
+            for arg in config["sonic_hydra"]["args"]
+            if arg != "~algo.config.actor.backbone.decoders.g1_dyn"
+        ]
+
+        with self.assertRaisesRegex(ContractError, "delete inherited decoder"):
+            validate_config(config, require_formal=True)
+
+    def test_formal_config_allows_only_g1_dyn_delete_reference(self):
+        config = _base_formal_config()
+        config["sonic_hydra"]["args"].append(
+            "++algo.config.actor.backbone.decoders.g1_dyn.outputs=[action]"
+        )
+
+        with self.assertRaisesRegex(ContractError, "g1_dyn is forbidden"):
             validate_config(config, require_formal=True)
 
     def test_formal_config_rejects_action_dynamics_losses(self):
@@ -200,6 +224,29 @@ class SonicNativeContractTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ContractError, "clip_00 and clip_06"):
             validate_config(config, require_formal=True)
+
+    def test_formal_config_requires_validation_runtime_memory_guardrails(self):
+        config = _base_formal_config()
+        config["sonic_hydra"]["args"] = [
+            arg
+            for arg in config["sonic_hydra"]["args"]
+            if "use_evaluation_mode" not in arg and "empty_cuda_cache" not in arg
+        ]
+
+        with self.assertRaisesRegex(ContractError, "evaluation-mode motion loading"):
+            validate_config(config, require_formal=True)
+
+    def test_resolved_runtime_config_rejects_inherited_g1_dyn_decoder(self):
+        config = _base_resolved_runtime_config()
+        config["algo"]["config"]["actor"]["backbone"]["decoders"]["g1_dyn"] = {
+            "outputs": ["action"],
+        }
+
+        with self.assertRaisesRegex(ContractError, "decoders.g1_dyn"):
+            validate_resolved_runtime_config(config)
+
+    def test_resolved_runtime_config_accepts_kin_only_evidence(self):
+        validate_resolved_runtime_config(_base_resolved_runtime_config())
 
     def test_formal_config_requires_motionlib_tracking_body_subset(self):
         config = _base_formal_config()
@@ -540,6 +587,7 @@ def _base_formal_config():
                     "++algo.config.actor.backbone.kinematic_action_output=command_multi_future_nonflat",
                     "++algo.config.actor.backbone.kinematic_action_frame_index=0",
                     "++algo.config.actor.backbone.reencode_smpl_g1_recon=false",
+                    "~algo.config.actor.backbone.decoders.g1_dyn",
                     "~algo.config.actor.backbone.aux_loss_func.g1_smpl_latent",
                     "~algo.config.actor.backbone.aux_loss_coef.g1_smpl_latent",
                     "~algo.config.actor.backbone.aux_loss_func.g1_teleop_latent",
@@ -560,11 +608,48 @@ def _base_formal_config():
                     "++callbacks.online_retarget_visual_val.persist_raw_trajectories=true",
                     "++callbacks.online_retarget_visual_val.readable_render=true",
                     "++callbacks.online_retarget_visual_val.readable_clip_indices=[0,6]",
+                    "++callbacks.online_retarget_visual_val.use_evaluation_mode=false",
+                    "++callbacks.online_retarget_visual_val.empty_cuda_cache=true",
                 ],
             },
             "variant": {"name": "test_variant"},
         }
     )
+
+
+def _base_resolved_runtime_config():
+    return {
+        "online_retarget": {
+            "contract": "sonic_native_retarget",
+            "encoder_variant": "A1_concat",
+        },
+        "algo": {
+            "config": {
+                "actor": {
+                    "backbone": {
+                        "_target_": (
+                            "online_retarget.sonic_runtime_modules."
+                            "KinematicActionUniversalTokenModule"
+                        ),
+                        "active_encoders": ["soma"],
+                        "active_decoders": ["g1_kin"],
+                        "kinematic_action_decoder": "g1_kin",
+                        "decoders": {
+                            "g1_kin": {
+                                "outputs": ["command_multi_future_nonflat"],
+                            },
+                        },
+                    },
+                },
+            },
+        },
+        "callbacks": {
+            "online_retarget_visual_val": {
+                "use_evaluation_mode": False,
+                "empty_cuda_cache": True,
+            },
+        },
+    }
 
 
 def _write_sonic_config_files(source_repo: Path) -> None:

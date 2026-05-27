@@ -18,6 +18,7 @@ from online_retarget.sonic_native_contract import (  # noqa: E402
     ContractError,
     result_to_dict,
     validate_file,
+    validate_resolved_runtime_file,
 )
 
 
@@ -39,6 +40,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print validation results as JSON.",
     )
+    parser.add_argument(
+        "--resolved-runtime-config",
+        action="append",
+        default=[],
+        help=(
+            "Also validate a resolved Hydra runtime config.yaml emitted by a "
+            "formal run; rejects residual inherited decoders such as g1_dyn."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -53,12 +63,18 @@ def main() -> int:
                 check_paths=args.check_paths,
             )
             results.append(result_to_dict(result))
+        for runtime_config_path in args.resolved_runtime_config:
+            validate_resolved_runtime_file(runtime_config_path)
     except ContractError as exc:
         print(f"contract validation failed: {exc}", file=sys.stderr)
         return 2
 
     if args.json:
-        print(json.dumps(results, indent=2, sort_keys=True))
+        payload = {
+            "configs": results,
+            "resolved_runtime_configs": list(args.resolved_runtime_config),
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         for result in results:
             status = "formal" if result["formal"] else "legacy"
@@ -68,6 +84,8 @@ def main() -> int:
             )
             for warning in result["warnings"]:
                 print(f"warning: {warning}", file=sys.stderr)
+        for runtime_config_path in args.resolved_runtime_config:
+            print(f"ok resolved-runtime config={runtime_config_path}")
     return 0
 
 
