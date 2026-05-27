@@ -17,6 +17,13 @@ EXECUTE_SONIC_NATIVE_TRAINING="${EXECUTE_SONIC_NATIVE_TRAINING:-0}"
 CHECK_SONIC_PATHS="${CHECK_SONIC_PATHS:-${EXECUTE_SONIC_NATIVE_TRAINING}}"
 ACCELERATE_MIXED_PRECISION="${ACCELERATE_MIXED_PRECISION:-no}"
 ACCELERATE_DYNAMO_BACKEND="${ACCELERATE_DYNAMO_BACKEND:-no}"
+NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
+NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-}"
+NCCL_ALGO="${NCCL_ALGO:-}"
+NCCL_DEBUG="${NCCL_DEBUG:-}"
+NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-}"
+TORCH_CPP_LOG_LEVEL="${TORCH_CPP_LOG_LEVEL:-}"
+TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG:-}"
 
 cd "${ROOT}"
 
@@ -187,13 +194,20 @@ export ACCELERATE_CMD="${ACCELERATE_CMD}"
 export WANDB_MODE="${WANDB_MODE:-online}"
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
+export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE}"
+if [[ -n "${NCCL_IB_DISABLE}" ]]; then export NCCL_IB_DISABLE="${NCCL_IB_DISABLE}"; fi
+if [[ -n "${NCCL_ALGO}" ]]; then export NCCL_ALGO="${NCCL_ALGO}"; fi
+if [[ -n "${NCCL_DEBUG}" ]]; then export NCCL_DEBUG="${NCCL_DEBUG}"; fi
+if [[ -n "${NCCL_DEBUG_SUBSYS}" ]]; then export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS}"; fi
+if [[ -n "${TORCH_CPP_LOG_LEVEL}" ]]; then export TORCH_CPP_LOG_LEVEL="${TORCH_CPP_LOG_LEVEL}"; fi
+if [[ -n "${TORCH_DISTRIBUTED_DEBUG}" ]]; then export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG}"; fi
 echo "variant=${variant} gpus=${GPU_ASSIGNMENTS} nproc=${NPROC_PER_NODE} online_retarget_commit=${CONTROL_COMMIT} sonic_commit=${SONIC_COMMIT}"
 read -r -a _accelerate_cmd <<< "\${ACCELERATE_CMD}"
 "\${_accelerate_cmd[@]}" --num_processes="${NPROC_PER_NODE}" --num_machines=1 --mixed_precision="${ACCELERATE_MIXED_PRECISION}" --dynamo_backend="${ACCELERATE_DYNAMO_BACKEND}" gear_sonic/train_agent_trl.py ${hydra_args} \${HYDRA_EXTRA_ARGS:-} 2>&1 | tee -a "${log_path}"
 EOF
 )
 
-"${PYTHON_BIN}" - "${LAUNCH_ROOT}/launch_manifest.json" "${RUN_GROUP}" "${CONTROL_COMMIT}" "${SONIC_COMMIT}" "${EXECUTE_SONIC_NATIVE_TRAINING}" "${CONFIG}" "${GPU_ASSIGNMENTS}" "${NPROC_PER_NODE}" "${session}" <<'PY'
+"${PYTHON_BIN}" - "${LAUNCH_ROOT}/launch_manifest.json" "${RUN_GROUP}" "${CONTROL_COMMIT}" "${SONIC_COMMIT}" "${EXECUTE_SONIC_NATIVE_TRAINING}" "${CONFIG}" "${GPU_ASSIGNMENTS}" "${NPROC_PER_NODE}" "${session}" "${NCCL_SHM_DISABLE}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -208,6 +222,7 @@ manifest = {
     "gpus": sys.argv[7],
     "accelerate_num_processes": int(sys.argv[8]),
     "tmux_session": sys.argv[9],
+    "nccl_shm_disable": sys.argv[10],
 }
 out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
