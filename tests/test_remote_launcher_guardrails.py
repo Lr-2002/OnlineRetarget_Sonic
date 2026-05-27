@@ -6,6 +6,7 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = REPO_ROOT / "scripts" / "remote_start_sonic_native_retarget_4x1gpu.sh"
+DDP_LAUNCHER = REPO_ROOT / "scripts" / "remote_start_sonic_native_retarget_4gpu.sh"
 
 
 class RemoteLauncherGuardrailTests(unittest.TestCase):
@@ -40,6 +41,33 @@ class RemoteLauncherGuardrailTests(unittest.TestCase):
         self.assertIn('SONIC_COMMIT="$(git -C "${SONIC_ROOT}" rev-parse HEAD)"', text)
         self.assertIn('++online_retarget.git_sha={online_retarget_commit}', text)
         self.assertIn('++online_retarget.sonic_git_sha={sonic_commit}', text)
+        self.assertIn("ONLINE_RETARGET_GIT_SHA", text)
+        self.assertIn("SONIC_GIT_SHA", text)
+
+
+class NativeRetargetFourGpuLauncherTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.launcher_text = DDP_LAUNCHER.read_text(encoding="utf-8")
+
+    def test_single_config_multi_gpu_launcher_uses_accelerate_processes(self) -> None:
+        text = self.launcher_text
+        self.assertIn('CONFIG="${CONFIG:-configs/sonic_native_retarget_a1_concat_1gpu.json}"', text)
+        self.assertIn('NPROC_PER_NODE="${NPROC_PER_NODE:-4}"', text)
+        self.assertIn('--num_processes="${NPROC_PER_NODE}"', text)
+        self.assertNotIn("--num_processes=1 gear_sonic/train_agent_trl.py", text)
+
+    def test_single_config_launcher_rejects_multiple_configs(self) -> None:
+        text = self.launcher_text
+        self.assertIn("CONFIG must name exactly one formal config", text)
+        self.assertIn('if [[ "${CONFIG}" == *" "* ]]; then', text)
+
+    def test_single_config_launcher_preserves_training_guardrails(self) -> None:
+        text = self.launcher_text
+        self.assertIn("OnlineRetarget repo has uncommitted tracked changes", text)
+        self.assertIn('require_latest_git "${ROOT}" "OnlineRetarget repo"', text)
+        self.assertIn("SONIC source repo has uncommitted tracked changes", text)
+        self.assertIn('require_latest_git_if_configured "${SONIC_ROOT}" "SONIC source repo"', text)
         self.assertIn("ONLINE_RETARGET_GIT_SHA", text)
         self.assertIn("SONIC_GIT_SHA", text)
 
