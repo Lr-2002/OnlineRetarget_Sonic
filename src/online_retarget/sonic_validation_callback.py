@@ -17,6 +17,15 @@ import subprocess
 import time
 from typing import Any, Mapping, Sequence
 
+from online_retarget.sonic_validation_export import (
+    DEFAULT_READABLE_CLIP_INDICES,
+    DEFAULT_READABLE_HEIGHT,
+    DEFAULT_READABLE_WIDTH,
+    clip_index_selected,
+    render_readable_validation_video,
+    save_raw_validation_trajectory,
+)
+
 
 try:  # Keep this module importable in the lightweight local test env.
     from transformers import TrainerCallback
@@ -93,6 +102,12 @@ class SonicVisualValidationCallback(TrainerCallback):
         fail_on_render_error: bool = False,
         every_minutes: float | None = None,
         every_seconds: float | None = None,
+        persist_raw_trajectories: bool = True,
+        readable_render: bool = True,
+        readable_clip_indices: Sequence[int] | str | None = DEFAULT_READABLE_CLIP_INDICES,
+        readable_render_width: int = DEFAULT_READABLE_WIDTH,
+        readable_render_height: int = DEFAULT_READABLE_HEIGHT,
+        readable_wandb_upload: bool = True,
     ) -> None:
         super().__init__()
         self.every_steps = int(every_steps)
@@ -103,6 +118,12 @@ class SonicVisualValidationCallback(TrainerCallback):
         self.wandb_upload = bool(wandb_upload)
         self.log_prefix = log_prefix
         self.fail_on_render_error = bool(fail_on_render_error)
+        self.persist_raw_trajectories = bool(persist_raw_trajectories)
+        self.readable_render = bool(readable_render)
+        self.readable_clip_indices = readable_clip_indices
+        self.readable_render_width = int(readable_render_width)
+        self.readable_render_height = int(readable_render_height)
+        self.readable_wandb_upload = bool(readable_wandb_upload)
         if every_seconds is not None:
             self.every_seconds = float(every_seconds)
         elif every_minutes is not None:
@@ -234,6 +255,16 @@ class SonicVisualValidationCallback(TrainerCallback):
 
             safe_key = _safe_name(str(trajectory.get("motion_key", "unknown")))
             video_path = rank_dir / f"clip_{spec.clip_index:02d}_{safe_key}.mp4"
+            raw_report: dict[str, Any] = {}
+            readable_report: dict[str, Any] = {}
+            if self.persist_raw_trajectories:
+                raw_path = rank_dir / f"clip_{spec.clip_index:02d}_{safe_key}_trajectory.npz"
+                raw_report = save_raw_validation_trajectory(
+                    trajectory=trajectory,
+                    output_path=raw_path,
+                    target_fps=self.target_fps,
+                    duration_sec=self.duration_sec,
+                )
             try:
                 _render_triplet_video(
                     trajectory=trajectory,
@@ -241,6 +272,19 @@ class SonicVisualValidationCallback(TrainerCallback):
                     target_fps=self.target_fps,
                     duration_sec=self.duration_sec,
                 )
+                if self.readable_render and clip_index_selected(
+                    spec.clip_index,
+                    self.readable_clip_indices,
+                ):
+                    readable_path = rank_dir / f"clip_{spec.clip_index:02d}_{safe_key}_readable.mp4"
+                    readable_report = render_readable_validation_video(
+                        trajectory=trajectory,
+                        video_path=readable_path,
+                        target_fps=self.target_fps,
+                        duration_sec=self.duration_sec,
+                        width=self.readable_render_width,
+                        height=self.readable_render_height,
+                    )
                 clip_report = _clip_report(
                     trajectory=trajectory,
                     video_path=video_path,
@@ -249,6 +293,8 @@ class SonicVisualValidationCallback(TrainerCallback):
                     world_size=world_size,
                     target_fps=self.target_fps,
                     duration_sec=self.duration_sec,
+                    raw_report=raw_report,
+                    readable_report=readable_report,
                 )
                 ok_count += 1
             except Exception as exc:  # noqa: BLE001
@@ -304,9 +350,24 @@ class SonicVisualValidationCallback(TrainerCallback):
             }
 
         payload: dict[str, Any] = {}
-        videos = sorted(step_dir.glob("rank_*/clip_*.mp4"))[: self.num_videos]
+        all_videos = sorted(step_dir.glob("rank_*/clip_*.mp4"))
+        videos = [path for path in all_videos if not path.stem.endswith("_readable")][
+            : self.num_videos
+        ]
         for video_path in videos:
             key = f"{self.log_prefix}/{video_path.parent.name}_{video_path.stem}"
+            payload[key] = wandb.Video(
+                str(video_path),
+                fps=int(round(self.target_fps)),
+                format="mp4",
+            )
+        readable_videos = (
+            [path for path in all_videos if path.stem.endswith("_readable")]
+            if self.readable_wandb_upload
+            else []
+        )
+        for video_path in readable_videos:
+            key = f"{self.log_prefix}_readable/{video_path.parent.name}_{video_path.stem}"
             payload[key] = wandb.Video(
                 str(video_path),
                 fps=int(round(self.target_fps)),
@@ -320,11 +381,13 @@ class SonicVisualValidationCallback(TrainerCallback):
             }
 
         payload[f"{self.log_prefix}/videos_uploaded"] = len(videos)
+        payload[f"{self.log_prefix}/readable_videos_uploaded"] = len(readable_videos)
         payload[f"{self.log_prefix}/git_sha"] = _git_sha()
         wandb.log(payload, step=step)
         return {
             f"{self.log_prefix}/wandb_upload_status": "ok",
             f"{self.log_prefix}/videos_uploaded": len(videos),
+            f"{self.log_prefix}/readable_videos_uploaded": len(readable_videos),
         }
 
 
@@ -370,6 +433,8 @@ def _collect_rollout(
             "source_fps": target_fps,
             "target_fps": target_fps,
             "physical_time_aligned": True,
+            "source_soma_names": None,
+            "g1_body_names": None,
         }
         for spec in specs
     }
@@ -437,10 +502,14 @@ def _append_current_frame(
     motion_ids = _maybe_tensor(_get_attr(command, "motion_ids"))
     time_steps = _motion_time_steps(command)
     motion_keys = _motion_keys(command, motion_ids)
+    g1_body_names = _motion_body_names(command)
 
     for spec in specs:
         env_idx = spec.local_env_index
         trajectory = trajectories[spec.clip_index]
+        if g1_body_names:
+            trajectory["g1_body_names"] = tuple(g1_body_names)
+            trajectory["source_soma_names"] = tuple(g1_body_names)
         if source_soma is not None and env_idx < len(source_soma):
             trajectory["source_soma"].append(source_soma[env_idx])
         if target_g1 is not None and env_idx < len(target_g1):
@@ -519,6 +588,17 @@ def _motion_keys(command: Any, motion_ids: Any) -> Sequence[str]:
     return keys if keys is not None else ()
 
 
+def _motion_body_names(command: Any) -> Sequence[str]:
+    for owner in (command, _get_attr(command, "motion_lib"), _get_attr(command, "motion_lib_cfg")):
+        if owner is None:
+            continue
+        for attr_name in ("body_names", "tracking_body_names", "_body_names"):
+            names = _get_attr(owner, attr_name)
+            if names:
+                return tuple(str(name) for name in names)
+    return ()
+
+
 def _render_triplet_video(
     *,
     trajectory: Mapping[str, Any],
@@ -571,7 +651,7 @@ def _render_triplet_video(
             panels = (source[frame_idx], target[frame_idx], inferred[frame_idx])
             colors = ("#2f6f9f", "#222222", "#b23a48")
             for panel_idx, (title, points, color) in enumerate(
-                zip(titles, panels, colors, strict=False),
+                zip(titles, panels, colors),
                 start=1,
             ):
                 ax = fig.add_subplot(1, 3, panel_idx, projection="3d")
@@ -662,9 +742,13 @@ def _clip_report(
     world_size: int,
     target_fps: float,
     duration_sec: float,
+    raw_report: Mapping[str, Any] | None = None,
+    readable_report: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     frame_indices = list(trajectory.get("source_frame_indices") or [])
     encoder_routes = [int(route) for route in (trajectory.get("encoder_routes") or [])]
+    raw_report = raw_report or {}
+    readable_report = readable_report or {}
     return {
         "status": "ok",
         "step": step,
@@ -688,6 +772,13 @@ def _clip_report(
         "online_retarget_git_sha": os.environ.get("ONLINE_RETARGET_GIT_SHA"),
         "sonic_git_sha": os.environ.get("SONIC_GIT_SHA"),
         "video_path": str(video_path),
+        "raw_trajectory_path": raw_report.get("raw_trajectory_path"),
+        "raw_trajectory_metadata_path": raw_report.get("raw_trajectory_metadata_path"),
+        "raw_trajectory_frames": raw_report.get("raw_trajectory_frames"),
+        "readable_video_path": readable_report.get("video_path"),
+        "readable_render_status": readable_report.get("status"),
+        "readable_render_backend": readable_report.get("render_backend"),
+        "readable_render_features": readable_report.get("readable_features", []),
     }
 
 

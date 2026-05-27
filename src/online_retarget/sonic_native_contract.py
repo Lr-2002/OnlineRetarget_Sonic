@@ -679,6 +679,22 @@ def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -
         errors,
         "visual validation callback must render 4 second clips",
     )
+    _require(
+        hydra.get("callbacks.online_retarget_visual_val.persist_raw_trajectories") == "true",
+        errors,
+        "visual validation callback must persist raw trajectories for readable re-rendering",
+    )
+    _require(
+        hydra.get("callbacks.online_retarget_visual_val.readable_render") == "true",
+        errors,
+        "visual validation callback must render readable soma-G1 review clips",
+    )
+    _require(
+        _parse_hydra_list(hydra.get("callbacks.online_retarget_visual_val.readable_clip_indices"))
+        == ("0", "6"),
+        errors,
+        "visual validation callback must render readable clip_00 and clip_06",
+    )
     for feature in FORBIDDEN_DEPLOYABLE_SONIC_SOURCE_FEATURES:
         if _contains_token(hydra_text, feature):
             errors.append(

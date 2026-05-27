@@ -172,6 +172,35 @@ class SonicNativeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "60 minute"):
             validate_config(config, require_formal=True)
 
+    def test_formal_config_requires_raw_readable_visual_export(self):
+        config = _base_formal_config()
+        config["sonic_hydra"]["args"] = [
+            arg
+            for arg in config["sonic_hydra"]["args"]
+            if "persist_raw_trajectories" not in arg
+        ]
+
+        with self.assertRaisesRegex(ContractError, "persist raw trajectories"):
+            validate_config(config, require_formal=True)
+
+        config = _base_formal_config()
+        config["sonic_hydra"]["args"] = [
+            arg for arg in config["sonic_hydra"]["args"] if "readable_render=true" not in arg
+        ]
+
+        with self.assertRaisesRegex(ContractError, "readable soma-G1"):
+            validate_config(config, require_formal=True)
+
+    def test_formal_config_requires_readable_clip_00_and_06(self):
+        config = _base_formal_config()
+        config["sonic_hydra"]["args"] = [
+            arg.replace("readable_clip_indices=[0,6]", "readable_clip_indices=[0]")
+            for arg in config["sonic_hydra"]["args"]
+        ]
+
+        with self.assertRaisesRegex(ContractError, "clip_00 and clip_06"):
+            validate_config(config, require_formal=True)
+
     def test_formal_config_requires_motionlib_tracking_body_subset(self):
         config = _base_formal_config()
         config["sonic_hydra"]["args"] = [
@@ -528,6 +557,9 @@ def _base_formal_config():
                     "++callbacks.online_retarget_visual_val.every_minutes=60",
                     "++callbacks.online_retarget_visual_val.num_videos=8",
                     "++callbacks.online_retarget_visual_val.duration_sec=4.0",
+                    "++callbacks.online_retarget_visual_val.persist_raw_trajectories=true",
+                    "++callbacks.online_retarget_visual_val.readable_render=true",
+                    "++callbacks.online_retarget_visual_val.readable_clip_indices=[0,6]",
                 ],
             },
             "variant": {"name": "test_variant"},
