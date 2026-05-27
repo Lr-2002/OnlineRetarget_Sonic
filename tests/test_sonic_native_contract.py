@@ -120,6 +120,30 @@ class SonicNativeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "action/dynamics losses"):
             validate_config(config, require_formal=True)
 
+    def test_formal_config_requires_kinematic_action_wrapper(self):
+        config = _base_formal_config()
+        config["sonic_hydra"]["args"] = [
+            arg
+            for arg in config["sonic_hydra"]["args"]
+            if "KinematicActionUniversalTokenModule" not in arg
+        ]
+
+        with self.assertRaisesRegex(ContractError, "kinematic action"):
+            validate_config(config, require_formal=True)
+
+    def test_formal_config_requires_g1_kin_action_bridge(self):
+        config = _base_formal_config()
+        config["sonic_hydra"]["args"] = [
+            arg.replace(
+                "++algo.config.actor.backbone.kinematic_action_decoder=g1_kin",
+                "++algo.config.actor.backbone.kinematic_action_decoder=soma",
+            )
+            for arg in config["sonic_hydra"]["args"]
+        ]
+
+        with self.assertRaisesRegex(ContractError, "derive actions from the g1_kin"):
+            validate_config(config, require_formal=True)
+
     def test_formal_config_rejects_g1_target_action_observation(self):
         config = _base_formal_config()
         config["target_features"].append("g1_target_action")
@@ -480,8 +504,12 @@ def _base_formal_config():
                     "++manager_env.commands.motion.encoder_sample_probs.teleop=0.0",
                     "++manager_env.commands.motion.encoder_sample_probs.smpl=0.0",
                     "++manager_env.commands.motion.encoder_sample_probs.soma=1.0",
+                    "++algo.config.actor.backbone._target_=online_retarget.sonic_runtime_modules.KinematicActionUniversalTokenModule",
                     "++algo.config.actor.backbone.active_encoders=[soma]",
                     "++algo.config.actor.backbone.active_decoders=[g1_kin]",
+                    "++algo.config.actor.backbone.kinematic_action_decoder=g1_kin",
+                    "++algo.config.actor.backbone.kinematic_action_output=command_multi_future_nonflat",
+                    "++algo.config.actor.backbone.kinematic_action_frame_index=0",
                     "++algo.config.actor.backbone.reencode_smpl_g1_recon=false",
                     "~algo.config.actor.backbone.aux_loss_func.g1_smpl_latent",
                     "~algo.config.actor.backbone.aux_loss_coef.g1_smpl_latent",

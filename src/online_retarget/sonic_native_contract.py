@@ -29,6 +29,10 @@ VISUAL_VALIDATION_NUM_VIDEOS = 8
 VISUAL_VALIDATION_DURATION_SEC = 4.0
 FORMAL_MAX_STEPS = 1_000_000
 FORMAL_TARGET_DECODER = "g1_kin"
+FORMAL_RUNTIME_BACKBONE = (
+    "online_retarget.sonic_runtime_modules.KinematicActionUniversalTokenModule"
+)
+FORMAL_KINEMATIC_ACTION_OUTPUT = "command_multi_future_nonflat"
 FORBIDDEN_FORMAL_DECODERS = ("g1_dyn",)
 FORBIDDEN_FORMAL_LOSS_TOKENS = ("action", "dynamics")
 MOTION_FILE_SENTINELS = ("dummy", "zeros")
@@ -697,6 +701,24 @@ def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -
         errors,
         f"formal retarget configs must set "
         f"algo.config.actor.backbone.active_decoders=[{FORMAL_TARGET_DECODER}]",
+    )
+    _require(
+        hydra.get("algo.config.actor.backbone._target_") == FORMAL_RUNTIME_BACKBONE,
+        errors,
+        "formal kin-only PPO runs must use the OnlineRetarget kinematic action "
+        "backbone wrapper",
+    )
+    _require(
+        hydra.get("algo.config.actor.backbone.kinematic_action_decoder")
+        == FORMAL_TARGET_DECODER,
+        errors,
+        "formal kin-only PPO runs must derive actions from the g1_kin decoder",
+    )
+    _require(
+        hydra.get("algo.config.actor.backbone.kinematic_action_output")
+        == FORMAL_KINEMATIC_ACTION_OUTPUT,
+        errors,
+        "formal kin-only PPO runs must derive actions from command_multi_future_nonflat",
     )
     for encoder_name in ("g1", "teleop", "smpl"):
         sample_prob = _optional_float(
