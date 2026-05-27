@@ -3,7 +3,7 @@
   "owner": "OnlineRetarget",
   "training_lane": "sonic_native_retarget",
   "sonic_native": true,
-  "purpose": "B2 deterministic skeleton expert encoder branches feeding SONIC g1_dyn as the primary retarget decoder.",
+  "purpose": "B2 deterministic skeleton expert encoder branches feeding SONIC g1_kin as the only retarget decoder.",
   "source_repo": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training",
   "source_rev": "remote-latest-required-before-training",
   "sonic_config": "gear_sonic/config/exp/manager/universal_token/all_modes/sonic_bones_seed.yaml",
@@ -66,35 +66,28 @@
     "conditioning": "lightweight deterministic expert branch selected by skeleton cluster"
   },
   "target_decoder": {
-    "primary": "g1_dyn",
-    "auxiliary": [
-      "g1_kin"
-    ],
+    "primary": "g1_kin",
+    "auxiliary": [],
     "teacher_encoder": "g1"
   },
   "decoder_targets": [
-    "g1_dyn",
     "g1_kin"
   ],
   "target_features": [
-    "action",
     "command_multi_future_nonflat",
     "motion_anchor_ori_b_mf_nonflat",
     "joint_pos",
     "joint_vel",
     "body_pos_w",
-    "body_quat_w",
-    "g1_target_action"
+    "body_quat_w"
   ],
   "losses": {
     "primary": [
-      "dynamics_action_mse",
-      "dynamics_action_cosine"
+      "g1_kin_joint_rmse",
+      "g1_kin_body_mpjpe"
     ],
     "alignment": [],
     "auxiliary": [
-      "g1_kin_joint_rmse",
-      "g1_kin_body_mpjpe",
       "temporal_smoothness"
     ],
     "routing": [
@@ -180,7 +173,7 @@
       "++manager_env.commands.motion.encoder_sample_probs.smpl=0.0",
       "++manager_env.commands.motion.encoder_sample_probs.soma=1.0",
       "++algo.config.actor.backbone.active_encoders=[soma]",
-      "++algo.config.actor.backbone.active_decoders=[g1_dyn,g1_kin]",
+      "++algo.config.actor.backbone.active_decoders=[g1_kin]",
       "++algo.config.actor.backbone.reencode_smpl_g1_recon=false",
       "~algo.config.actor.backbone.aux_loss_func.g1_smpl_latent",
       "~algo.config.actor.backbone.aux_loss_coef.g1_smpl_latent",
@@ -203,30 +196,18 @@
       "++manager_env.observations.tokenizer.soma_contact_phase.func=online_retarget.sonic_observation_terms:soma_contact_phase",
       "++manager_env.observations.tokenizer.soma_contact_phase.params.command_name=motion",
       "++manager_env.observations.tokenizer.soma_contact_phase.params.non_flatten=true",
-      "++manager_env.observations.tokenizer.g1_target_action._target_=isaaclab.managers.ObservationTermCfg",
-      "++manager_env.observations.tokenizer.g1_target_action.func=online_retarget.sonic_observation_terms:g1_target_action",
-      "++manager_env.observations.tokenizer.g1_target_action.params.command_name=motion",
       "++algo.config.actor.backbone.encoders.soma.inputs=[soma_joints_multi_future_local_nonflat,soma_root_ori_b_multi_future,soma_morphology]",
       "++algo.config.actor.backbone.encoders.soma.params._target_=online_retarget.sonic_encoder_modules.ExpertSomaEncoderModule",
       "++algo.config.actor.backbone.encoders.soma.params.hidden_dims=[512,512,512]",
-      "++algo.config.actor.backbone.aux_loss_func.online_retarget_g1_dyn_action._target_=online_retarget.sonic_losses.G1DynamicsActionLoss",
-      "++algo.config.actor.backbone.aux_loss_func.online_retarget_g1_dyn_action.loss_type=mse",
-      "++algo.config.actor.backbone.aux_loss_coef.online_retarget_g1_dyn_action=1.0",
-      "++algo.config.actor.backbone.aux_loss_func.online_retarget_action_smoothness._target_=online_retarget.sonic_losses.ActionSmoothnessLoss",
-      "++algo.config.actor.backbone.aux_loss_func.online_retarget_action_smoothness.loss_type=mse",
-      "++algo.config.actor.backbone.aux_loss_coef.online_retarget_action_smoothness=0.01",
       "++algo.config.actor.backbone.encoders.soma.params.conditioning_dim=24",
       "++algo.config.actor.backbone.encoders.soma.params.routing=deterministic_cluster",
       "++algo.config.actor.backbone.encoders.soma.params.route_feature_index=-1"
     ],
     "online_retarget_observations": {
       "soma_morphology_dim": 24,
-      "soma_contact_phase_dim": 3,
-      "g1_target_action": "online_retarget.sonic_observation_terms:g1_target_action"
+      "soma_contact_phase_dim": 3
     },
     "online_retarget_aux_losses": [
-      "online_retarget_g1_dyn_action",
-      "online_retarget_action_smoothness",
       "g1_recon"
     ]
   },
@@ -240,7 +221,7 @@
     "tags": [
       "sonic-native",
       "retarget",
-      "g1-dyn",
+      "g1-kin",
       "B2",
       "expert"
     ],

@@ -26,7 +26,7 @@ class SonicNativeContractTests(unittest.TestCase):
 
                 self.assertTrue(result.formal)
                 self.assertEqual(result.training_lane, "sonic_native_retarget")
-                self.assertEqual(result.target_decoder, "g1_dyn")
+                self.assertEqual(result.target_decoder, "g1_kin")
 
     def test_target_body_pose_labels_are_allowed_when_not_source_inputs(self):
         config = _base_formal_config()
@@ -92,12 +92,39 @@ class SonicNativeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "g1_soma_latent"):
             validate_config(config, require_formal=True)
 
-    def test_formal_config_requires_g1_dyn_primary_decoder(self):
+    def test_formal_config_requires_g1_kin_primary_decoder(self):
         config = _base_formal_config()
-        config["target_decoder"]["primary"] = "g1_kin"
-        config["decoder_targets"] = ["g1_kin"]
+        config["target_decoder"]["primary"] = "g1_dyn"
+        config["decoder_targets"] = ["g1_dyn", "g1_kin"]
 
-        with self.assertRaisesRegex(ContractError, "g1_dyn"):
+        with self.assertRaisesRegex(ContractError, "g1_kin"):
+            validate_config(config, require_formal=True)
+
+    def test_formal_config_rejects_g1_dyn_active_decoder(self):
+        config = _base_formal_config()
+        config["sonic_hydra"]["args"] = [
+            arg.replace(
+                "++algo.config.actor.backbone.active_decoders=[g1_kin]",
+                "++algo.config.actor.backbone.active_decoders=[g1_dyn,g1_kin]",
+            )
+            for arg in config["sonic_hydra"]["args"]
+        ]
+
+        with self.assertRaisesRegex(ContractError, "active_decoders=\\[g1_kin\\]"):
+            validate_config(config, require_formal=True)
+
+    def test_formal_config_rejects_action_dynamics_losses(self):
+        config = _base_formal_config()
+        config["losses"]["primary"] = ["dynamics_action_mse"]
+
+        with self.assertRaisesRegex(ContractError, "action/dynamics losses"):
+            validate_config(config, require_formal=True)
+
+    def test_formal_config_rejects_g1_target_action_observation(self):
+        config = _base_formal_config()
+        config["target_features"].append("g1_target_action")
+
+        with self.assertRaisesRegex(ContractError, "action/dynamics targets"):
             validate_config(config, require_formal=True)
 
     def test_formal_config_requires_integrated_visual_callback(self):
@@ -414,9 +441,14 @@ def _base_formal_config():
                     "soma_morphology",
                 ]
             },
-            "target_decoder": {"primary": "g1_dyn", "auxiliary": ["g1_kin"]},
-            "decoder_targets": ["g1_dyn", "g1_kin"],
-            "target_features": ["action", "joint_pos", "body_pos_w", "body_quat_w"],
+            "target_decoder": {"primary": "g1_kin", "auxiliary": []},
+            "decoder_targets": ["g1_kin"],
+            "target_features": ["joint_pos", "body_pos_w", "body_quat_w"],
+            "losses": {
+                "primary": ["g1_kin_joint_rmse", "g1_kin_body_mpjpe"],
+                "alignment": [],
+                "auxiliary": ["temporal_smoothness"],
+            },
             "frequency": {"target_fps": 50},
             "training": {"max_steps": 1000000},
             "visual_validation": {
@@ -449,6 +481,7 @@ def _base_formal_config():
                     "++manager_env.commands.motion.encoder_sample_probs.smpl=0.0",
                     "++manager_env.commands.motion.encoder_sample_probs.soma=1.0",
                     "++algo.config.actor.backbone.active_encoders=[soma]",
+                    "++algo.config.actor.backbone.active_decoders=[g1_kin]",
                     "++algo.config.actor.backbone.reencode_smpl_g1_recon=false",
                     "~algo.config.actor.backbone.aux_loss_func.g1_smpl_latent",
                     "~algo.config.actor.backbone.aux_loss_coef.g1_smpl_latent",
@@ -460,9 +493,7 @@ def _base_formal_config():
                     "~algo.config.actor.backbone.aux_loss_coef.reencoded_smpl_g1_latent",
                     "~algo.config.actor.backbone.aux_loss_func.g1_soma_latent",
                     "~algo.config.actor.backbone.aux_loss_coef.g1_soma_latent",
-                    "++manager_env.observations.tokenizer.g1_target_action.func=online_retarget.sonic_observation_terms:g1_target_action",
                     "++algo.config.actor.backbone.encoders.soma.params._target_=online_retarget.sonic_encoder_modules.ConcatSomaEncoderModule",
-                    "++algo.config.actor.backbone.aux_loss_func.online_retarget_g1_dyn_action._target_=online_retarget.sonic_losses.G1DynamicsActionLoss",
                     "algo.config.num_learning_iterations=1000000",
                     "++callbacks.online_retarget_visual_val._target_=online_retarget.sonic_validation_callback.SonicVisualValidationCallback",
                     "++callbacks.online_retarget_visual_val.every_steps=20000",

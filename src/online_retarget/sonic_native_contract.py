@@ -28,6 +28,9 @@ VISUAL_VALIDATION_MAX_INTERVAL_MINUTES = 60.0
 VISUAL_VALIDATION_NUM_VIDEOS = 8
 VISUAL_VALIDATION_DURATION_SEC = 4.0
 FORMAL_MAX_STEPS = 1_000_000
+FORMAL_TARGET_DECODER = "g1_kin"
+FORBIDDEN_FORMAL_DECODERS = ("g1_dyn",)
+FORBIDDEN_FORMAL_LOSS_TOKENS = ("action", "dynamics")
 MOTION_FILE_SENTINELS = ("dummy", "zeros")
 ACTOR_UID_PATTERN = re.compile(r"A\d{3,}")
 TRACKING_BODY_NAMES = (
@@ -193,9 +196,29 @@ def validate_config(
         errors.append(f"target-only source reference at {'.'.join(ref_path)}: {value!r}")
 
     target_decoder = _target_decoder_name(config)
-    _require(target_decoder == "g1_dyn", errors, "target_decoder.primary must be g1_dyn")
+    _require(
+        target_decoder == FORMAL_TARGET_DECODER,
+        errors,
+        f"target_decoder.primary must be {FORMAL_TARGET_DECODER}",
+    )
     decoder_targets = set(_decoder_targets(config))
-    _require("g1_dyn" in decoder_targets, errors, "decoder targets must include g1_dyn")
+    _require(
+        decoder_targets == {FORMAL_TARGET_DECODER},
+        errors,
+        f"decoder targets must be exactly [{FORMAL_TARGET_DECODER}]",
+    )
+    for decoder in FORBIDDEN_FORMAL_DECODERS:
+        config_text = _all_string_values(config).lower()
+        if decoder in decoder_targets or _contains_token(config_text, decoder):
+            errors.append(
+                f"{decoder} is forbidden in formal kin-only retarget configs"
+            )
+    forbidden_target_refs = _forbidden_action_target_refs(config)
+    if forbidden_target_refs:
+        errors.append(
+            "formal kin-only configs must not request action/dynamics targets or observations: "
+            + ", ".join(forbidden_target_refs)
+        )
 
     target_fps = _float_from_paths(
         config,
@@ -432,6 +455,49 @@ def _all_string_values(value: Any) -> str:
     return " ".join(text for _, text in _iter_strings(value)).lower()
 
 
+def _forbidden_action_target_refs(config: Mapping[str, Any]) -> tuple[str, ...]:
+    refs: list[str] = []
+    for path, value in _iter_strings(config.get("target_features"), ("target_features",)):
+        if "action" in value.lower() or "dynamics" in value.lower():
+            refs.append(f"{'.'.join(path)}={value!r}")
+    observations = _mapping(_mapping(config.get("sonic_hydra")).get("online_retarget_observations"))
+    for key in observations:
+        if "action" in str(key).lower() or "dynamics" in str(key).lower():
+            refs.append(f"sonic_hydra.online_retarget_observations.{key}")
+    for path, value in _iter_strings(
+        observations,
+        ("sonic_hydra", "online_retarget_observations"),
+    ):
+        if "action" in value.lower() or "dynamics" in value.lower():
+            refs.append(f"{'.'.join(path)}={value!r}")
+    return tuple(dict.fromkeys(refs))
+
+
+def _forbidden_action_dynamics_loss_refs(config: Mapping[str, Any]) -> tuple[str, ...]:
+    refs: list[str] = []
+    for path, value in _iter_strings(_mapping(config.get("losses")), ("losses",)):
+        if _is_action_dynamics_loss_name(value):
+            refs.append(f"{'.'.join(path)}={value!r}")
+
+    sonic_hydra = _mapping(config.get("sonic_hydra"))
+    for loss_name in _string_list(sonic_hydra.get("online_retarget_aux_losses")):
+        if _is_action_dynamics_loss_name(loss_name):
+            refs.append(f"sonic_hydra.online_retarget_aux_losses={loss_name!r}")
+
+    for key, value in _hydra_overrides(config).items():
+        if "aux_loss" not in key:
+            continue
+        combined = f"{key}={value}"
+        if _is_action_dynamics_loss_name(combined):
+            refs.append(f"sonic_hydra.args {key}")
+    return tuple(dict.fromkeys(refs))
+
+
+def _is_action_dynamics_loss_name(value: str) -> bool:
+    lowered = value.lower()
+    return any(token in lowered for token in FORBIDDEN_FORMAL_LOSS_TOKENS)
+
+
 def _contains_token(text: str, token: str) -> bool:
     return re.search(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])", text) is not None
 
@@ -574,16 +640,11 @@ def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -
         errors,
         "sonic_hydra.args must inject soma_morphology into the SONIC tokenizer/encoder",
     )
-    _require(
-        "g1_target_action" in hydra_text,
-        errors,
-        "sonic_hydra.args must inject g1_target_action for dynamics supervision",
-    )
-    _require(
-        "online_retarget.sonic_losses.G1DynamicsActionLoss" in hydra_text,
-        errors,
-        "sonic_hydra.args must wire the dynamics action auxiliary loss",
-    )
+    for decoder in FORBIDDEN_FORMAL_DECODERS:
+        if _contains_token(hydra_text, decoder):
+            errors.append(f"sonic_hydra.args must not reference forbidden decoder {decoder}")
+    if "g1_target_action" in hydra_text:
+        errors.append("sonic_hydra.args must not inject g1_target_action in kin-only runs")
     _require(
         "online_retarget.sonic_validation_callback.SonicVisualValidationCallback" in hydra_text,
         errors,
@@ -627,6 +688,15 @@ def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -
         active_encoders == ("soma",),
         errors,
         "formal retarget configs must set algo.config.actor.backbone.active_encoders=[soma]",
+    )
+    active_decoders = _parse_hydra_list(
+        hydra.get("algo.config.actor.backbone.active_decoders")
+    )
+    _require(
+        active_decoders == (FORMAL_TARGET_DECODER,),
+        errors,
+        f"formal retarget configs must set "
+        f"algo.config.actor.backbone.active_decoders=[{FORMAL_TARGET_DECODER}]",
     )
     for encoder_name in ("g1", "teleop", "smpl"):
         sample_prob = _optional_float(
@@ -685,6 +755,12 @@ def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -
         errors.append(
             "formal retarget configs must not enable g1_soma_latent aux/alignment losses: "
             + ", ".join(sorted(forbidden_aux))
+        )
+    forbidden_loss_refs = _forbidden_action_dynamics_loss_refs(config)
+    if forbidden_loss_refs:
+        errors.append(
+            "formal kin-only configs must not enable action/dynamics losses: "
+            + ", ".join(forbidden_loss_refs)
         )
 
     variant_type = str(_mapping(config.get("variant")).get("type", "")).lower()
