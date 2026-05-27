@@ -18,8 +18,8 @@ CHECK_SONIC_PATHS="${CHECK_SONIC_PATHS:-${EXECUTE_SONIC_NATIVE_TRAINING}}"
 ACCELERATE_MIXED_PRECISION="${ACCELERATE_MIXED_PRECISION:-no}"
 ACCELERATE_DYNAMO_BACKEND="${ACCELERATE_DYNAMO_BACKEND:-no}"
 NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
-NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-}"
-NCCL_ALGO="${NCCL_ALGO:-}"
+NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
+NCCL_ALGO="${NCCL_ALGO:-Ring}"
 NCCL_DEBUG="${NCCL_DEBUG:-}"
 NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-}"
 TORCH_CPP_LOG_LEVEL="${TORCH_CPP_LOG_LEVEL:-}"
@@ -207,7 +207,7 @@ read -r -a _accelerate_cmd <<< "\${ACCELERATE_CMD}"
 EOF
 )
 
-"${PYTHON_BIN}" - "${LAUNCH_ROOT}/launch_manifest.json" "${RUN_GROUP}" "${CONTROL_COMMIT}" "${SONIC_COMMIT}" "${EXECUTE_SONIC_NATIVE_TRAINING}" "${CONFIG}" "${GPU_ASSIGNMENTS}" "${NPROC_PER_NODE}" "${session}" "${NCCL_SHM_DISABLE}" <<'PY'
+"${PYTHON_BIN}" - "${LAUNCH_ROOT}/launch_manifest.json" "${RUN_GROUP}" "${CONTROL_COMMIT}" "${SONIC_COMMIT}" "${EXECUTE_SONIC_NATIVE_TRAINING}" "${CONFIG}" "${GPU_ASSIGNMENTS}" "${NPROC_PER_NODE}" "${session}" "${NCCL_SHM_DISABLE}" "${NCCL_IB_DISABLE}" "${NCCL_ALGO}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -223,6 +223,8 @@ manifest = {
     "accelerate_num_processes": int(sys.argv[8]),
     "tmux_session": sys.argv[9],
     "nccl_shm_disable": sys.argv[10],
+    "nccl_ib_disable": sys.argv[11],
+    "nccl_algo": sys.argv[12],
 }
 out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY

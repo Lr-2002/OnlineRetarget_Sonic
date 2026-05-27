@@ -71,11 +71,17 @@ class NativeRetargetFourGpuLauncherTests(unittest.TestCase):
         self.assertIn("ONLINE_RETARGET_GIT_SHA", text)
         self.assertIn("SONIC_GIT_SHA", text)
 
-    def test_single_config_launcher_defaults_to_nccl_shm_workaround(self) -> None:
+    def test_single_config_launcher_defaults_to_nccl_workarounds(self) -> None:
         text = self.launcher_text
         self.assertIn('NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"', text)
+        self.assertIn('NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"', text)
+        self.assertIn('NCCL_ALGO="${NCCL_ALGO:-Ring}"', text)
         self.assertIn('export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE}"', text)
+        self.assertIn('export NCCL_IB_DISABLE="${NCCL_IB_DISABLE}"', text)
+        self.assertIn('export NCCL_ALGO="${NCCL_ALGO}"', text)
         self.assertIn('"nccl_shm_disable": sys.argv[10]', text)
+        self.assertIn('"nccl_ib_disable": sys.argv[11]', text)
+        self.assertIn('"nccl_algo": sys.argv[12]', text)
 
 
 if __name__ == "__main__":
