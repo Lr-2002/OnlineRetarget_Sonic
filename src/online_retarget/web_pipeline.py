@@ -61,6 +61,9 @@ SOMA_GMR_BVH_JOINT_ALIASES = {
     "RightLeg": "RightUpLeg",
     "RightShin": "RightLeg",
 }
+SOMA_GMR_BVH_REQUIRED_JOINTS = frozenset(
+    (*SOMA_GMR_BVH_JOINT_ALIASES.keys(), "LeftToeBase", "RightToeBase")
+)
 
 STAGE_ORDER = ("load", "retarget", "kinematic_sim", "physics_sim")
 KINEMATIC_BODY_NAMES = (
@@ -748,7 +751,7 @@ def _load_gmr_bvh_frames(source_path: Path, source_kind: str) -> tuple[Sequence[
     from general_motion_retargeting.utils.lafan1 import load_bvh_file  # type: ignore[import-not-found]
 
     bvh_format = source_kind.removeprefix("bvh_")
-    gmr_source_path, adapter_report = _prepare_gmr_bvh_source(source_path)
+    gmr_source_path, adapter_report = _prepare_gmr_bvh_source(source_path, source_kind)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", ResourceWarning)
         try:
@@ -764,7 +767,10 @@ def _load_gmr_bvh_frames(source_path: Path, source_kind: str) -> tuple[Sequence[
     return frames, float(human_height), fps, adapter_report
 
 
-def _prepare_gmr_bvh_source(source_path: Path) -> tuple[Path, dict[str, object]]:
+def _prepare_gmr_bvh_source(source_path: Path, source_kind: str) -> tuple[Path, dict[str, object]]:
+    if source_kind != "bvh_nokov":
+        return source_path, {"applied": False, "reason": f"source_kind_{source_kind}_preserved"}
+
     try:
         source_text = source_path.read_text(encoding="utf-8", errors="replace")
         adapted_text, report = _adapt_soma_bvh_for_gmr(source_text)
@@ -805,17 +811,35 @@ def _adapt_soma_bvh_for_gmr(text: str) -> tuple[str, dict[str, object]]:
         return text, {"applied": False, "reason": "not_soma_root_hips_bvh"}
     root_index, hips_index, root_close_index = span
 
-    adapted_header = _adapt_soma_bvh_header(header_lines, root_index, hips_index, root_close_index)
-    adapted_channels = _bvh_header_channel_counts(adapted_header)
     input_width = sum(count for _, count in original_channels)
-    output_width = sum(count for _, count in adapted_channels)
-    if output_width != input_width - 6:
-        raise ValueError("SOMA GMR adapter could not account for the dummy Root channels")
-
     adapted_motion, frame_count, nonzero_dummy = _drop_dummy_root_motion_channels(
         motion_lines,
         input_width=input_width,
     )
+    if nonzero_dummy > 0:
+        return text, {
+            "applied": False,
+            "reason": "dummy_root_channels_nonzero",
+            "input_channels": input_width,
+            "frames": frame_count,
+            "dummy_root_nonzero_frames": nonzero_dummy,
+        }
+
+    joint_names = {name for name, _ in original_channels}
+    missing_soma_joints = sorted(SOMA_GMR_BVH_REQUIRED_JOINTS.difference(joint_names))
+    if missing_soma_joints:
+        return text, {
+            "applied": False,
+            "reason": "missing_soma_gmr_joints",
+            "missing_joints": missing_soma_joints,
+        }
+
+    adapted_header = _adapt_soma_bvh_header(header_lines, root_index, hips_index, root_close_index)
+    adapted_channels = _bvh_header_channel_counts(adapted_header)
+    output_width = sum(count for _, count in adapted_channels)
+    if output_width != input_width - 6:
+        raise ValueError("SOMA GMR adapter could not account for the dummy Root channels")
+
     alias_map = {
         source: target
         for source, target in SOMA_GMR_BVH_JOINT_ALIASES.items()

@@ -122,6 +122,16 @@ class WebPipelineTests(unittest.TestCase):
         self.assertEqual(len(frame_line.split()), report["output_channels"])
         self.assertEqual(frame_line.split()[:6], ["1.000000", "2.000000", "3.000000", "10.000000", "20.000000", "30.000000"])
 
+    def test_non_soma_root_hips_bvh_adapter_preserves_real_root_channels(self):
+        original = _bvh_text()
+        adapted, report = _adapt_soma_bvh_for_gmr(original)
+
+        self.assertFalse(report["applied"])
+        self.assertEqual(report["reason"], "dummy_root_channels_nonzero")
+        self.assertEqual(report["input_channels"], 24)
+        self.assertEqual(report["dummy_root_nonzero_frames"], 2)
+        self.assertEqual(adapted, original)
+
     def test_raw_soma_bvh_web_pipeline_uses_gmr_adapter_without_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
