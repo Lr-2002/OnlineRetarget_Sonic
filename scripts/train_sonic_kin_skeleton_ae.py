@@ -13,6 +13,7 @@ pose target for OnlineRetarget diagnostics:
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import datetime as dt
 import hashlib
@@ -35,6 +36,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -239,6 +241,85 @@ def resolve_text(value: str, config: dict[str, Any], run_group: str) -> str:
 
 def resolve_output_dir(config: dict[str, Any], run_group: str) -> Path:
     return Path(resolve_text(str(config["output_dir"]), config, run_group))
+
+
+def distributed_env(env: Mapping[str, str] | None = None) -> dict[str, int]:
+    source = os.environ if env is None else env
+    rank = int(source.get("RANK", "0"))
+    world_size = int(source.get("WORLD_SIZE", "1"))
+    local_rank = int(source.get("LOCAL_RANK", str(rank)))
+    return {"rank": rank, "world_size": world_size, "local_rank": local_rank}
+
+
+def setup_distributed_runtime() -> dict[str, Any]:
+    env = distributed_env()
+    distributed = env["world_size"] > 1
+    cuda_available = torch.cuda.is_available()
+    if cuda_available:
+        device_index = env["local_rank"] if distributed else 0
+        torch.cuda.set_device(device_index)
+        device = torch.device("cuda", device_index)
+        backend = "nccl"
+    else:
+        device = torch.device("cpu")
+        backend = "gloo"
+    if distributed:
+        if not torch.distributed.is_available():
+            raise RuntimeError("torch.distributed is required for WORLD_SIZE > 1")
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group(backend=backend, init_method="env://")
+    return {**env, "distributed": distributed, "device": device, "backend": backend}
+
+
+def cleanup_distributed_runtime(runtime: Mapping[str, Any]) -> None:
+    if runtime.get("distributed") and torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
+
+
+def distributed_barrier(runtime: Mapping[str, Any]) -> None:
+    if runtime.get("distributed") and torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+
+def is_main_process(runtime: Mapping[str, Any]) -> bool:
+    return int(runtime.get("rank", 0)) == 0
+
+
+def unwrap_model(model: nn.Module) -> nn.Module:
+    return model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model
+
+
+def average_metric_dict(
+    metrics: dict[str, float],
+    runtime: Mapping[str, Any],
+    device: torch.device,
+) -> dict[str, float]:
+    if not metrics or not runtime.get("distributed"):
+        return metrics
+    keys = sorted(metrics)
+    values = torch.tensor([float(metrics[key]) for key in keys], dtype=torch.float64, device=device)
+    torch.distributed.all_reduce(values, op=torch.distributed.ReduceOp.SUM)
+    values /= int(runtime["world_size"])
+    return {key: float(value) for key, value in zip(keys, values.detach().cpu().tolist())}
+
+
+def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    updated = copy.deepcopy(config)
+    if args.max_steps is not None:
+        updated["training"]["max_steps"] = int(args.max_steps)
+    if args.disable_visual_validation:
+        visual = dict(updated.get("visual_validation", {}))
+        visual["enabled"] = False
+        updated["visual_validation"] = visual
+    if args.wandb_mode:
+        wandb_cfg = dict(updated.get("wandb", {}))
+        if args.wandb_mode == "disabled":
+            wandb_cfg["enabled"] = False
+        else:
+            wandb_cfg["mode"] = args.wandb_mode
+            os.environ.setdefault("WANDB_MODE", args.wandb_mode)
+        updated["wandb"] = wandb_cfg
+    return updated
 
 
 def quat_normalize(q: np.ndarray) -> np.ndarray:
@@ -1094,9 +1175,14 @@ def compute_or_load_stats(
     train_dataset: KinWindowDataset,
     config: dict[str, Any],
     device: torch.device,
+    runtime: Mapping[str, Any] | None = None,
 ) -> dict[str, torch.Tensor]:
     stats_path = output_dir / "stats" / "normalization.pt"
     if stats_path.exists():
+        payload = torch.load(stats_path, map_location=device, weights_only=False)
+        return {key: value.to(device) for key, value in payload.items() if torch.is_tensor(value)}
+    if runtime is not None and runtime.get("distributed") and not is_main_process(runtime):
+        distributed_barrier(runtime)
         payload = torch.load(stats_path, map_location=device, weights_only=False)
         return {key: value.to(device) for key, value in payload.items() if torch.is_tensor(value)}
 
@@ -1146,6 +1232,8 @@ def compute_or_load_stats(
     }
     stats_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({key: value.cpu() for key, value in payload.items()}, stats_path)
+    if runtime is not None and runtime.get("distributed"):
+        distributed_barrier(runtime)
     return payload
 
 
@@ -2365,6 +2453,7 @@ def write_manifest(
     skeleton_dim: int,
     target_dim: int,
     skipped_index_rows: int,
+    runtime: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_root = Path(config["source_repo"])
     control_root = Path.cwd()
@@ -2409,6 +2498,12 @@ def write_manifest(
             "skeleton": skeleton_dim,
             "target": target_dim,
         },
+        "distributed": {
+            "rank": int(runtime.get("rank", 0)) if runtime is not None else 0,
+            "world_size": int(runtime.get("world_size", 1)) if runtime is not None else 1,
+            "local_rank": int(runtime.get("local_rank", 0)) if runtime is not None else 0,
+            "backend": str(runtime.get("backend", "none")) if runtime is not None else "none",
+        },
         "data_snapshot": data_snapshot,
         "metrics_path": str(output_dir / "loss_curve.csv"),
         "notes": config["purpose"],
@@ -2430,6 +2525,8 @@ def init_wandb(config: dict[str, Any], manifest: dict[str, Any], output_dir: Pat
     wandb_dir.mkdir(parents=True, exist_ok=True)
     name = resolve_text(wandb_cfg.get("name", config["variant"]["name"]), config, run_group)
     group = resolve_text(wandb_cfg.get("group", run_group), config, run_group)
+    mode = wandb_cfg.get("mode") or os.environ.get("WANDB_MODE")
+    init_kwargs = {"mode": mode} if mode else {}
     run = wandb.init(
         project=wandb_cfg["project"],
         entity=wandb_cfg.get("entity"),
@@ -2439,6 +2536,7 @@ def init_wandb(config: dict[str, Any], manifest: dict[str, Any], output_dir: Pat
         config={**config, "manifest": manifest},
         tags=wandb_cfg.get("tags", []),
         resume="allow",
+        **init_kwargs,
     )
     if run is not None:
         run.summary["git_commit"] = manifest["control_revision_actual"]
@@ -2446,7 +2544,11 @@ def init_wandb(config: dict[str, Any], manifest: dict[str, Any], output_dir: Pat
     return run
 
 
-def validate_runtime(config: dict[str, Any], output_dir: Path) -> None:
+def validate_runtime(
+    config: dict[str, Any],
+    output_dir: Path,
+    runtime: Mapping[str, Any] | None = None,
+) -> None:
     write_root = Path(config["runtime"]["write_root"])
     if output_dir != write_root and write_root not in output_dir.parents:
         raise ValueError(f"output_dir must be under write_root {write_root}: {output_dir}")
@@ -2459,6 +2561,11 @@ def validate_runtime(config: dict[str, Any], output_dir: Path) -> None:
     required_gpu_count = int(config["runtime"].get("required_gpu_count", 1))
     if torch.cuda.device_count() < required_gpu_count:
         raise RuntimeError(f"expected at least {required_gpu_count} visible GPU(s), found {torch.cuda.device_count()}")
+    world_size = int(runtime.get("world_size", 1)) if runtime is not None else 1
+    if required_gpu_count > 1 and world_size != required_gpu_count:
+        raise RuntimeError(
+            f"expected torchrun WORLD_SIZE={required_gpu_count} for this config, got {world_size}"
+        )
     if config["input_data"].get("format") == "soma_motionlib":
         for key in ("robot_motion_dir", "soma_motion_dir"):
             path = Path(config["input_data"][key])
@@ -2471,6 +2578,8 @@ def validate_runtime(config: dict[str, Any], output_dir: Path) -> None:
         if not index_path_from_config(config).exists():
             raise FileNotFoundError(f"index is missing: {index_path_from_config(config)}")
     source_root = Path(config["source_repo"])
+    if runtime is not None and not is_main_process(runtime):
+        return
     if config["runtime"].get("require_committed_code", True):
         control_root = Path.cwd()
         if git_revision(control_root) is None:
@@ -2495,224 +2604,304 @@ def set_seed(seed: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        help="Override training.max_steps for short supervised smoke checks.",
+    )
+    parser.add_argument(
+        "--wandb-mode",
+        choices=("online", "offline", "disabled"),
+        help="Override W&B mode; disabled prevents W&B initialization.",
+    )
+    parser.add_argument(
+        "--disable-visual-validation",
+        action="store_true",
+        help="Disable visual validation for short smoke checks.",
+    )
+    parser.add_argument("--local-rank", "--local_rank", type=int, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.local_rank is not None and "LOCAL_RANK" not in os.environ:
+        os.environ["LOCAL_RANK"] = str(args.local_rank)
 
-    config = read_config(args.config)
-    run_group = os.environ.get("KIN_RUN_GROUP", timestamp_compact())
-    output_dir = resolve_output_dir(config, run_group)
-    validate_runtime(config, output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "logs").mkdir(parents=True, exist_ok=True)
+    config = apply_cli_overrides(read_config(args.config), args)
+    runtime = setup_distributed_runtime()
+    try:
+        is_main = is_main_process(runtime)
+        rank = int(runtime["rank"])
+        world_size = int(runtime["world_size"])
+        run_group = os.environ.get("KIN_RUN_GROUP", timestamp_compact())
+        output_dir = resolve_output_dir(config, run_group)
+        validate_runtime(config, output_dir, runtime)
+        if is_main:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "logs").mkdir(parents=True, exist_ok=True)
+        distributed_barrier(runtime)
 
-    seed = int(config["training"]["seed"])
-    set_seed(seed)
-    device = torch.device("cuda:0")
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+        seed = int(config["training"]["seed"])
+        set_seed(seed)
+        device = runtime["device"]
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
-    data_root = Path(config["input_data"].get("data_root", config["input_data"].get("robot_motion_dir", ".")))
-    rows, skipped = rows_from_index(config, data_root)
-    split_rows(rows, float(config["split"]["validation_ratio"]), str(config["split"]["hash_salt"]))
-    train_dataset = KinWindowDataset(rows, "train", config)
-    validation_dataset = KinWindowDataset(rows, "validation", config)
-    stats = compute_or_load_stats(output_dir, train_dataset, config, device)
+        data_root = Path(config["input_data"].get("data_root", config["input_data"].get("robot_motion_dir", ".")))
+        rows, skipped = rows_from_index(config, data_root)
+        split_rows(rows, float(config["split"]["validation_ratio"]), str(config["split"]["hash_salt"]))
+        train_dataset = KinWindowDataset(rows, "train", config)
+        validation_dataset = KinWindowDataset(rows, "validation", config)
+        stats = compute_or_load_stats(output_dir, train_dataset, config, device, runtime)
 
-    feature_cfg = config["features"]
-    window = int(feature_cfg["future_window_frames"])
-    motion_dim = int(stats["motion_mean"].numel())
-    skeleton_dim = int(stats["skeleton_mean"].numel())
-    target_dim = int(stats["target_mean"].numel())
-    root_pose_dim = root_pose_target_dim(config, window)
-    command_dim = target_command_dim(target_dim, window, config)
-    if command_dim <= 0 or command_dim % (window * 2) != 0:
-        raise ValueError(
-            f"target_dim={target_dim} is incompatible with window={window} and root pose target"
+        feature_cfg = config["features"]
+        window = int(feature_cfg["future_window_frames"])
+        motion_dim = int(stats["motion_mean"].numel())
+        skeleton_dim = int(stats["skeleton_mean"].numel())
+        target_dim = int(stats["target_mean"].numel())
+        root_pose_dim = root_pose_target_dim(config, window)
+        command_dim = target_command_dim(target_dim, window, config)
+        if command_dim <= 0 or command_dim % (window * 2) != 0:
+            raise ValueError(
+                f"target_dim={target_dim} is incompatible with window={window} and root pose target"
+            )
+        joint_dim = command_dim // (window * 2)
+        raw_model = make_model(motion_dim, skeleton_dim, target_dim, config).to(device)
+        if runtime["distributed"]:
+            model: nn.Module = nn.parallel.DistributedDataParallel(
+                raw_model,
+                device_ids=[int(runtime["local_rank"])] if device.type == "cuda" else None,
+            )
+        else:
+            model = raw_model
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=float(config["training"]["learning_rate"]),
+            weight_decay=float(config["training"]["weight_decay"]),
         )
-    joint_dim = command_dim // (window * 2)
-    model = make_model(motion_dim, skeleton_dim, target_dim, config).to(device)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(config["training"]["learning_rate"]),
-        weight_decay=float(config["training"]["weight_decay"]),
-    )
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=1,
-        shuffle=True,
-        num_workers=int(config["training"]["num_workers"]),
-        collate_fn=collate_chunks,
-        pin_memory=True,
-        persistent_workers=int(config["training"]["num_workers"]) > 0,
-    )
-    val_loader = DataLoader(
-        validation_dataset,
-        batch_size=1,
-        shuffle=False,
-        num_workers=max(0, int(config["training"]["num_workers"]) // 2),
-        collate_fn=collate_chunks,
-        pin_memory=True,
-    )
-    loss_curve = output_dir / "loss_curve.csv"
-    write_loss_header(loss_curve)
-    manifest = write_manifest(
-        output_dir,
-        args.config,
-        config,
-        run_group,
-        rows,
-        train_dataset,
-        validation_dataset,
-        motion_dim,
-        skeleton_dim,
-        target_dim,
-        skipped,
-    )
-    wandb_run = init_wandb(config, manifest, output_dir, run_group)
+        train_sampler = (
+            DistributedSampler(
+                train_dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=True,
+                drop_last=False,
+            )
+            if runtime["distributed"]
+            else None
+        )
+        val_sampler = (
+            DistributedSampler(
+                validation_dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=False,
+                drop_last=False,
+            )
+            if runtime["distributed"]
+            else None
+        )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=1,
+            shuffle=train_sampler is None,
+            sampler=train_sampler,
+            num_workers=int(config["training"]["num_workers"]),
+            collate_fn=collate_chunks,
+            pin_memory=True,
+            persistent_workers=int(config["training"]["num_workers"]) > 0,
+        )
+        val_loader = DataLoader(
+            validation_dataset,
+            batch_size=1,
+            shuffle=False,
+            sampler=val_sampler,
+            num_workers=max(0, int(config["training"]["num_workers"]) // 2),
+            collate_fn=collate_chunks,
+            pin_memory=True,
+        )
+        loss_curve = output_dir / "loss_curve.csv"
+        if is_main:
+            write_loss_header(loss_curve)
+            manifest = write_manifest(
+                output_dir,
+                args.config,
+                config,
+                run_group,
+                rows,
+                train_dataset,
+                validation_dataset,
+                motion_dim,
+                skeleton_dim,
+                target_dim,
+                skipped,
+                runtime,
+            )
+        distributed_barrier(runtime)
+        if not is_main:
+            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+        wandb_run = init_wandb(config, manifest, output_dir, run_group) if is_main else None
 
-    max_steps = int(config["training"]["max_steps"])
-    per_batch_frames = int(config["training"]["batch_frames"])
-    log_every = int(config["training"]["log_every"])
-    validate_every = int(config["training"]["validate_every"])
-    checkpoint_every = int(config["training"]["checkpoint_every"])
-    keep_last = int(config["training"]["keep_last_checkpoints"])
-    grad_clip = float(config["training"]["grad_clip_norm"])
-    command_weight = float(config["training"].get("command_loss_weight", 1.0))
-    anchor_weight = float(config["training"].get("anchor_loss_weight", 1.0))
-    precision = config["training"].get("precision", "bf16")
-    use_amp = precision in {"bf16", "fp16"}
-    amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
-    recent: deque[dict[str, float]] = deque(maxlen=log_every)
-    rng = torch.Generator(device=device)
-    rng.manual_seed(seed + 20260520)
-    start = time.perf_counter()
-    last_visual_validation_time = start
-    step = 0
+        max_steps = int(config["training"]["max_steps"])
+        per_batch_frames = int(config["training"]["batch_frames"])
+        log_every = int(config["training"]["log_every"])
+        validate_every = int(config["training"]["validate_every"])
+        checkpoint_every = int(config["training"]["checkpoint_every"])
+        keep_last = int(config["training"]["keep_last_checkpoints"])
+        grad_clip = float(config["training"]["grad_clip_norm"])
+        command_weight = float(config["training"].get("command_loss_weight", 1.0))
+        anchor_weight = float(config["training"].get("anchor_loss_weight", 1.0))
+        precision = config["training"].get("precision", "bf16")
+        use_amp = precision in {"bf16", "fp16"}
+        amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
+        recent: deque[dict[str, float]] = deque(maxlen=log_every)
+        rng = torch.Generator(device=device)
+        rng.manual_seed(seed + 20260520 + rank)
+        start = time.perf_counter()
+        last_visual_validation_time = start
+        step = 0
+        epoch = 0
 
-    print(
-        json.dumps(
-            {
-                "event": "start",
-                "variant": config["variant"],
-                "run_group": run_group,
-                "output_dir": str(output_dir),
-                "control_commit": manifest["control_revision_actual"],
-                "sonic_commit": manifest["source_revision_actual"],
-                "train_chunks": len(train_dataset),
-                "validation_chunks": len(validation_dataset),
-            },
-            sort_keys=True,
-        ),
-        flush=True,
-    )
+        if is_main:
+            print(
+                json.dumps(
+                    {
+                        "event": "start",
+                        "variant": config["variant"],
+                        "run_group": run_group,
+                        "output_dir": str(output_dir),
+                        "control_commit": manifest["control_revision_actual"],
+                        "sonic_commit": manifest["source_revision_actual"],
+                        "train_chunks": len(train_dataset),
+                        "validation_chunks": len(validation_dataset),
+                        "world_size": world_size,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
 
-    while step < max_steps:
-        for motion, skeleton, target in train_loader:
-            if step >= max_steps:
-                break
-            motion = motion.to(device, non_blocking=True)
-            skeleton = skeleton.to(device, non_blocking=True)
-            target = target.to(device, non_blocking=True)
-            if motion.shape[0] > per_batch_frames:
-                select = torch.randint(0, motion.shape[0], (per_batch_frames,), generator=rng, device=device)
-                motion = motion[select]
-                skeleton = skeleton[select]
-                target = target[select]
-            motion_n, skeleton_n, target_n = normalize_batch(motion, skeleton, target, stats)
+        while step < max_steps:
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+            for motion, skeleton, target in train_loader:
+                if step >= max_steps:
+                    break
+                motion = motion.to(device, non_blocking=True)
+                skeleton = skeleton.to(device, non_blocking=True)
+                target = target.to(device, non_blocking=True)
+                if motion.shape[0] > per_batch_frames:
+                    select = torch.randint(0, motion.shape[0], (per_batch_frames,), generator=rng, device=device)
+                    motion = motion[select]
+                    skeleton = skeleton[select]
+                    target = target[select]
+                motion_n, skeleton_n, target_n = normalize_batch(motion, skeleton, target, stats)
 
-            optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
-                pred_n = model(motion_n, skeleton_n)
-                loss, metrics = loss_and_metrics(
-                    pred_n,
-                    target_n,
-                    target,
-                    stats,
-                    command_dim,
-                    joint_dim,
-                    root_pose_dim,
-                    include_root_pos_target(config),
-                    command_weight,
-                    anchor_weight,
-                )
-            loss.backward()
-            if grad_clip > 0:
-                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            optimizer.step()
-            step += 1
-            recent.append(metrics)
+                optimizer.zero_grad(set_to_none=True)
+                with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
+                    pred_n = model(motion_n, skeleton_n)
+                    loss, metrics = loss_and_metrics(
+                        pred_n,
+                        target_n,
+                        target,
+                        stats,
+                        command_dim,
+                        joint_dim,
+                        root_pose_dim,
+                        include_root_pos_target(config),
+                        command_weight,
+                        anchor_weight,
+                    )
+                loss.backward()
+                if grad_clip > 0:
+                    nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                optimizer.step()
+                step += 1
+                metrics = average_metric_dict(metrics, runtime, device)
+                recent.append(metrics)
 
-            if step % log_every == 0 or step == 1:
-                elapsed = time.perf_counter() - start
-                avg = {key: float(np.mean([row[key] for row in recent])) for key in metrics}
-                append_loss_row(loss_curve, step, elapsed, avg)
-                log_payload = {f"train/{key}": value for key, value in avg.items()}
-                log_payload["elapsed_sec"] = elapsed
-                log_payload["step"] = step
-                print(json.dumps({"event": "train", **log_payload}, sort_keys=True), flush=True)
-                if wandb_run is not None:
-                    wandb_run.log(log_payload, step=step)
-
-            if step % validate_every == 0 or step == 1:
-                val_metrics = validate(
-                    model,
-                    val_loader,
-                    stats,
-                    device,
-                    config,
-                    command_dim,
-                    joint_dim,
-                    root_pose_dim,
-                )
-                if val_metrics:
-                    print(json.dumps({"event": "validation", "step": step, **val_metrics}, sort_keys=True), flush=True)
+                if is_main and (step % log_every == 0 or step == 1):
+                    elapsed = time.perf_counter() - start
+                    avg = {key: float(np.mean([row[key] for row in recent])) for key in metrics}
+                    append_loss_row(loss_curve, step, elapsed, avg)
+                    log_payload = {f"train/{key}": value for key, value in avg.items()}
+                    log_payload["elapsed_sec"] = elapsed
+                    log_payload["step"] = step
+                    print(json.dumps({"event": "train", **log_payload}, sort_keys=True), flush=True)
                     if wandb_run is not None:
-                        wandb_run.log(val_metrics, step=step)
+                        wandb_run.log(log_payload, step=step)
 
-            now = time.perf_counter()
-            if visual_validation_due(config, step, now=now, last_time=last_visual_validation_time):
-                try:
-                    visual_metrics = run_visual_validation(
-                        model=model,
-                        validation_rows=validation_dataset.rows,
-                        stats=stats,
-                        device=device,
-                        config=config,
-                        output_dir=output_dir,
-                        step=step,
-                        joint_dim=joint_dim,
-                        wandb_run=wandb_run,
+                if step % validate_every == 0 or step == 1:
+                    if val_sampler is not None:
+                        val_sampler.set_epoch(step)
+                    val_metrics = validate(
+                        model,
+                        val_loader,
+                        stats,
+                        device,
+                        config,
+                        command_dim,
+                        joint_dim,
+                        root_pose_dim,
                     )
-                except Exception as exc:
-                    visual_metrics = {
-                        "visual_validation/videos_ok": 0.0,
-                        "visual_validation/videos_failed": float(config.get("visual_validation", {}).get("num_videos", 8)),
-                    }
-                    visual_error = {
-                        "event": "visual_validation",
-                        "step": step,
-                        "status": "failed",
-                        "message": str(exc),
-                    }
-                    print(json.dumps(visual_error, sort_keys=True), flush=True)
-                else:
-                    print(
-                        json.dumps({"event": "visual_validation", "step": step, **visual_metrics}, sort_keys=True),
-                        flush=True,
-                    )
-                if wandb_run is not None and visual_metrics:
-                    wandb_run.log(visual_metrics, step=step)
-                last_visual_validation_time = now
+                    val_metrics = average_metric_dict(val_metrics, runtime, device)
+                    if is_main and val_metrics:
+                        print(json.dumps({"event": "validation", "step": step, **val_metrics}, sort_keys=True), flush=True)
+                        if wandb_run is not None:
+                            wandb_run.log(val_metrics, step=step)
 
-            if step % checkpoint_every == 0 or step == 1:
-                save_checkpoint(output_dir, model, optimizer, step, metrics, keep_last)
+                now = time.perf_counter()
+                if visual_validation_due(config, step, now=now, last_time=last_visual_validation_time):
+                    visual_metrics: dict[str, float] = {}
+                    if is_main:
+                        try:
+                            visual_metrics = run_visual_validation(
+                                model=unwrap_model(model),
+                                validation_rows=validation_dataset.rows,
+                                stats=stats,
+                                device=device,
+                                config=config,
+                                output_dir=output_dir,
+                                step=step,
+                                joint_dim=joint_dim,
+                                wandb_run=wandb_run,
+                            )
+                        except Exception as exc:
+                            visual_metrics = {
+                                "visual_validation/videos_ok": 0.0,
+                                "visual_validation/videos_failed": float(config.get("visual_validation", {}).get("num_videos", 8)),
+                            }
+                            visual_error = {
+                                "event": "visual_validation",
+                                "step": step,
+                                "status": "failed",
+                                "message": str(exc),
+                            }
+                            print(json.dumps(visual_error, sort_keys=True), flush=True)
+                        else:
+                            print(
+                                json.dumps({"event": "visual_validation", "step": step, **visual_metrics}, sort_keys=True),
+                                flush=True,
+                            )
+                        if wandb_run is not None and visual_metrics:
+                            wandb_run.log(visual_metrics, step=step)
+                    distributed_barrier(runtime)
+                    last_visual_validation_time = now
 
-    final_metrics = {"step": step, "elapsed_sec": time.perf_counter() - start, "finished": True}
-    save_checkpoint(output_dir, model, optimizer, step, final_metrics, keep_last)
-    if wandb_run is not None:
-        wandb_run.summary.update(final_metrics)
-        wandb_run.finish()
-    print(json.dumps({"event": "finished", **final_metrics}, sort_keys=True), flush=True)
+                if step % checkpoint_every == 0 or step == 1:
+                    if is_main:
+                        save_checkpoint(output_dir, unwrap_model(model), optimizer, step, metrics, keep_last)
+                    distributed_barrier(runtime)
+            epoch += 1
+
+        final_metrics = {"step": step, "elapsed_sec": time.perf_counter() - start, "finished": True}
+        if is_main:
+            save_checkpoint(output_dir, unwrap_model(model), optimizer, step, final_metrics, keep_last)
+            if wandb_run is not None:
+                wandb_run.summary.update(final_metrics)
+                wandb_run.finish()
+            print(json.dumps({"event": "finished", **final_metrics}, sort_keys=True), flush=True)
+        distributed_barrier(runtime)
+    finally:
+        cleanup_distributed_runtime(runtime)
 
 
 if __name__ == "__main__":

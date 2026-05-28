@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import unittest
 
@@ -9,6 +10,12 @@ LAUNCHER = REPO_ROOT / "scripts" / "remote_start_sonic_native_retarget_4x1gpu.sh
 DDP_LAUNCHER = REPO_ROOT / "scripts" / "remote_start_sonic_native_retarget_4gpu.sh"
 KIN_ONLY_LAUNCHER = REPO_ROOT / "scripts" / "remote_start_sonic_kin_only_soma_encoder_4gpu.sh"
 KIN_SKELETON_LAUNCHER = REPO_ROOT / "scripts" / "remote_start_sonic_kin_skeleton_4x1gpu.sh"
+SUPERVISED_DDP_LAUNCHER = REPO_ROOT / "scripts" / "remote_start_sonic_kin_soma_motionlib_4gpu.sh"
+SUPERVISED_TRAINER = REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py"
+SUPERVISED_CONFIGS = (
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_uniform_4gpu.json",
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_proportional_4gpu.json",
+)
 
 
 class RemoteLauncherGuardrailTests(unittest.TestCase):
@@ -102,8 +109,103 @@ class KinOnlySomaEncoderLauncherTests(unittest.TestCase):
 
     def test_wrapper_defaults_to_proportional_four_gpu_config(self) -> None:
         text = self.launcher_text
-        self.assertIn("configs/sonic_kin_only_soma_encoder_proportional.json", text)
-        self.assertIn("remote_start_sonic_native_retarget_4gpu.sh", text)
+        self.assertIn("configs/sonic_kin_soma_motionlib_proportional_4gpu.json", text)
+        self.assertIn("remote_start_sonic_kin_soma_motionlib_4gpu.sh", text)
+
+
+class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
+    def test_configs_are_strict_supervised_four_gpu_baselines(self) -> None:
+        expected = {
+            "uniform": "sonic_kin_only_soma_encoder_uniform",
+            "proportional": "sonic_kin_only_soma_encoder_proportional",
+        }
+        for path in SUPERVISED_CONFIGS:
+            with self.subTest(path=path.name):
+                config = json.loads(path.read_text(encoding="utf-8"))
+                topology = config["input_data"]["soma_topology"]
+                self.assertEqual(config["training_lane"], "soma_motionlib_kin_only")
+                self.assertEqual(config["variant"]["name"], expected[topology])
+                self.assertEqual(config["variant"]["soma_topology"], topology)
+                self.assertEqual(config["runtime"]["required_gpu_count"], 4)
+                self.assertEqual(config["training"]["required_gpu_count"], 4)
+                self.assertEqual(config["target_decoder"]["primary"], "g1_kin")
+                self.assertEqual(config["decoder_targets"], ["g1_kin"])
+                self.assertEqual(config["losses"]["auxiliary"], [])
+                self.assertIn(f"soma_{topology}_filtered_v1", config["input_data"]["soma_motion_dir"])
+                text = path.read_text(encoding="utf-8")
+                self.assertNotIn("sonic_hydra", text)
+                self.assertNotIn("train_agent_trl.py", text)
+                self.assertNotIn("KinematicActionUniversalTokenModule", text)
+                self.assertNotIn("g1_dyn", text)
+                self.assertNotIn("g1_target_action", text)
+                self.assertNotIn("episode_length", text)
+
+
+class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.launcher_text = SUPERVISED_DDP_LAUNCHER.read_text(encoding="utf-8")
+
+    def test_launcher_uses_torch_distributed_supervised_entrypoint(self) -> None:
+        text = self.launcher_text
+        self.assertIn("configs/sonic_kin_soma_motionlib_proportional_4gpu.json", text)
+        self.assertIn('NPROC_PER_NODE="${NPROC_PER_NODE:-4}"', text)
+        self.assertIn("torch.distributed.run", text)
+        self.assertIn("scripts/train_sonic_kin_skeleton_ae.py", text)
+        self.assertNotIn("gear_sonic/train_agent_trl.py", text)
+        self.assertNotIn("accelerate.commands.launch", text)
+
+    def test_launcher_rejects_non_supervised_or_rollout_configs(self) -> None:
+        text = self.launcher_text
+        self.assertIn("training_lane=soma_motionlib_kin_only", text)
+        self.assertIn("CONFIG must use training_lane=soma_motionlib_kin_only", text)
+        self.assertIn("KinematicActionUniversalTokenModule", text)
+        self.assertIn("sonic_hydra", text)
+        self.assertIn("episode_length", text)
+        self.assertIn("NPROC_PER_NODE must match required_gpu_count", text)
+
+    def test_launcher_supports_short_smoke_overrides(self) -> None:
+        text = self.launcher_text
+        self.assertIn("MAX_STEPS", text)
+        self.assertIn("--max-steps", text)
+        self.assertIn("WANDB_MODE", text)
+        self.assertIn("--wandb-mode", text)
+        self.assertIn("DISABLE_VISUAL_VALIDATION", text)
+        self.assertIn("--disable-visual-validation", text)
+
+
+class SupervisedTrainerDdpGuardrailTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.trainer_text = SUPERVISED_TRAINER.read_text(encoding="utf-8")
+
+    def test_trainer_initializes_torchrun_ddp_runtime(self) -> None:
+        text = self.trainer_text
+        self.assertIn("RANK", text)
+        self.assertIn("WORLD_SIZE", text)
+        self.assertIn("LOCAL_RANK", text)
+        self.assertIn("torch.distributed.init_process_group", text)
+        self.assertIn("DistributedDataParallel", text)
+        self.assertIn("DistributedSampler", text)
+        self.assertIn("--local-rank", text)
+        self.assertIn("expected torchrun WORLD_SIZE", text)
+
+    def test_trainer_keeps_side_effects_on_main_rank(self) -> None:
+        text = self.trainer_text
+        self.assertIn("is_main_process", text)
+        self.assertIn("write_loss_header(loss_curve)", text)
+        self.assertIn("manifest = write_manifest", text)
+        self.assertIn("wandb_run = init_wandb(config, manifest, output_dir, run_group) if is_main else None", text)
+        self.assertIn("run_visual_validation", text)
+        self.assertIn("save_checkpoint(output_dir, unwrap_model(model)", text)
+        self.assertIn("distributed_barrier(runtime)", text)
+
+    def test_trainer_supports_short_smoke_cli_overrides(self) -> None:
+        text = self.trainer_text
+        self.assertIn("--max-steps", text)
+        self.assertIn("--wandb-mode", text)
+        self.assertIn("--disable-visual-validation", text)
+        self.assertIn("apply_cli_overrides", text)
 
 
 class HistoricalKinSkeletonLauncherTests(unittest.TestCase):

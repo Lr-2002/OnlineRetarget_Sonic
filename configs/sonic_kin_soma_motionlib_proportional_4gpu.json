@@ -1,0 +1,143 @@
+{
+  "schema_version": "1.1.0",
+  "owner": "OnlineRetarget",
+  "training_lane": "soma_motionlib_kin_only",
+  "purpose": "Strict 4-GPU supervised proportional-SOMA baseline. SOMA motion/skeleton features to G1 g1_kin targets only; no PPO, no Isaac rollout, and no rollout metric surface.",
+  "source_repo": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training",
+  "source_rev": "remote-latest-required-before-training",
+  "input_data": {
+    "format": "soma_motionlib",
+    "soma_topology": "proportional",
+    "robot_motion_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/robot_filtered_v1",
+    "soma_motion_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/soma_proportional_filtered_v1",
+    "source_fps": 120.0,
+    "target_fps": 50.0,
+    "max_duration_delta_sec": 0.05,
+    "max_clips": 20000,
+    "robot_root_rot_format": "xyzw"
+  },
+  "source_features": [
+    "soma_joints_multi_future_local_nonflat_plus_soma_root_ori_b_multi_future",
+    "actor_specific_proportional_soma_skeleton"
+  ],
+  "target_decoder": {
+    "primary": "g1_kin",
+    "auxiliary": []
+  },
+  "decoder_targets": [
+    "g1_kin"
+  ],
+  "target_features": [
+    "command_multi_future_nonflat",
+    "root_pos_w_mf",
+    "root_rot_w_mf"
+  ],
+  "losses": {
+    "primary": [
+      "g1_kin_joint_rmse",
+      "g1_kin_velocity_rmse",
+      "g1_kin_root_position_rmse",
+      "g1_kin_root_orientation_rmse"
+    ],
+    "auxiliary": []
+  },
+  "output_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_kin_soma_motionlib_supervised_runs/{run_group}/proportional",
+  "validation_command": "CONFIG=configs/sonic_kin_soma_motionlib_proportional_4gpu.json scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh",
+  "expected_artifacts": [
+    "manifest.json",
+    "loss_curve.csv",
+    "stats/normalization.pt",
+    "checkpoints/latest.pt",
+    "logs/train.log"
+  ],
+  "variant": {
+    "name": "sonic_kin_only_soma_encoder_proportional",
+    "family": "soma_encoder_baseline",
+    "type": "concat",
+    "soma_topology": "proportional",
+    "gpu_topology": "single_4gpu_ddp_job"
+  },
+  "features": {
+    "future_window_frames": 10,
+    "future_step": 5,
+    "motion_feature": "soma_joints_multi_future_local_nonflat_plus_soma_root_ori_b_multi_future",
+    "skeleton_feature": "anchor_frame_soma_root_local_joint_positions_plus_joint_distances",
+    "target_feature": "command_multi_future_nonflat_plus_root_pos_w_mf_plus_root_rot_w_mf",
+    "include_root_pos_target": true
+  },
+  "split": {
+    "validation_ratio": 0.005,
+    "hash_salt": "sonic-kin-soma-motionlib-supervised-20260528"
+  },
+  "normalization": {
+    "max_frames": 200000,
+    "frames_per_chunk": 1024
+  },
+  "model": {
+    "hidden_dim": 512,
+    "num_layers": 3,
+    "dropout": 0.0
+  },
+  "training": {
+    "seed": 2026052802,
+    "max_steps": 1000000,
+    "required_gpu_count": 4,
+    "batch_frames": 4096,
+    "frame_stride": 1,
+    "loader_chunk_frames": 2048,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.00001,
+    "grad_clip_norm": 1.0,
+    "precision": "bf16",
+    "num_workers": 2,
+    "log_every": 20,
+    "validate_every": 200,
+    "validation_batches": 16,
+    "checkpoint_every": 500,
+    "keep_last_checkpoints": 5,
+    "command_loss_weight": 1.0,
+    "anchor_loss_weight": 1.0
+  },
+  "visual_validation": {
+    "enabled": true,
+    "every_steps": 20000,
+    "every_minutes": 60,
+    "num_videos": 8,
+    "duration_sec": 4.0,
+    "wandb_upload": true,
+    "width": 640,
+    "height": 360,
+    "source_position_scale": 0.01,
+    "source_bvh_roots": [
+      "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/source_bvh_cache"
+    ],
+    "source_bvh_cache": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/source_bvh_cache",
+    "source_bvh_tar": "/mnt/data_oss/online_retarget/lr147_delta_bvh_vis_data_20260525/back_data/soma_proportional.tar",
+    "g1_model_xml": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training/gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml"
+  },
+  "runtime": {
+    "required_gpu_count": 4,
+    "write_root": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs",
+    "forbid_write_roots": [
+      "/home/user/data/motion_data",
+      "/mnt/data_oss"
+    ],
+    "require_committed_code": true,
+    "require_latest_code": true
+  },
+  "wandb": {
+    "enabled": true,
+    "project": "OnlineRetarget",
+    "entity": null,
+    "group": "sonic_kin_only_soma_encoder_supervised_{run_group}",
+    "name": "sonic_kin_only_soma_encoder_proportional_{run_group}",
+    "dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/wandb",
+    "tags": [
+      "sonic-kin-only",
+      "soma-motionlib",
+      "supervised",
+      "proportional",
+      "4gpu"
+    ]
+  }
+}
