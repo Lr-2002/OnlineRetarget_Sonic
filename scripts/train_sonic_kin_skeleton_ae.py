@@ -2540,7 +2540,7 @@ def init_wandb(config: dict[str, Any], manifest: dict[str, Any], output_dir: Pat
     )
     if run is not None:
         run.summary["git_commit"] = manifest["control_revision_actual"]
-        run.summary["sonic_git_commit"] = manifest["source_revision_actual"]
+        run.summary["source_repo_git_commit"] = manifest["source_revision_actual"]
     return run
 
 
@@ -2577,7 +2577,6 @@ def validate_runtime(
             raise FileNotFoundError(f"data_root is missing: {data_root}")
         if not index_path_from_config(config).exists():
             raise FileNotFoundError(f"index is missing: {index_path_from_config(config)}")
-    source_root = Path(config["source_repo"])
     if runtime is not None and not is_main_process(runtime):
         return
     if config["runtime"].get("require_committed_code", True):
@@ -2586,10 +2585,6 @@ def validate_runtime(
             raise RuntimeError(f"control repo is not a git worktree: {control_root}")
         if git_has_tracked_changes(control_root):
             raise RuntimeError(f"control repo has uncommitted tracked changes: {control_root}")
-        if git_revision(source_root) is None:
-            raise RuntimeError(f"source repo is not a git worktree: {source_root}")
-        if git_has_tracked_changes(source_root):
-            raise RuntimeError(f"source repo has uncommitted tracked changes: {source_root}")
     if config["runtime"].get("require_latest_code", True):
         require_latest_git(Path.cwd(), "control repo")
 
@@ -2769,7 +2764,7 @@ def main() -> None:
                         "run_group": run_group,
                         "output_dir": str(output_dir),
                         "control_commit": manifest["control_revision_actual"],
-                        "sonic_commit": manifest["source_revision_actual"],
+                        "source_repo_commit": manifest["source_revision_actual"],
                         "train_chunks": len(train_dataset),
                         "validation_chunks": len(validation_dataset),
                         "world_size": world_size,

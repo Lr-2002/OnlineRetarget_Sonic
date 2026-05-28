@@ -37,6 +37,19 @@ if [[ "${REQUIRED_GPU_COUNT}" != "${NPROC_PER_NODE}" ]]; then
   exit 1
 fi
 
+"${PYTHON_BIN}" - "${CONFIG}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+input_data = config.get("input_data", {})
+for key in ("robot_motion_dir", "soma_motion_dir"):
+    path = Path(str(input_data.get(key, "")))
+    if not path.exists():
+        raise SystemExit(f"{key} is missing: {path}")
+PY
+
 if "${PYTHON_BIN}" -c 'import sys; text=open(sys.argv[1], encoding="utf-8").read(); bad=("train_agent_trl.py","KinematicActionUniversalTokenModule","sonic_hydra","num_envs","reward","episode_length"); sys.exit(1 if any(item in text for item in bad) else 0)' "${CONFIG}"; then
   :
 else
@@ -49,6 +62,26 @@ if [[ "${#VISIBLE_GPUS[@]}" -lt "${NPROC_PER_NODE}" ]]; then
   echo "need at least ${NPROC_PER_NODE} CUDA_VISIBLE_DEVICES entries, got ${CUDA_VISIBLE_DEVICES}" >&2
   exit 1
 fi
+export CUDA_VISIBLE_DEVICES
+
+"${PYTHON_BIN}" - "${NPROC_PER_NODE}" <<'PY'
+import sys
+
+try:
+    import torch
+except Exception as exc:
+    raise SystemExit(f"torch import failed: {exc}") from exc
+
+required = int(sys.argv[1])
+if not torch.cuda.is_available():
+    raise SystemExit("CUDA is required for strict supervised 4-GPU smoke")
+if torch.cuda.device_count() < required:
+    raise SystemExit(
+        f"expected at least {required} visible CUDA device(s), found {torch.cuda.device_count()}"
+    )
+if not torch.distributed.is_available():
+    raise SystemExit("torch.distributed is required for strict supervised DDP smoke")
+PY
 
 require_latest_git() {
   local repo="$1"
@@ -91,15 +124,11 @@ else
 fi
 require_latest_git "${ROOT}" "OnlineRetarget repo"
 
-SONIC_ROOT="$("${PYTHON_BIN}" -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_repo"])' "${CONFIG}")"
-if git -C "${SONIC_ROOT}" diff --quiet && git -C "${SONIC_ROOT}" diff --cached --quiet; then
-  SONIC_COMMIT="$(git -C "${SONIC_ROOT}" rev-parse HEAD)"
-else
-  echo "SONIC source repo has uncommitted tracked changes; commit before training" >&2
-  git -C "${SONIC_ROOT}" status --short >&2
-  exit 1
+SOURCE_ROOT="$("${PYTHON_BIN}" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("source_repo", ""))' "${CONFIG}")"
+EXTERNAL_SOURCE_COMMIT="not-required-for-supervised-entrypoint"
+if [[ -n "${SOURCE_ROOT}" ]] && git -C "${SOURCE_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  EXTERNAL_SOURCE_COMMIT="$(git -C "${SOURCE_ROOT}" rev-parse HEAD)"
 fi
-require_latest_git "${SONIC_ROOT}" "SONIC source repo"
 
 VARIANT="$("${PYTHON_BIN}" -c 'import json,sys; print(json.load(open(sys.argv[1]))["variant"]["name"])' "${CONFIG}")"
 SESSION="sonic_${RUN_GROUP}_${VARIANT}"
@@ -135,12 +164,12 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
 export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
 export NCCL_ALGO="${NCCL_ALGO:-Ring}"
-echo "variant=${VARIANT} nproc=${NPROC_PER_NODE} cuda_visible_devices=${CUDA_VISIBLE_DEVICES} control_commit=${CONTROL_COMMIT} sonic_commit=${SONIC_COMMIT}"
+echo "variant=${VARIANT} nproc=${NPROC_PER_NODE} cuda_visible_devices=${CUDA_VISIBLE_DEVICES} control_commit=${CONTROL_COMMIT} external_source_commit=${EXTERNAL_SOURCE_COMMIT}"
 ${TRAIN_COMMAND} 2>&1 | tee -a ${LOG_PATH_QUOTED}
 EOF
 )
 
-"${PYTHON_BIN}" - "${LAUNCH_ROOT}/launch_manifest.json" "${RUN_GROUP}" "${CONFIG}" "${VARIANT}" "${NPROC_PER_NODE}" "${CUDA_VISIBLE_DEVICES}" "${CONTROL_COMMIT}" "${SONIC_COMMIT}" "${WANDB_MODE:-online}" "${DISABLE_VISUAL_VALIDATION:-0}" "${MAX_STEPS:-}" "${SESSION}" <<'PY'
+"${PYTHON_BIN}" - "${LAUNCH_ROOT}/launch_manifest.json" "${RUN_GROUP}" "${CONFIG}" "${VARIANT}" "${NPROC_PER_NODE}" "${CUDA_VISIBLE_DEVICES}" "${CONTROL_COMMIT}" "${EXTERNAL_SOURCE_COMMIT}" "${WANDB_MODE:-online}" "${DISABLE_VISUAL_VALIDATION:-0}" "${MAX_STEPS:-}" "${SESSION}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -153,7 +182,8 @@ manifest = {
     "nproc_per_node": int(sys.argv[5]),
     "cuda_visible_devices": sys.argv[6],
     "control_commit": sys.argv[7],
-    "sonic_commit": sys.argv[8],
+    "external_source_commit": sys.argv[8],
+    "external_source_guard": "not_required_supervised_entrypoint_no_external_import_exec",
     "wandb_mode": sys.argv[9],
     "disable_visual_validation": sys.argv[10] == "1",
     "max_steps_override": sys.argv[11],

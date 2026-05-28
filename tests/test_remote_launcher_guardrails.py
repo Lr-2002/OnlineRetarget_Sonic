@@ -173,6 +173,19 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
         self.assertIn("DISABLE_VISUAL_VALIDATION", text)
         self.assertIn("--disable-visual-validation", text)
 
+    def test_launcher_preflight_scope_matches_strict_supervised_smoke(self) -> None:
+        text = self.launcher_text
+        self.assertIn('require_latest_git "${ROOT}" "OnlineRetarget repo"', text)
+        self.assertIn("robot_motion_dir", text)
+        self.assertIn("soma_motion_dir", text)
+        self.assertIn("torch.cuda.is_available", text)
+        self.assertIn("torch.distributed.is_available", text)
+        self.assertIn("external_source_guard", text)
+        self.assertIn("not_required_supervised_entrypoint_no_external_import_exec", text)
+        self.assertNotIn("SONIC_ROOT", text)
+        self.assertNotIn("SONIC source repo", text)
+        self.assertNotIn('require_latest_git "${SOURCE_ROOT}"', text)
+
 
 class SupervisedTrainerDdpGuardrailTests(unittest.TestCase):
     @classmethod
@@ -206,6 +219,16 @@ class SupervisedTrainerDdpGuardrailTests(unittest.TestCase):
         self.assertIn("--wandb-mode", text)
         self.assertIn("--disable-visual-validation", text)
         self.assertIn("apply_cli_overrides", text)
+
+    def test_trainer_keeps_external_source_as_metadata_not_runtime_guard(self) -> None:
+        text = self.trainer_text
+        self.assertIn('"source_revision_actual": git_revision(source_root)', text)
+        self.assertIn('"source_status_short": git_status_short(source_root)', text)
+        self.assertIn("source_repo_git_commit", text)
+        self.assertIn("source_repo_commit", text)
+        self.assertNotIn("git_revision(source_root) is None", text)
+        self.assertNotIn("git_has_tracked_changes(source_root)", text)
+        self.assertNotIn("require_latest_git(source_root", text)
 
 
 class HistoricalKinSkeletonLauncherTests(unittest.TestCase):
