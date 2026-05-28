@@ -1,4 +1,4 @@
-"""Shared feature packing for SONIC-native retarget training and inference."""
+"""Shared feature packing for SONIC kin-only SOMA encoder training and inference."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .sonic_native_contract import (
+    FORMAL_TRAINING_LANE,
     FORBIDDEN_SOURCE_FEATURES,
     TARGET_FPS,
     load_config,
@@ -28,7 +29,7 @@ class SonicNativeFeatureContract:
     target_label_keys: tuple[str, ...]
     target_fps: float = TARGET_FPS
     optional_source_keys: tuple[str, ...] = ()
-    contract_name: str = "sonic_native_retarget"
+    contract_name: str = FORMAL_TRAINING_LANE
     variant: str = "unknown"
 
     @classmethod

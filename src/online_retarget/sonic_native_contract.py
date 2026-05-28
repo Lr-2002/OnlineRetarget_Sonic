@@ -1,8 +1,9 @@
-"""Validation contract for SONIC-native retargeting configs.
+"""Validation contract for active SONIC kin-only SOMA encoder configs.
 
-The formal OnlineRetarget lane is human/SOMA/BVH source motion plus skeleton
-conditioning into SONIC's existing G1 decoder path.  Target-only G1 state fields
-are allowed for labels and visualization, but not as deployable encoder inputs.
+The formal OnlineRetarget lane is either uniform or proportional SOMA/BVH
+source motion plus skeleton conditioning into SONIC's existing g1_kin decoder
+path.  Target-only G1 state fields are allowed for labels and visualization,
+but not as deployable encoder inputs.
 """
 
 from __future__ import annotations
@@ -18,8 +19,13 @@ from typing import Any, Iterable, Mapping, Sequence
 import yaml
 
 
-FORMAL_TRAINING_LANE = "sonic_native_retarget"
+FORMAL_TRAINING_LANE = "sonic_kin_only_soma_encoder"
 LEGACY_DIAGNOSTIC_LANE = "legacy_kin_diagnostic"
+FORMAL_BASELINE_TOPOLOGIES = ("uniform", "proportional")
+FORMAL_BASELINE_NAMES = tuple(
+    f"sonic_kin_only_soma_encoder_{topology}"
+    for topology in FORMAL_BASELINE_TOPOLOGIES
+)
 FORBIDDEN_SOURCE_FEATURES = ("body_pos_w", "body_quat_w")
 FORBIDDEN_DEPLOYABLE_SONIC_SOURCE_FEATURES = ("joint_pos_multi_future_wrist_for_soma",)
 TARGET_FPS = 50.0
@@ -160,6 +166,24 @@ def validate_config(
     _require(input_data.get("robot_motion_file"), errors, "input_data.robot_motion_file is required")
     _require(input_data.get("soma_motion_file"), errors, "input_data.soma_motion_file is required")
     _require(input_data.get("skeleton_registry"), errors, "input_data.skeleton_registry is required")
+    soma_topology = str(input_data.get("soma_topology") or "")
+    _require(
+        variant in FORMAL_BASELINE_NAMES,
+        errors,
+        "formal baseline variant must be one of "
+        + ", ".join(FORMAL_BASELINE_NAMES),
+    )
+    _require(
+        soma_topology in FORMAL_BASELINE_TOPOLOGIES,
+        errors,
+        "input_data.soma_topology must be uniform or proportional",
+    )
+    if soma_topology in FORMAL_BASELINE_TOPOLOGIES:
+        _require(
+            variant == f"sonic_kin_only_soma_encoder_{soma_topology}",
+            errors,
+            "formal baseline variant name must match input_data.soma_topology",
+        )
 
     source_features = _source_feature_strings(config)
     source_text = " ".join(source_features).lower()
@@ -248,6 +272,11 @@ def validate_config(
         errors,
         "training.max_steps must be at least 1000000",
     )
+    _require(
+        _optional_int(training.get("required_gpu_count")) == 4,
+        errors,
+        "training.required_gpu_count must be 4 for the active baselines",
+    )
 
     visual = _mapping(config.get("visual_validation"))
     _require(visual.get("enabled") is True, errors, "visual_validation.enabled must be true")
@@ -288,6 +317,11 @@ def validate_config(
     )
 
     runtime = _mapping(config.get("runtime"))
+    _require(
+        _optional_int(runtime.get("required_gpu_count")) == 4,
+        errors,
+        "runtime.required_gpu_count must be 4 for the active baselines",
+    )
     _require(
         runtime.get("require_committed_code") is True,
         errors,
@@ -753,6 +787,11 @@ def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -
         sonic_hydra.get("variant_wired") is True,
         errors,
         "sonic_hydra.variant_wired must be true for formal training configs",
+    )
+    _require(
+        _optional_int(sonic_hydra.get("accelerate_num_processes")) == 4,
+        errors,
+        "sonic_hydra.accelerate_num_processes must be 4 for the active baselines",
     )
     hydra_text = " ".join(_string_list(sonic_hydra.get("args")))
     hydra = _hydra_overrides(config)

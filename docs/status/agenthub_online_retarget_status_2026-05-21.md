@@ -1,5 +1,11 @@
 # OnlineRetarget Sonic-native Run Status
 
+LR-185 supersession note (2026-05-28): this status file is historical. The
+active formal surface is exactly the two kin-only SOMA encoder baselines
+`sonic_kin_only_soma_encoder_uniform` and
+`sonic_kin_only_soma_encoder_proportional`, each launched as one 4-GPU `g1_kin`
+run; A1/A2/B1/B2 should not be relaunched for the current requirement.
+
 更新时间：2026-05-21 01:40 UTC
 
 ## 结论

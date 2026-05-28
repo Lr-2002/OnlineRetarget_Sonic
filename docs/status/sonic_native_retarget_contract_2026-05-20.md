@@ -1,35 +1,42 @@
-# SONIC-Native Retarget Contract
+# SONIC Kin-Only SOMA Encoder Contract
 
-Date: 2026-05-20
+Date: 2026-05-20. Updated for LR-185 on 2026-05-28.
 
 ## Decision
 
-OnlineRetarget's formal training lane is now `sonic_native_retarget`.
+OnlineRetarget's formal training lane is now `sonic_kin_only_soma_encoder`.
 
 This lane is defined as:
 
 ```text
-SOMA/BVH proportional source motion + skeleton/morphology features
-  -> SONIC-compatible source encoder variant
+SOMA/BVH source motion + skeleton/morphology features
+  -> SONIC-compatible SOMA encoder baseline
   -> SONIC shared token/latent space
-  -> SONIC g1_dyn decoder as the primary retarget target
-  -> SONIC g1_kin only as auxiliary diagnostics / visualization
+  -> SONIC g1_kin decoder as the only active retarget target
+  -> readable kin-loss / MPJPE / sliding-jitter validation
 ```
 
-The older `sonic_kin_skeleton_*` configs are explicitly marked
-`legacy_kin_diagnostic`. They are not formal retargeting because they use G1
-target robot state as input and reconstruct G1 kinematic targets.
+Historical A1/A2/B1/B2 configs are not the current target scope. They remain as
+health/history artifacts only and are rejected by strict `--require-formal`
+validation.
 
 ## Guardrails Added
 
-- Formal configs must set `training_lane: sonic_native_retarget`.
+- Formal configs must set `training_lane: sonic_kin_only_soma_encoder`.
 - Formal configs must set `sonic_native: true`.
-- Formal source features must include SOMA/BVH/proportional motion, root
+- Formal config names must be exactly:
+  - `sonic_kin_only_soma_encoder_uniform`
+  - `sonic_kin_only_soma_encoder_proportional`
+- Each formal config must request one 4-GPU launch (`required_gpu_count=4`,
+  `sonic_hydra.accelerate_num_processes=4`).
+- Formal source features must include SOMA/BVH motion, root
   orientation, and skeleton/morphology conditioning.
 - `body_pos_w` and `body_quat_w` are forbidden in formal source encoder inputs.
 - `body_pos_w` and `body_quat_w` remain allowed as target labels,
   visualization targets, FK checks, and diagnostics.
-- `target_decoder.primary` must be `g1_dyn`.
+- `target_decoder.primary` and `active_decoders` must be exactly `g1_kin`.
+- `g1_dyn`, `g1_target_action`, and action/dynamics auxiliary losses are
+  forbidden in active formal runs.
 - Sonic target frequency must be 50 Hz.
 - Visual validation must run every 20k steps, render 8 clips of 4 seconds, and
   upload video to W&B.
@@ -65,16 +72,15 @@ formal source morphology features:
 `pack_source_motion_with_morphology(...)` merges these morphology features with
 SOMA/BVH motion features before applying the shared deployable source contract.
 
-## Four Formal Configs
+## Two Formal Configs
 
-- `configs/sonic_native_retarget_a1_concat_1gpu.json`
-- `configs/sonic_native_retarget_a2_film_contact_1gpu.json`
-- `configs/sonic_native_retarget_b1_adapter_1gpu.json`
-- `configs/sonic_native_retarget_b2_expert_1gpu.json`
+- `configs/sonic_kin_only_soma_encoder_uniform.json`
+- `configs/sonic_kin_only_soma_encoder_proportional.json`
 
-Each config reserves one GPU and targets a 1M-step formal comparison.
-Each config also names a Hydra-compatible encoder module target under
-`online_retarget.sonic_encoder_modules`.
+Each config reserves one 4-GPU job and targets a 1M-step formal comparison.
+Both configs name a Hydra-compatible encoder module target under
+`online_retarget.sonic_encoder_modules`; the comparison is uniform versus
+proportional SOMA source topology, not A/B architecture variants.
 
 ## Encoder Module Surface
 
@@ -92,19 +98,44 @@ Hydra overrides are wired.
 
 ## Launcher Surface
 
-`scripts/remote_start_sonic_native_retarget_4x1gpu.sh` validates the four formal
-configs, checks both OnlineRetarget and SONIC git state, and writes a launch
-manifest. By default it does not start tmux sessions. Even with
-`EXECUTE_SONIC_NATIVE_TRAINING=1`, it refuses to launch unless each config sets
-`sonic_hydra.variant_wired: true`, so a run cannot silently ignore the requested
-encoder variant.
+`scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh` launches one active
+baseline config as a single 4-GPU job via
+`scripts/remote_start_sonic_native_retarget_4gpu.sh`. The historical
+`4x1gpu` launcher now refuses to default-launch A1/A2/B1/B2 unless explicitly
+unlocked for archaeology, and it rejects active kin-only SOMA encoder configs.
+
+Dry-run command surface:
+
+```bash
+PYTHONPATH=src PYTHON_BIN=python3 \
+  CONFIG=configs/sonic_kin_only_soma_encoder_uniform.json \
+  scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh
+
+PYTHONPATH=src PYTHON_BIN=python3 \
+  CONFIG=configs/sonic_kin_only_soma_encoder_proportional.json \
+  scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh
+```
+
+Remote execution surface:
+
+```bash
+CHECK_SONIC_PATHS=1 EXECUTE_SONIC_NATIVE_TRAINING=1 \
+  CONFIG=configs/sonic_kin_only_soma_encoder_uniform.json \
+  scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh
+
+CHECK_SONIC_PATHS=1 EXECUTE_SONIC_NATIVE_TRAINING=1 \
+  CONFIG=configs/sonic_kin_only_soma_encoder_proportional.json \
+  scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh
+```
+
+Stop condition for MLOps: both baselines either reach 1M training steps with
+kin loss, MPJPE, readable validation artifacts, and sliding/jitter review cases,
+or produce a reproducible failure report with run group, W&B run, config path,
+OnlineRetarget git SHA, and SONIC git SHA.
 
 ## Remaining Work
 
-- Wire the encoder module targets into actual SONIC Hydra overrides after
-  actor/skeleton morphology observation dimensions are known.
-- Wire actor/skeleton morphology observations into SONIC tokenizer terms.
-- Integrate the three-panel validation renderer into the SONIC training loop,
-  not the legacy standalone trainer.
-- Confirm that A1/A2/B1/B2 change the actual encoder architecture rather than
-  only logging variant metadata.
+- Confirm the remote uniform and proportional SOMA motionlib directories exist
+  and pass `--check-paths` immediately before execution.
+- After launch, validate the resolved Hydra runtime config for
+  `active_decoders=[g1_kin]` and absence of inherited `g1_dyn` blocks.

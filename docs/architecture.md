@@ -2,7 +2,12 @@
 
 Goal: a compact online retargeter that maps BONES-SEED SOMA proportional human motion to Unitree G1 motion references with sub-1 ms inference on an RTX 4090.
 
-Active problem definition: `SOMA proportional -> G1`. The source is actor-specific SOMA proportional BVH plus morphology/shape conditioning; the target is direct Unitree G1 motion, initially 29D joint position from the BONES-SONIC NPZ lane. `SOMA uniform -> G1` is an ablation, not the main task.
+Active LR-185 problem definition: compare the two formal kin-only SONIC SOMA
+encoder baselines, `SOMA uniform -> G1` and `SOMA proportional -> G1`, with
+each launched as one 4-GPU run. The proportional source is actor-specific SOMA
+BVH plus morphology/shape conditioning; the uniform source is the shared-SOMA
+skeleton control. The target is direct Unitree G1 kinematic motion, initially
+29D joint position/velocity plus anchor orientation from the BONES-SONIC lane.
 
 Current implementation boundary: model and training changes now start from the
 SONIC codebase, not from a separate OnlineRetarget retargeter. OnlineRetarget is

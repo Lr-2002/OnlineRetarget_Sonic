@@ -1,17 +1,18 @@
 {
-  "schema_version": "2.0.0",
+  "schema_version": "2.1.0",
   "owner": "OnlineRetarget",
-  "training_lane": "historical_sonic_native_retarget",
+  "training_lane": "sonic_kin_only_soma_encoder",
   "sonic_native": true,
-  "purpose": "B2 deterministic skeleton expert encoder branches feeding SONIC g1_kin as the only retarget decoder.",
+  "purpose": "Formal uniform-SOMA baseline: shared SOMA encoder feeding SONIC g1_kin as the only retarget decoder in one 4-GPU job.",
   "source_repo": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training",
   "source_rev": "remote-latest-required-before-training",
   "sonic_config": "gear_sonic/config/exp/manager/universal_token/all_modes/sonic_bones_seed.yaml",
   "base_actor_critic_config": "gear_sonic/config/actor_critic/universal_token/all_mlp_v1_soma.yaml",
   "sonic_entrypoint": "gear_sonic/train_agent_trl.py",
   "input_data": {
+    "soma_topology": "uniform",
     "robot_motion_file": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/robot_filtered_v1",
-    "soma_motion_file": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/soma_filtered_v1",
+    "soma_motion_file": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/soma_uniform_filtered_v1",
     "skeleton_registry": "/mnt/data_cpfs/code/wxh/OnlineRetarget/runs/skeleton_registry/bones_sonic_txt_filtered_skeleton_registry_v0/skeleton_registry.csv",
     "robot_filter_motion_keys": "^(?!.*__(?:A302|A303|A400|A402|A403|A404|A488|A489|A490|A491|A496|A497|A498|A499|A508|A512|A513|A514|A515|A517|A518|A520|A521|A522|A523|A524|A525|A526|A527|A538|A539|A540|A541)(?:_M)?$).*$",
     "robot_remove_motion_keys": [
@@ -27,43 +28,28 @@
   "source_features": [
     "soma_joints_multi_future_local_nonflat",
     "soma_root_ori_b_multi_future",
-    "actor_uid",
-    "skeleton_cluster_id",
-    "bone_lengths",
-    "body_proportions",
-    "height",
-    "foot_leg_arm_torso_measurements",
+    "shared_soma_uniform_skeleton",
     "soma_morphology"
   ],
   "source_encoder": {
-    "name": "online_retarget_soma_b2_expert",
+    "name": "online_retarget_soma_encoder_uniform",
     "base_sonic_encoder": "soma",
-    "variant": "expert",
-    "module_target": "online_retarget.sonic_encoder_modules.ExpertSomaEncoderModule",
+    "variant": "uniform",
+    "module_target": "online_retarget.sonic_encoder_modules.ConcatSomaEncoderModule",
     "module_params_template": {
-      "conditioning_dim": 24,
-      "hidden_dim": 512,
-      "num_experts": 4,
-      "routing": "deterministic_cluster",
-      "route_feature_index": -1,
       "hidden_dims": [
         512,
         512,
         512
-      ]
+      ],
+      "dropout": 0.0
     },
     "inputs": [
       "soma_joints_multi_future_local_nonflat",
       "soma_root_ori_b_multi_future",
       "soma_morphology"
     ],
-    "expert": {
-      "routing_key": "skeleton_cluster_id",
-      "num_experts": 4,
-      "routing": "deterministic_hash_or_registry_cluster",
-      "routing_log_required": true
-    },
-    "conditioning": "lightweight deterministic expert branch selected by skeleton cluster"
+    "conditioning": "shared uniform SOMA skeleton plus a stable morphology feature slot"
   },
   "target_decoder": {
     "primary": "g1_kin",
@@ -84,15 +70,12 @@
   "losses": {
     "primary": [
       "g1_kin_joint_rmse",
-      "g1_kin_body_mpjpe"
+      "g1_kin_velocity_rmse",
+      "g1_kin_body_mpjpe",
+      "g1_kin_anchor_orientation_rmse"
     ],
     "alignment": [],
-    "auxiliary": [
-      "temporal_smoothness"
-    ],
-    "routing": [
-      "expert_usage_balance_report_only"
-    ]
+    "auxiliary": []
   },
   "frequency": {
     "target_fps": 50,
@@ -101,17 +84,16 @@
   },
   "model": {
     "hidden_dim": 512,
-    "num_layers": 2,
-    "num_experts": 4,
-    "routing": "deterministic"
+    "num_layers": 3,
+    "dropout": 0.0
   },
   "training": {
-    "seed": 2026052004,
+    "seed": 2026052801,
     "max_steps": 1000000,
-    "required_gpu_count": 1,
+    "required_gpu_count": 4,
     "precision": "bf16",
     "batch_envs": 4096,
-    "notes": "Formal comparison run; commit and latest-code checks are required before launch."
+    "notes": "Formal uniform baseline; launch as one multi-GPU job."
   },
   "visual_validation": {
     "enabled": true,
@@ -121,22 +103,22 @@
     "duration_sec": 4.0,
     "wandb_upload": true,
     "panels": [
-      "source_proportional_bvh_or_soma_capsule",
+      "source_soma_capsule",
       "dataset_g1_target",
       "inferred_g1_from_encoder_and_sonic_decoder"
     ],
     "report_fields": [
+      "soma_topology",
       "source_fps",
       "target_fps",
       "source_frame_indices",
       "target_frame_count",
       "duration_sec",
-      "git_sha",
-      "expert_route"
+      "git_sha"
     ]
   },
   "runtime": {
-    "required_gpu_count": 1,
+    "required_gpu_count": 4,
     "require_committed_code": true,
     "require_latest_code": true,
     "write_root": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs",
@@ -147,7 +129,7 @@
   },
   "sonic_hydra": {
     "variant_wired": true,
-    "accelerate_num_processes": 1,
+    "accelerate_num_processes": 4,
     "args": [
       "+exp=manager/universal_token/all_modes/sonic_bones_seed",
       "num_envs=4096",
@@ -175,7 +157,7 @@
       "++manager_env.commands.motion.motion_lib_cfg.motion_file=/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/robot_filtered_v1",
       "++manager_env.commands.motion.motion_lib_cfg.filter_motion_keys='^(?!.*__(?:A302|A303|A400|A402|A403|A404|A488|A489|A490|A491|A496|A497|A498|A499|A508|A512|A513|A514|A515|A517|A518|A520|A521|A522|A523|A524|A525|A526|A527|A538|A539|A540|A541)(?:_M)?$).*$'",
       "++manager_env.commands.motion.motion_lib_cfg.remove_motion_keys=[230124__no_see_002__A142_M,240529__neutral_button__press_001__A543,240529__neutral_button__press_001__A543_M,240529__neutral_button__press_001__A544,240529__neutral_button__press_001__A544_M,240529__neutral_button__press_001__A545,240529__neutral_button__press_001__A545_M]",
-      "++manager_env.commands.motion.motion_lib_cfg.soma_motion_file=/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/soma_filtered_v1",
+      "++manager_env.commands.motion.motion_lib_cfg.soma_motion_file=/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/soma_uniform_filtered_v1",
       "++manager_env.commands.motion.encoder_sample_probs.g1=0.0",
       "++manager_env.commands.motion.encoder_sample_probs.teleop=0.0",
       "++manager_env.commands.motion.encoder_sample_probs.smpl=0.0",
@@ -202,48 +184,38 @@
       "++manager_env.observations.tokenizer.soma_morphology.func=online_retarget.sonic_observation_terms:soma_morphology",
       "++manager_env.observations.tokenizer.soma_morphology.params.command_name=motion",
       "++manager_env.observations.tokenizer.soma_morphology.params.registry_csv=/mnt/data_cpfs/code/wxh/OnlineRetarget/runs/skeleton_registry/bones_sonic_txt_filtered_skeleton_registry_v0/skeleton_registry.csv",
-      "++manager_env.observations.tokenizer.soma_morphology.params.num_clusters=4",
+      "++manager_env.observations.tokenizer.soma_morphology.params.num_clusters=1",
       "++manager_env.observations.tokenizer.soma_morphology.params.non_flatten=true",
       "++manager_env.observations.tokenizer.soma_morphology.params.strict=true",
-      "++manager_env.observations.tokenizer.soma_contact_phase._target_=isaaclab.managers.ObservationTermCfg",
-      "++manager_env.observations.tokenizer.soma_contact_phase.func=online_retarget.sonic_observation_terms:soma_contact_phase",
-      "++manager_env.observations.tokenizer.soma_contact_phase.params.command_name=motion",
-      "++manager_env.observations.tokenizer.soma_contact_phase.params.non_flatten=true",
       "++algo.config.actor.backbone.encoders.soma.inputs=[soma_joints_multi_future_local_nonflat,soma_root_ori_b_multi_future,soma_morphology]",
-      "++algo.config.actor.backbone.encoders.soma.params._target_=online_retarget.sonic_encoder_modules.ExpertSomaEncoderModule",
-      "++algo.config.actor.backbone.encoders.soma.params.hidden_dims=[512,512,512]",
-      "++algo.config.actor.backbone.encoders.soma.params.conditioning_dim=24",
-      "++algo.config.actor.backbone.encoders.soma.params.routing=deterministic_cluster",
-      "++algo.config.actor.backbone.encoders.soma.params.route_feature_index=-1"
+      "++algo.config.actor.backbone.encoders.soma.params._target_=online_retarget.sonic_encoder_modules.ConcatSomaEncoderModule",
+      "++algo.config.actor.backbone.encoders.soma.params.hidden_dims=[512,512,512]"
     ],
     "online_retarget_observations": {
-      "soma_morphology_dim": 24,
-      "soma_contact_phase_dim": 3
+      "soma_morphology_dim": 24
     },
-    "online_retarget_aux_losses": [
-      "g1_recon"
-    ]
+    "online_retarget_aux_losses": []
   },
   "wandb": {
     "enabled": true,
     "project": "OnlineRetarget",
     "entity": null,
-    "group": "sonic_native_retarget_{run_group}",
-    "name": "B2_expert_{run_group}",
+    "group": "sonic_kin_only_soma_encoder_{run_group}",
+    "name": "sonic_kin_only_soma_encoder_uniform_{run_group}",
     "dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/wandb",
     "tags": [
-      "sonic-native",
-      "retarget",
-      "g1-kin",
-      "B2",
-      "expert"
+      "sonic-kin-only",
+      "soma-encoder",
+      "uniform",
+      "4gpu"
     ],
     "log_git_sha": true
   },
   "variant": {
-    "name": "B2_expert",
-    "family": "B",
-    "type": "expert",
-    "gpu_slot": "B2"
+    "name": "sonic_kin_only_soma_encoder_uniform",
+    "family": "soma_encoder_baseline",
+    "type": "uniform",
+    "soma_topology": "uniform",
+    "gpu_topology": "single_4gpu_job"
   }
 }

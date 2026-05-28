@@ -1,4 +1,10 @@
-# OnlineRetarget Goal Completion Audit - Current Snapshot
+# OnlineRetarget Goal Completion Audit - Historical Snapshot
+
+LR-185 supersession note (2026-05-28): this 2026-05-21 snapshot is historical.
+The active goal no longer requires A1/A2/B1/B2 or `g1_dyn`; the current formal
+surface is exactly `sonic_kin_only_soma_encoder_uniform` and
+`sonic_kin_only_soma_encoder_proportional`, each launched as one 4-GPU
+kin-only `g1_kin` run.
 
 ## Objective
 

@@ -13,12 +13,12 @@ from online_retarget.sonic_morphology import morphology_from_registry_row
 
 
 ROOT = Path(__file__).resolve().parents[1]
-A1_CONFIG = ROOT / "configs" / "sonic_native_retarget_a1_concat_1gpu.json"
+PROPORTIONAL_CONFIG = ROOT / "configs" / "sonic_kin_only_soma_encoder_proportional.json"
 
 
 class SonicNativeFeatureContractTests(unittest.TestCase):
     def test_contract_from_formal_config_has_stable_source_and_target_roles(self):
-        contract = SonicNativeFeatureContract.from_config_path(A1_CONFIG)
+        contract = SonicNativeFeatureContract.from_config_path(PROPORTIONAL_CONFIG)
 
         self.assertIn("soma_joints_multi_future_local_nonflat", contract.source_keys)
         self.assertIn("soma_root_ori_b_multi_future", contract.source_keys)
@@ -28,7 +28,7 @@ class SonicNativeFeatureContractTests(unittest.TestCase):
         self.assertEqual(len(contract.digest), 16)
 
     def test_training_and_inference_pack_the_same_source_contract(self):
-        contract = SonicNativeFeatureContract.from_config_path(A1_CONFIG)
+        contract = SonicNativeFeatureContract.from_config_path(PROPORTIONAL_CONFIG)
         source = _source_payload(contract)
         target = _target_payload(contract)
 
@@ -40,7 +40,7 @@ class SonicNativeFeatureContractTests(unittest.TestCase):
         assert_matching_contracts(contract, contract)
 
     def test_source_motion_can_be_merged_with_morphology_features(self):
-        contract = SonicNativeFeatureContract.from_config_path(A1_CONFIG)
+        contract = SonicNativeFeatureContract.from_config_path(PROPORTIONAL_CONFIG)
         morphology = morphology_from_registry_row(_morphology_row()).as_source_features()
         source_motion = {
             "soma_joints_multi_future_local_nonflat": "source:joints",
@@ -54,7 +54,7 @@ class SonicNativeFeatureContractTests(unittest.TestCase):
         self.assertIn("bone_lengths", packed.source)
 
     def test_source_payload_rejects_target_only_body_pose(self):
-        contract = SonicNativeFeatureContract.from_config_path(A1_CONFIG)
+        contract = SonicNativeFeatureContract.from_config_path(PROPORTIONAL_CONFIG)
         source = _source_payload(contract)
         source["body_pos_w"] = "target-state"
 
@@ -62,7 +62,7 @@ class SonicNativeFeatureContractTests(unittest.TestCase):
             pack_inference_features(source, contract)
 
     def test_missing_required_source_feature_is_rejected(self):
-        contract = SonicNativeFeatureContract.from_config_path(A1_CONFIG)
+        contract = SonicNativeFeatureContract.from_config_path(PROPORTIONAL_CONFIG)
         source = _source_payload(contract)
         source.pop("soma_root_ori_b_multi_future")
 
@@ -70,7 +70,7 @@ class SonicNativeFeatureContractTests(unittest.TestCase):
             pack_inference_features(source, contract)
 
     def test_contract_mismatch_is_rejected(self):
-        contract = SonicNativeFeatureContract.from_config_path(A1_CONFIG)
+        contract = SonicNativeFeatureContract.from_config_path(PROPORTIONAL_CONFIG)
         changed = SonicNativeFeatureContract(
             source_keys=contract.source_keys + ("extra_source_feature",),
             target_label_keys=contract.target_label_keys,

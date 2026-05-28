@@ -2,6 +2,12 @@
 
 Date: 2026-05-21
 
+LR-185 supersession note (2026-05-28): this audit is historical. The active
+formal target is now two kin-only SOMA encoder baselines,
+`sonic_kin_only_soma_encoder_uniform` and
+`sonic_kin_only_soma_encoder_proportional`, each launched as one 4-GPU
+`g1_kin` run. A1/A2/B1/B2 and `g1_dyn` are not current requirement scope.
+
 Objective: implement `goal.md`, meaning a SONIC-native retargeting lane where
 heterogeneous human/SOMA/BVH source encoders drive SONIC's G1 decoder path,
 with `g1_dyn` as the primary target and `g1_kin` only auxiliary.

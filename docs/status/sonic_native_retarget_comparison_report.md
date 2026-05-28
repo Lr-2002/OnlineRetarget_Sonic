@@ -1,5 +1,10 @@
 # Sonic-Native Retarget Comparison Report
 
+LR-185 supersession note (2026-05-28): this A1/A2/B1/B2 comparison report is
+historical and must not be used as the current run matrix. The active formal
+comparison is `sonic_kin_only_soma_encoder_uniform` versus
+`sonic_kin_only_soma_encoder_proportional`, each as one 4-GPU kin-only job.
+
 Status: pending formal run completion
 
 Run group:

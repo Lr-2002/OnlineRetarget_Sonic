@@ -7,6 +7,8 @@ import unittest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = REPO_ROOT / "scripts" / "remote_start_sonic_native_retarget_4x1gpu.sh"
 DDP_LAUNCHER = REPO_ROOT / "scripts" / "remote_start_sonic_native_retarget_4gpu.sh"
+KIN_ONLY_LAUNCHER = REPO_ROOT / "scripts" / "remote_start_sonic_kin_only_soma_encoder_4gpu.sh"
+KIN_SKELETON_LAUNCHER = REPO_ROOT / "scripts" / "remote_start_sonic_kin_skeleton_4x1gpu.sh"
 
 
 class RemoteLauncherGuardrailTests(unittest.TestCase):
@@ -44,6 +46,12 @@ class RemoteLauncherGuardrailTests(unittest.TestCase):
         self.assertIn("ONLINE_RETARGET_GIT_SHA", text)
         self.assertIn("SONIC_GIT_SHA", text)
 
+    def test_historical_four_by_one_launcher_has_no_default_ab_launch(self) -> None:
+        text = self.launcher_text
+        self.assertIn("ALLOW_HISTORICAL_A_B_4X1GPU", text)
+        self.assertIn("A1/A2/B1/B2 4x1-GPU launching is historical", text)
+        self.assertIn("active kin-only SOMA encoder baselines must run as one 4-GPU job", text)
+
 
 class NativeRetargetFourGpuLauncherTests(unittest.TestCase):
     @classmethod
@@ -52,15 +60,17 @@ class NativeRetargetFourGpuLauncherTests(unittest.TestCase):
 
     def test_single_config_multi_gpu_launcher_uses_accelerate_processes(self) -> None:
         text = self.launcher_text
-        self.assertIn('CONFIG="${CONFIG:-configs/sonic_native_retarget_a1_concat_1gpu.json}"', text)
+        self.assertIn('CONFIG="${CONFIG:-configs/sonic_kin_only_soma_encoder_proportional.json}"', text)
         self.assertIn('NPROC_PER_NODE="${NPROC_PER_NODE:-4}"', text)
         self.assertIn('--num_processes="${NPROC_PER_NODE}"', text)
         self.assertNotIn("--num_processes=1 gear_sonic/train_agent_trl.py", text)
+        self.assertNotIn("sonic_native_retarget_a1_concat_1gpu", text)
 
     def test_single_config_launcher_rejects_multiple_configs(self) -> None:
         text = self.launcher_text
         self.assertIn("CONFIG must name exactly one formal config", text)
         self.assertIn('if [[ "${CONFIG}" == *" "* ]]; then', text)
+        self.assertIn("required_gpu_count", text)
 
     def test_single_config_launcher_preserves_training_guardrails(self) -> None:
         text = self.launcher_text
@@ -82,6 +92,30 @@ class NativeRetargetFourGpuLauncherTests(unittest.TestCase):
         self.assertIn('"nccl_shm_disable": sys.argv[10]', text)
         self.assertIn('"nccl_ib_disable": sys.argv[11]', text)
         self.assertIn('"nccl_algo": sys.argv[12]', text)
+        self.assertIn('"contract": sys.argv[13]', text)
+
+
+class KinOnlySomaEncoderLauncherTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.launcher_text = KIN_ONLY_LAUNCHER.read_text(encoding="utf-8")
+
+    def test_wrapper_defaults_to_proportional_four_gpu_config(self) -> None:
+        text = self.launcher_text
+        self.assertIn("configs/sonic_kin_only_soma_encoder_proportional.json", text)
+        self.assertIn("remote_start_sonic_native_retarget_4gpu.sh", text)
+
+
+class HistoricalKinSkeletonLauncherTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.launcher_text = KIN_SKELETON_LAUNCHER.read_text(encoding="utf-8")
+
+    def test_historical_kin_skeleton_four_by_one_has_no_default_ab_launch(self) -> None:
+        text = self.launcher_text
+        self.assertIn("ALLOW_HISTORICAL_A_B_4X1GPU", text)
+        self.assertIn("kin-skeleton 4x1-GPU launching is historical", text)
+        self.assertIn("active kin-only SOMA encoder baselines must run as one 4-GPU job", text)
 
 
 if __name__ == "__main__":

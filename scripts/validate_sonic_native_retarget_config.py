@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate SONIC-native retargeting configs before training launch."""
+"""Validate active SONIC kin-only SOMA encoder configs before training launch."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help=(
             "Also validate a resolved Hydra runtime config.yaml emitted by a "
-            "formal run; rejects residual inherited decoders such as g1_dyn."
+            "formal kin-only run; rejects residual inherited decoders such as g1_dyn."
         ),
     )
     return parser.parse_args()

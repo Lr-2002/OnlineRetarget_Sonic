@@ -19,7 +19,17 @@ CHECK_SONIC_PATHS="${CHECK_SONIC_PATHS:-${EXECUTE_SONIC_NATIVE_TRAINING}}"
 
 cd "${ROOT}"
 
+if [[ -z "${CONFIG:-}" && "${ALLOW_HISTORICAL_A_B_4X1GPU:-0}" != "1" ]]; then
+  echo "A1/A2/B1/B2 4x1-GPU launching is historical for this requirement." >&2
+  echo "Use scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh with CONFIG=configs/sonic_kin_only_soma_encoder_uniform.json or configs/sonic_kin_only_soma_encoder_proportional.json." >&2
+  exit 1
+fi
+
 if [[ -n "${CONFIG:-}" ]]; then
+  if [[ "${CONFIG}" == *"sonic_kin_only_soma_encoder_"* ]]; then
+    echo "active kin-only SOMA encoder baselines must run as one 4-GPU job; use scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh" >&2
+    exit 1
+  fi
   CONFIGS=("${CONFIG}")
 else
   CONFIGS=(

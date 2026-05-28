@@ -7,11 +7,11 @@ PYTHON_BIN="${PYTHON_BIN:-/workspace/isaaclab/_isaac_sim/python.sh}"
 if [[ -z "${ACCELERATE_CMD:-}" ]]; then
   ACCELERATE_CMD="${PYTHON_BIN} -m accelerate.commands.launch"
 fi
-CONFIG="${CONFIG:-configs/sonic_native_retarget_a1_concat_1gpu.json}"
+CONFIG="${CONFIG:-configs/sonic_kin_only_soma_encoder_proportional.json}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 GPU_ASSIGNMENTS="${GPU_ASSIGNMENTS:-0,1,2,3}"
-RUN_GROUP="${RETARGET_RUN_GROUP:-sonic_native_retarget_4gpu_$(date -u +%Y%m%dT%H%M%SZ)}"
-LAUNCH_ROOT="${LAUNCH_ROOT:-${ROOT}/outputs/sonic_native_retarget_runs/${RUN_GROUP}/_launcher}"
+RUN_GROUP="${KIN_SOMA_RUN_GROUP:-${RETARGET_RUN_GROUP:-sonic_kin_only_soma_encoder_4gpu_$(date -u +%Y%m%dT%H%M%SZ)}}"
+LAUNCH_ROOT="${LAUNCH_ROOT:-${ROOT}/outputs/sonic_kin_only_soma_encoder_runs/${RUN_GROUP}/_launcher}"
 GIT_FETCH_TIMEOUT_SECONDS="${GIT_FETCH_TIMEOUT_SECONDS:-60}"
 EXECUTE_SONIC_NATIVE_TRAINING="${EXECUTE_SONIC_NATIVE_TRAINING:-0}"
 CHECK_SONIC_PATHS="${CHECK_SONIC_PATHS:-${EXECUTE_SONIC_NATIVE_TRAINING}}"
@@ -149,6 +149,27 @@ from pathlib import Path
 print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["variant"]["name"])
 PY
 )"
+read -r contract required_processes < <("${PYTHON_BIN}" - "${CONFIG}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+runtime = config.get("runtime", {})
+training = config.get("training", {})
+sonic_hydra = config.get("sonic_hydra", {})
+required = (
+    runtime.get("required_gpu_count")
+    or training.get("required_gpu_count")
+    or sonic_hydra.get("accelerate_num_processes")
+)
+print(config["training_lane"], int(required))
+PY
+)
+if [[ "${NPROC_PER_NODE}" -ne "${required_processes}" ]]; then
+  echo "NPROC_PER_NODE=${NPROC_PER_NODE} does not match ${CONFIG} required_gpu_count=${required_processes}" >&2
+  exit 1
+fi
 
 hydra_args="$("${PYTHON_BIN}" - "${CONFIG}" "${ROOT}" "${RUN_GROUP}" "${CONTROL_COMMIT}" "${SONIC_COMMIT}" <<'PY'
 import json
@@ -170,7 +191,7 @@ args.append(f"wandb.wandb_dir={root / 'outputs' / 'wandb'}")
 args.append(f"exp_var={variant}_{run_group}")
 args.append(f"++online_retarget.config_path={root / cfg_path}")
 args.append(f"++online_retarget.encoder_variant={variant}")
-args.append("++online_retarget.contract=sonic_native_retarget")
+args.append(f"++online_retarget.contract={config['training_lane']}")
 args.append(f"++online_retarget.run_group={run_group}")
 args.append(f"++online_retarget.git_sha={online_retarget_commit}")
 args.append(f"++online_retarget.sonic_git_sha={sonic_commit}")
@@ -178,7 +199,7 @@ print(" ".join(shlex.quote(str(arg)) for arg in args))
 PY
 )"
 
-session="sonic_native_4gpu_${RUN_GROUP}_${variant}"
+session="sonic_kin_only_soma_encoder_4gpu_${RUN_GROUP}_${variant}"
 session="${session//[^A-Za-z0-9_]/_}"
 log_path="${LAUNCH_ROOT}/${variant}_4gpu.log"
 cmd=$(cat <<EOF
@@ -201,13 +222,13 @@ if [[ -n "${NCCL_DEBUG}" ]]; then export NCCL_DEBUG="${NCCL_DEBUG}"; fi
 if [[ -n "${NCCL_DEBUG_SUBSYS}" ]]; then export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS}"; fi
 if [[ -n "${TORCH_CPP_LOG_LEVEL}" ]]; then export TORCH_CPP_LOG_LEVEL="${TORCH_CPP_LOG_LEVEL}"; fi
 if [[ -n "${TORCH_DISTRIBUTED_DEBUG}" ]]; then export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG}"; fi
-echo "variant=${variant} gpus=${GPU_ASSIGNMENTS} nproc=${NPROC_PER_NODE} online_retarget_commit=${CONTROL_COMMIT} sonic_commit=${SONIC_COMMIT}"
+echo "contract=${contract} variant=${variant} gpus=${GPU_ASSIGNMENTS} nproc=${NPROC_PER_NODE} online_retarget_commit=${CONTROL_COMMIT} sonic_commit=${SONIC_COMMIT}"
 read -r -a _accelerate_cmd <<< "\${ACCELERATE_CMD}"
 "\${_accelerate_cmd[@]}" --num_processes="${NPROC_PER_NODE}" --num_machines=1 --mixed_precision="${ACCELERATE_MIXED_PRECISION}" --dynamo_backend="${ACCELERATE_DYNAMO_BACKEND}" gear_sonic/train_agent_trl.py ${hydra_args} \${HYDRA_EXTRA_ARGS:-} 2>&1 | tee -a "${log_path}"
 EOF
 )
 
-"${PYTHON_BIN}" - "${LAUNCH_ROOT}/launch_manifest.json" "${RUN_GROUP}" "${CONTROL_COMMIT}" "${SONIC_COMMIT}" "${EXECUTE_SONIC_NATIVE_TRAINING}" "${CONFIG}" "${GPU_ASSIGNMENTS}" "${NPROC_PER_NODE}" "${session}" "${NCCL_SHM_DISABLE}" "${NCCL_IB_DISABLE}" "${NCCL_ALGO}" <<'PY'
+"${PYTHON_BIN}" - "${LAUNCH_ROOT}/launch_manifest.json" "${RUN_GROUP}" "${CONTROL_COMMIT}" "${SONIC_COMMIT}" "${EXECUTE_SONIC_NATIVE_TRAINING}" "${CONFIG}" "${GPU_ASSIGNMENTS}" "${NPROC_PER_NODE}" "${session}" "${NCCL_SHM_DISABLE}" "${NCCL_IB_DISABLE}" "${NCCL_ALGO}" "${contract}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -219,6 +240,7 @@ manifest = {
     "sonic_commit": sys.argv[4],
     "executed": sys.argv[5] == "1",
     "config": sys.argv[6],
+    "contract": sys.argv[13],
     "gpus": sys.argv[7],
     "accelerate_num_processes": int(sys.argv[8]),
     "tmux_session": sys.argv[9],
@@ -241,6 +263,6 @@ if [[ "${EXECUTE_SONIC_NATIVE_TRAINING}" == "1" ]]; then
     printf 'started run_group=%s session=%s\n' "${RUN_GROUP}" "${session}"
   fi
 else
-  echo "validated formal config and wrote 4-GPU launch manifest: ${LAUNCH_ROOT}/launch_manifest.json"
+  echo "validated formal ${contract} config and wrote 4-GPU launch manifest: ${LAUNCH_ROOT}/launch_manifest.json"
   echo "set EXECUTE_SONIC_NATIVE_TRAINING=1 to start the single multi-GPU tmux session"
 fi

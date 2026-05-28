@@ -1,10 +1,12 @@
 # Problem Definition
 
-Current target: learn an online mapping from **BONES-SEED SOMA proportional human motion** to **Unitree G1 motion references**.
+Current LR-185 target: compare two kin-only SONIC SOMA encoder baselines,
+**BONES-SEED SOMA uniform -> Unitree G1** and
+**BONES-SEED SOMA proportional -> Unitree G1**.
 
 ```text
-SOMA proportional BVH motion
-+ actor morphology / SOMA shape metadata
+SOMA uniform or proportional BVH motion
++ shared or actor-specific SOMA morphology metadata
 + optional current G1 state
     -> online retargeter
     -> Unitree G1 29-DoF joint target
@@ -12,17 +14,21 @@ SOMA proportional BVH motion
 
 ## Source
 
-The source side is BONES-SEED `SOMA proportional`, not `SOMA uniform`.
+The active source side has two formal baselines:
 
-- Motion path: `/home/user/data/motion_data/soma_proportional.tar`
+- Uniform motion path: `/home/user/data/motion_data/soma_uniform.tar`
+- Proportional motion path: `/home/user/data/motion_data/soma_proportional.tar`
 - Metadata path: `/home/user/data/motion_data/metadata/seed_metadata_v003.csv`
-- Metadata column: `move_soma_proportional_path`
-- Actor shape column: `move_soma_proportional_shape_path`
+- Uniform metadata column: `move_soma_uniform_path`
+- Proportional metadata column: `move_soma_proportional_path`
+- Uniform shape column: `move_soma_uniform_shape_path`
+- Proportional actor shape column: `move_soma_proportional_shape_path`
 - Grouping key: `actor_uid`
 
-`SOMA proportional` keeps the same SOMA topology across actors, but preserves actor-specific offsets, limb lengths, and shape parameters. Local metadata references 522 actor-specific proportional shape files. This is the intended source of cross-person / cross-skeleton variation.
-
-`SOMA uniform` is a later ablation only. It uses one shared skeleton and does not test the main heterogeneous-skeleton problem.
+`SOMA uniform` is the shared-skeleton control baseline. `SOMA proportional`
+keeps the same SOMA topology across actors, but preserves actor-specific
+offsets, limb lengths, and shape parameters. Local metadata references 522
+actor-specific proportional shape files.
 
 ## Target
 
@@ -56,9 +62,9 @@ For each paired metadata row, build fixed-window samples:
 
 ```text
 input_t =
-  SOMA proportional source history around frame t
+  SOMA uniform or proportional source history around frame t
   + source velocities
-  + actor morphology / shape conditioning
+  + shared or actor-specific morphology / shape conditioning
   + optional G1 current state side channel
 
 target_t =
@@ -69,25 +75,24 @@ The first model family is a compact temporal MLP / small temporal encoder. A mid
 
 ## Split And Evaluation
 
-Splits must be actor-heldout by `actor_uid`. Clip-level random split is not acceptable because it leaks the same proportional skeleton into train and eval.
+Splits must be actor-heldout by `actor_uid`. Clip-level random split is not acceptable because it leaks the same actor/skeleton family into train and eval.
 
 Primary eval answers:
 
-- Does the model map unseen SOMA proportional actors to G1 joint targets?
-- Does morphology / SOMA shape conditioning improve actor-heldout metrics?
+- Does the model map unseen SOMA actors to G1 joint targets?
+- Does proportional morphology / SOMA shape conditioning improve actor-heldout metrics over the uniform control?
 - Does the model introduce temporal artifacts beyond those already present in the target?
 
 Initial metrics:
 
 - G1 joint MAE/RMSE and max joint absolute error
-- action similarity
 - joint velocity RMSE
 - predicted vs target joint jump rate
-- optional body MPJPE / contact artifact metrics when body positions are emitted
+- body MPJPE and readable sliding/jitter artifact review
 
 ## Out Of Scope For The Baseline
 
-- `SOMA uniform -> G1` as the main task
+- A1/A2/B1/B2 one-GPU architecture variants for the current LR-185 requirement
 - `G1 body_pos_w -> G1 joint_pos` target-state reconstruction as proof of retargeting
 - AMASS/GMR retargeted NPZ as source-side human skeleton data
 - simulator physics refinement as a replacement for target provenance

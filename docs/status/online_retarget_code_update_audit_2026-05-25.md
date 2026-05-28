@@ -2,6 +2,13 @@
 
 Date: 2026-05-25
 
+LR-185 supersession note (2026-05-28): the active execution surface is now
+exactly two formal kin-only SOMA encoder baselines,
+`sonic_kin_only_soma_encoder_uniform` and
+`sonic_kin_only_soma_encoder_proportional`, each launched as one 4-GPU job.
+The A1/A2/B1/B2 entries below are historical LR-147 evidence, not the current
+run matrix.
+
 ## Conclusion
 
 LR-147 requested a code-level check and update after confirming the SONIC-based

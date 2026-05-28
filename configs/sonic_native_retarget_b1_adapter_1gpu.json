@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0.0",
   "owner": "OnlineRetarget",
-  "training_lane": "sonic_native_retarget",
+  "training_lane": "historical_sonic_native_retarget",
   "sonic_native": true,
   "purpose": "B1 shared source encoder plus skeleton adapter modules feeding SONIC g1_kin as the only retarget decoder.",
   "source_repo": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training",

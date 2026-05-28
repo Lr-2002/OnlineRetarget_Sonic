@@ -1,15 +1,15 @@
 # OnlineRetarget
 
-Learning-based online retargeting from BONES-SEED SOMA proportional human motion to Unitree G1 robot motion.
+Learning-based online retargeting from BONES-SEED SOMA human motion to Unitree G1 robot motion.
 
-The current problem definition is **SOMA proportional -> G1**: actor-specific SOMA BVH motion plus morphology/shape conditioning maps to direct 29D G1 joint targets. See `docs/problem_definition.md`. The first baseline is direct G1 joint output; latent, flow, and diffusion variants are tracked as later design branches after the baseline is measurable.
+The current LR-185 execution surface is exactly two kin-only SONIC SOMA encoder baselines: **SOMA uniform -> G1** and **SOMA proportional -> G1**. Each baseline launches as one 4-GPU run with SONIC `g1_kin` as the only active decoder. See `goal.md` and `docs/status/sonic_native_retarget_contract_2026-05-20.md`.
 
 ## Repository Status
 
 - Data source: `/home/user/data/motion_data` is read-only.
-- Primary source lane: BONES-SEED `soma_proportional.tar`, grouped by `actor_uid`.
+- Active source lanes: BONES-SEED `soma_uniform.tar` and `soma_proportional.tar`, with proportional grouped by `actor_uid`.
 - Primary target lane: `/home/user/data/motion_data/bones_sonic` BONES-SONIC NPZ files, joined to BONES-SEED metadata.
-- Ablation/debug lanes: `soma_uniform.tar`, legacy `g1.tar`, and AMASS/GMR retargeted NPZ files remain useful for comparison or parser regression, but they are not the main SOMA proportional -> G1 source/target definition.
+- Debug lanes: legacy `g1.tar` and AMASS/GMR retargeted NPZ files remain useful for parser regression, but they are not the active SONIC kin-only baseline source/target definition.
 - Initial target: Unitree G1 29-DoF joint trajectories.
 - Simulator target: Isaac Lab, introduced after offline metrics are stable.
 

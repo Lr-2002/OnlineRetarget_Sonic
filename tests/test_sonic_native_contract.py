@@ -7,6 +7,8 @@ import tempfile
 
 from online_retarget.sonic_native_contract import (
     ContractError,
+    FORMAL_BASELINE_NAMES,
+    FORMAL_TRAINING_LANE,
     validate_config,
     validate_file,
     validate_resolved_runtime_config,
@@ -22,16 +24,25 @@ SONIC_ACTOR_CRITIC_CONFIG = (
 
 class SonicNativeContractTests(unittest.TestCase):
     def test_new_formal_configs_pass_contract(self):
-        configs = sorted(ROOT.glob("configs/sonic_native_retarget_*_1gpu.json"))
+        configs = sorted(ROOT.glob("configs/sonic_kin_only_soma_encoder_*.json"))
 
-        self.assertEqual(len(configs), 4)
+        self.assertEqual({path.stem for path in configs}, set(FORMAL_BASELINE_NAMES))
         for config_path in configs:
             with self.subTest(config=config_path.name):
                 result = validate_file(config_path, require_formal=True)
 
                 self.assertTrue(result.formal)
-                self.assertEqual(result.training_lane, "sonic_native_retarget")
+                self.assertEqual(result.training_lane, FORMAL_TRAINING_LANE)
                 self.assertEqual(result.target_decoder, "g1_kin")
+
+    def test_historical_ab_configs_are_not_current_formal_baselines(self):
+        configs = sorted(ROOT.glob("configs/sonic_native_retarget_*_1gpu.json"))
+
+        self.assertEqual(len(configs), 4)
+        for config_path in configs:
+            with self.subTest(config=config_path.name):
+                with self.assertRaisesRegex(ContractError, "training_lane"):
+                    validate_file(config_path, require_formal=True)
 
     def test_target_body_pose_labels_are_allowed_when_not_source_inputs(self):
         config = _base_formal_config()
@@ -515,12 +526,13 @@ def _base_formal_config():
         {
             "schema_version": "2.0.0",
             "owner": "OnlineRetarget",
-            "training_lane": "sonic_native_retarget",
+            "training_lane": FORMAL_TRAINING_LANE,
             "sonic_native": True,
             "source_repo": "/tmp/sonic",
             "sonic_config": SONIC_CONFIG,
             "base_actor_critic_config": SONIC_ACTOR_CRITIC_CONFIG,
             "input_data": {
+                "soma_topology": "proportional",
                 "robot_motion_file": "/tmp/robot_motionlib",
                 "soma_motion_file": "/tmp/soma_motionlib",
                 "skeleton_registry": "/tmp/skeleton_registry.csv",
@@ -550,7 +562,7 @@ def _base_formal_config():
                 "auxiliary": ["temporal_smoothness"],
             },
             "frequency": {"target_fps": 50},
-            "training": {"max_steps": 1000000},
+            "training": {"max_steps": 1000000, "required_gpu_count": 4},
             "visual_validation": {
                 "enabled": True,
                 "every_steps": 20000,
@@ -560,6 +572,7 @@ def _base_formal_config():
                 "wandb_upload": True,
             },
             "runtime": {
+                "required_gpu_count": 4,
                 "require_committed_code": True,
                 "require_latest_code": True,
             },
@@ -570,6 +583,7 @@ def _base_formal_config():
             },
             "sonic_hydra": {
                 "variant_wired": True,
+                "accelerate_num_processes": 4,
                 "args": [
                     "++manager_env.observations.tokenizer.soma_morphology.func=online_retarget.sonic_observation_terms:soma_morphology",
                     "++manager_env.observations.tokenizer.soma_morphology.params.registry_csv=/tmp/skeleton_registry.csv",
@@ -612,7 +626,7 @@ def _base_formal_config():
                     "++callbacks.online_retarget_visual_val.empty_cuda_cache=true",
                 ],
             },
-            "variant": {"name": "test_variant"},
+            "variant": {"name": "sonic_kin_only_soma_encoder_proportional"},
         }
     )
 
@@ -620,8 +634,8 @@ def _base_formal_config():
 def _base_resolved_runtime_config():
     return {
         "online_retarget": {
-            "contract": "sonic_native_retarget",
-            "encoder_variant": "A1_concat",
+            "contract": FORMAL_TRAINING_LANE,
+            "encoder_variant": "sonic_kin_only_soma_encoder_proportional",
         },
         "algo": {
             "config": {
@@ -666,6 +680,7 @@ def _set_data_paths(config, robot_dir: Path, soma_dir: Path, registry: Path) -> 
         "/tmp/skeleton_registry.csv": str(registry),
     }
     config["input_data"] = {
+        "soma_topology": "proportional",
         "robot_motion_file": str(robot_dir),
         "soma_motion_file": str(soma_dir),
         "skeleton_registry": str(registry),

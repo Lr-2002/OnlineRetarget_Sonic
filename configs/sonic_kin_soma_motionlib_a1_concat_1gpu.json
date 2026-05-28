@@ -16,7 +16,7 @@
     "robot_root_rot_format": "xyzw"
   },
   "output_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_kin_soma_motionlib_runs/{run_group}/A1_concat",
-  "validation_command": "CONFIG=configs/sonic_kin_soma_motionlib_a1_concat_1gpu.json CUDA_VISIBLE_DEVICES=0 scripts/remote_start_sonic_kin_skeleton_4x1gpu.sh",
+  "validation_command": "ALLOW_HISTORICAL_A_B_4X1GPU=1 CONFIG=configs/sonic_kin_soma_motionlib_a1_concat_1gpu.json CUDA_VISIBLE_DEVICES=0 scripts/remote_start_sonic_kin_skeleton_4x1gpu.sh",
   "expected_artifacts": [
     "manifest.json",
     "loss_curve.csv",
