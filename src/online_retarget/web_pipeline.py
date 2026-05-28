@@ -19,6 +19,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import types
 import uuid
@@ -54,6 +55,12 @@ GROUND_ALIGNMENT_FOOT_ROOT_BODIES = (
     "left_ankle_roll_link",
     "right_ankle_roll_link",
 )
+SOMA_GMR_BVH_JOINT_ALIASES = {
+    "LeftLeg": "LeftUpLeg",
+    "LeftShin": "LeftLeg",
+    "RightLeg": "RightUpLeg",
+    "RightShin": "RightLeg",
+}
 
 STAGE_ORDER = ("load", "retarget", "kinematic_sim", "physics_sim")
 KINEMATIC_BODY_NAMES = (
@@ -628,14 +635,16 @@ def _retarget_with_gmr(source_path: Path, *, input_format: str, max_frames: int 
 
     try:
         if source_kind.startswith("bvh_"):
-            frames, human_height, source_fps = _load_gmr_bvh_frames(source_path, source_kind)
+            frames, human_height, source_fps, bvh_adapter = _load_gmr_bvh_frames(source_path, source_kind)
             gmr_config_source = source_kind
         elif source_kind == "smplx_preview":
             frames, human_height, source_fps = _load_gmr_smpl_preview_frames(source_path, max_frames=max_frames)
             gmr_config_source = "smplx"
+            bvh_adapter = {}
         else:
             frames, human_height, source_fps = _load_gmr_smplx_frames(source_path)
             gmr_config_source = source_kind
+            bvh_adapter = {}
         retargeter = GeneralMotionRetargeting(
             src_human=gmr_config_source,
             tgt_robot=DEFAULT_GMR_ROBOT,
@@ -668,6 +677,7 @@ def _retarget_with_gmr(source_path: Path, *, input_format: str, max_frames: int 
                 "output_joint_count": len(G1_JOINT_COLUMNS),
                 "model_xml": str(DEFAULT_G1_MJCF),
                 "limitations": limitations,
+                "gmr_bvh_adapter": bvh_adapter,
             },
         }
     except Exception as exc:
@@ -733,17 +743,218 @@ def _looks_like_smpl_preview_npz(source_path: Path) -> bool:
         return False
 
 
-def _load_gmr_bvh_frames(source_path: Path, source_kind: str) -> tuple[Sequence[object], float, float]:
+def _load_gmr_bvh_frames(source_path: Path, source_kind: str) -> tuple[Sequence[object], float, float, dict[str, object]]:
     _ensure_gmr_package_stub()
     from general_motion_retargeting.utils.lafan1 import load_bvh_file  # type: ignore[import-not-found]
 
     bvh_format = source_kind.removeprefix("bvh_")
+    gmr_source_path, adapter_report = _prepare_gmr_bvh_source(source_path)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", ResourceWarning)
-        frames, human_height = load_bvh_file(str(source_path), format=bvh_format)
+        try:
+            frames, human_height = load_bvh_file(str(gmr_source_path), format=bvh_format)
+        finally:
+            if gmr_source_path != source_path:
+                try:
+                    gmr_source_path.unlink()
+                except OSError:
+                    pass
     frame_time = _bvh_frame_time(source_path)
     fps = 1.0 / frame_time if frame_time > 0 else 30.0
-    return frames, float(human_height), fps
+    return frames, float(human_height), fps, adapter_report
+
+
+def _prepare_gmr_bvh_source(source_path: Path) -> tuple[Path, dict[str, object]]:
+    try:
+        source_text = source_path.read_text(encoding="utf-8", errors="replace")
+        adapted_text, report = _adapt_soma_bvh_for_gmr(source_text)
+    except ValueError as exc:
+        return source_path, {"applied": False, "reason": str(exc)}
+    if not bool(report.get("applied")):
+        return source_path, report
+
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        suffix=".bvh",
+        prefix=f"{_safe_artifact_stem(source_path.stem)}-gmr-soma-",
+        dir=source_path.parent,
+        delete=False,
+    ) as handle:
+        handle.write(adapted_text)
+        adapted_path = Path(handle.name)
+    return adapted_path, report
+
+
+def _adapt_soma_bvh_for_gmr(text: str) -> tuple[str, dict[str, object]]:
+    lines = text.splitlines(keepends=True)
+    motion_index = _bvh_motion_line_index(lines)
+    if motion_index is None:
+        return text, {"applied": False, "reason": "missing_motion_section"}
+
+    header_lines = lines[:motion_index]
+    motion_lines = lines[motion_index:]
+    original_channels = _bvh_header_channel_counts(header_lines)
+    if len(original_channels) < 2:
+        return text, {"applied": False, "reason": "not_soma_root_hips_bvh"}
+    if original_channels[0] != ("Root", 6) or original_channels[1] != ("Hips", 6):
+        return text, {"applied": False, "reason": "not_soma_root_hips_bvh"}
+
+    span = _dummy_root_hips_span(header_lines)
+    if span is None:
+        return text, {"applied": False, "reason": "not_soma_root_hips_bvh"}
+    root_index, hips_index, root_close_index = span
+
+    adapted_header = _adapt_soma_bvh_header(header_lines, root_index, hips_index, root_close_index)
+    adapted_channels = _bvh_header_channel_counts(adapted_header)
+    input_width = sum(count for _, count in original_channels)
+    output_width = sum(count for _, count in adapted_channels)
+    if output_width != input_width - 6:
+        raise ValueError("SOMA GMR adapter could not account for the dummy Root channels")
+
+    adapted_motion, frame_count, nonzero_dummy = _drop_dummy_root_motion_channels(
+        motion_lines,
+        input_width=input_width,
+    )
+    alias_map = {
+        source: target
+        for source, target in SOMA_GMR_BVH_JOINT_ALIASES.items()
+        if any(name == target for name, _ in adapted_channels)
+    }
+    return "".join(adapted_header + adapted_motion), {
+        "applied": True,
+        "mode": "soma_root_hips_unwrap",
+        "dropped_dummy_root_channels": 6,
+        "input_channels": input_width,
+        "output_channels": output_width,
+        "frames": frame_count,
+        "dummy_root_nonzero_frames": nonzero_dummy,
+        "aliases": alias_map,
+        "foot_alias_source": "GMR nokov loader creates LeftFootMod/RightFootMod from LeftFoot and ToeBase joints",
+    }
+
+
+def _bvh_motion_line_index(lines: Sequence[str]) -> int | None:
+    for index, line in enumerate(lines):
+        if line.strip() == "MOTION":
+            return index
+    return None
+
+
+def _bvh_header_channel_counts(header_lines: Sequence[str]) -> list[tuple[str, int]]:
+    channels: list[tuple[str, int]] = []
+    current_joint = ""
+    for raw_line in header_lines:
+        parts = raw_line.strip().split()
+        if len(parts) >= 2 and parts[0] in {"ROOT", "JOINT"}:
+            current_joint = parts[1]
+        elif len(parts) >= 2 and parts[0] == "CHANNELS" and current_joint:
+            try:
+                channels.append((current_joint, int(parts[1])))
+            except ValueError:
+                continue
+    return channels
+
+
+def _dummy_root_hips_span(header_lines: Sequence[str]) -> tuple[int, int, int] | None:
+    root_index: int | None = None
+    hips_index: int | None = None
+    root_close_index: int | None = None
+    depth = 0
+    for index, raw_line in enumerate(header_lines):
+        line = raw_line.strip()
+        parts = line.split()
+        if root_index is None and depth == 0 and len(parts) >= 2 and parts[:2] == ["ROOT", "Root"]:
+            root_index = index
+        elif (
+            root_index is not None
+            and hips_index is None
+            and depth == 1
+            and len(parts) >= 2
+            and parts[:2] == ["JOINT", "Hips"]
+        ):
+            hips_index = index
+
+        depth += raw_line.count("{")
+        if root_index is not None:
+            depth -= raw_line.count("}")
+            if index > root_index and root_close_index is None and depth == 0 and "}" in raw_line:
+                root_close_index = index
+                break
+        else:
+            depth -= raw_line.count("}")
+
+    if root_index is None or hips_index is None or root_close_index is None:
+        return None
+    return root_index, hips_index, root_close_index
+
+
+def _adapt_soma_bvh_header(
+    header_lines: Sequence[str],
+    root_index: int,
+    hips_index: int,
+    root_close_index: int,
+) -> list[str]:
+    adapted: list[str] = []
+    for index, raw_line in enumerate(header_lines):
+        if root_index <= index < hips_index:
+            continue
+        if index == hips_index:
+            adapted.append(_replace_bvh_joint_decl(raw_line, "ROOT", "Hips"))
+            continue
+        if index == root_close_index:
+            continue
+        adapted.append(_rename_bvh_joint_decl(raw_line, SOMA_GMR_BVH_JOINT_ALIASES))
+    return adapted
+
+
+def _replace_bvh_joint_decl(raw_line: str, kind: str, name: str) -> str:
+    newline = "\n" if raw_line.endswith("\n") else ""
+    return f"{kind} {name}{newline}"
+
+
+def _rename_bvh_joint_decl(raw_line: str, aliases: Mapping[str, str]) -> str:
+    parts = raw_line.strip().split()
+    if len(parts) >= 2 and parts[0] in {"ROOT", "JOINT"} and parts[1] in aliases:
+        indent = raw_line[: len(raw_line) - len(raw_line.lstrip())]
+        newline = "\n" if raw_line.endswith("\n") else ""
+        return f"{indent}{parts[0]} {aliases[parts[1]]}{newline}"
+    return raw_line
+
+
+def _drop_dummy_root_motion_channels(
+    motion_lines: Sequence[str],
+    *,
+    input_width: int,
+) -> tuple[list[str], int, int]:
+    adapted: list[str] = []
+    frame_rows = 0
+    nonzero_dummy = 0
+    seen_frame_time = False
+    for raw_line in motion_lines:
+        stripped = raw_line.strip()
+        if not stripped:
+            adapted.append(raw_line)
+            continue
+        if stripped.startswith("Frame Time:"):
+            seen_frame_time = True
+            adapted.append(raw_line)
+            continue
+        if not seen_frame_time or stripped == "MOTION" or stripped.startswith("Frames:"):
+            adapted.append(raw_line)
+            continue
+
+        values = stripped.split()
+        if len(values) != input_width:
+            raise ValueError(
+                f"SOMA GMR adapter expected {input_width} motion channels, got {len(values)}"
+            )
+        dummy_values = [float(value) for value in values[:6]]
+        if any(abs(value) > 1e-8 for value in dummy_values):
+            nonzero_dummy += 1
+        adapted.append(" ".join(values[6:]) + ("\n" if raw_line.endswith("\n") else ""))
+        frame_rows += 1
+    return adapted, frame_rows, nonzero_dummy
 
 
 def _load_gmr_smplx_frames(source_path: Path) -> tuple[Sequence[object], float, float]:
