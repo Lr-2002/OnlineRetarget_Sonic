@@ -112,6 +112,23 @@ from pathlib import Path
 print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["source_repo"])
 PY
 )"
+SONIC_ENTRYPOINT="$("${PYTHON_BIN}" - "${CONFIG}" "${ROOT}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+root = Path(sys.argv[2])
+entrypoint = str(config.get("sonic_entrypoint") or "gear_sonic/train_agent_trl.py")
+entrypoint_path = Path(entrypoint)
+if entrypoint_path.is_absolute():
+    print(entrypoint_path)
+elif (root / entrypoint_path).exists():
+    print(root / entrypoint_path)
+else:
+    print(entrypoint)
+PY
+)"
 
 if [[ "${EXECUTE_SONIC_NATIVE_TRAINING}" == "1" ]]; then
   if git -C "${SONIC_ROOT}" diff --quiet && git -C "${SONIC_ROOT}" diff --cached --quiet; then
@@ -202,6 +219,7 @@ PY
 session="sonic_kin_only_soma_encoder_4gpu_${RUN_GROUP}_${variant}"
 session="${session//[^A-Za-z0-9_]/_}"
 log_path="${LAUNCH_ROOT}/${variant}_4gpu.log"
+sonic_entrypoint_quoted="$(printf '%q' "${SONIC_ENTRYPOINT}")"
 cmd=$(cat <<EOF
 set -euo pipefail
 cd "${SONIC_ROOT}"
@@ -224,11 +242,11 @@ if [[ -n "${TORCH_CPP_LOG_LEVEL}" ]]; then export TORCH_CPP_LOG_LEVEL="${TORCH_C
 if [[ -n "${TORCH_DISTRIBUTED_DEBUG}" ]]; then export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG}"; fi
 echo "contract=${contract} variant=${variant} gpus=${GPU_ASSIGNMENTS} nproc=${NPROC_PER_NODE} online_retarget_commit=${CONTROL_COMMIT} sonic_commit=${SONIC_COMMIT}"
 read -r -a _accelerate_cmd <<< "\${ACCELERATE_CMD}"
-"\${_accelerate_cmd[@]}" --num_processes="${NPROC_PER_NODE}" --num_machines=1 --mixed_precision="${ACCELERATE_MIXED_PRECISION}" --dynamo_backend="${ACCELERATE_DYNAMO_BACKEND}" gear_sonic/train_agent_trl.py ${hydra_args} \${HYDRA_EXTRA_ARGS:-} 2>&1 | tee -a "${log_path}"
+"\${_accelerate_cmd[@]}" --num_processes="${NPROC_PER_NODE}" --num_machines=1 --mixed_precision="${ACCELERATE_MIXED_PRECISION}" --dynamo_backend="${ACCELERATE_DYNAMO_BACKEND}" ${sonic_entrypoint_quoted} ${hydra_args} \${HYDRA_EXTRA_ARGS:-} 2>&1 | tee -a "${log_path}"
 EOF
 )
 
-"${PYTHON_BIN}" - "${LAUNCH_ROOT}/launch_manifest.json" "${RUN_GROUP}" "${CONTROL_COMMIT}" "${SONIC_COMMIT}" "${EXECUTE_SONIC_NATIVE_TRAINING}" "${CONFIG}" "${GPU_ASSIGNMENTS}" "${NPROC_PER_NODE}" "${session}" "${NCCL_SHM_DISABLE}" "${NCCL_IB_DISABLE}" "${NCCL_ALGO}" "${contract}" <<'PY'
+"${PYTHON_BIN}" - "${LAUNCH_ROOT}/launch_manifest.json" "${RUN_GROUP}" "${CONTROL_COMMIT}" "${SONIC_COMMIT}" "${EXECUTE_SONIC_NATIVE_TRAINING}" "${CONFIG}" "${GPU_ASSIGNMENTS}" "${NPROC_PER_NODE}" "${session}" "${NCCL_SHM_DISABLE}" "${NCCL_IB_DISABLE}" "${NCCL_ALGO}" "${contract}" "${SONIC_ENTRYPOINT}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -241,6 +259,7 @@ manifest = {
     "executed": sys.argv[5] == "1",
     "config": sys.argv[6],
     "contract": sys.argv[13],
+    "entrypoint": sys.argv[14],
     "gpus": sys.argv[7],
     "accelerate_num_processes": int(sys.argv[8]),
     "tmux_session": sys.argv[9],

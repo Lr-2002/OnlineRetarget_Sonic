@@ -88,6 +88,13 @@ class NativeRetargetFourGpuLauncherTests(unittest.TestCase):
         self.assertIn("ONLINE_RETARGET_GIT_SHA", text)
         self.assertIn("SONIC_GIT_SHA", text)
 
+    def test_single_config_launcher_uses_configured_entrypoint(self) -> None:
+        text = self.launcher_text
+        self.assertIn("SONIC_ENTRYPOINT", text)
+        self.assertIn("sonic_entrypoint", text)
+        self.assertIn("sonic_entrypoint_quoted", text)
+        self.assertIn('"entrypoint": sys.argv[14]', text)
+
     def test_single_config_launcher_defaults_to_nccl_workarounds(self) -> None:
         text = self.launcher_text
         self.assertIn('NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"', text)

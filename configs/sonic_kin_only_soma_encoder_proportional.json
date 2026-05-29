@@ -8,7 +8,7 @@
   "source_rev": "remote-latest-required-before-training",
   "sonic_config": "gear_sonic/config/exp/manager/universal_token/all_modes/sonic_bones_seed.yaml",
   "base_actor_critic_config": "gear_sonic/config/actor_critic/universal_token/all_mlp_v1_soma.yaml",
-  "sonic_entrypoint": "gear_sonic/train_agent_trl.py",
+  "sonic_entrypoint": "src/online_retarget/sonic_train_agent_trl_entrypoint.py",
   "input_data": {
     "soma_topology": "proportional",
     "robot_motion_file": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/robot_filtered_v1",
