@@ -8,6 +8,7 @@ import sys
 from types import ModuleType
 from typing import Any
 import warnings
+import weakref
 
 
 ONLINE_RETARGET_TOKENIZER_TERMS = (
@@ -20,6 +21,7 @@ ONLINE_RETARGET_TOKENIZER_TERMS = (
 _IMPORT_PATCHED = False
 _ORIGINAL_IMPORT = builtins.__import__
 _MODULE_NAME_TOKENS = ("gear_sonic", "isaaclab", "online_retarget")
+_PATCHED_TOKENIZER_CFGS: weakref.WeakSet[type[Any]] = weakref.WeakSet()
 
 
 def install_tokenizer_cfg_compat() -> None:
@@ -112,7 +114,7 @@ def _patch_tokenizer_cfgs_in_value(value: Any, seen: set[int]) -> None:
 
 
 def _patch_tokenizer_cfg(cls: type[Any]) -> None:
-    if getattr(cls, "_online_retarget_tokenizer_compat", False):
+    if cls in _PATCHED_TOKENIZER_CFGS:
         return
 
     original_init = getattr(cls, "__init__", None)
@@ -145,4 +147,4 @@ def _patch_tokenizer_cfg(cls: type[Any]) -> None:
                 object.__setattr__(self, term, value)
 
     cls.__init__ = patched_init
-    cls._online_retarget_tokenizer_compat = True
+    _PATCHED_TOKENIZER_CFGS.add(cls)

@@ -30,6 +30,7 @@ class TokenizerCompatTests(unittest.TestCase):
         self.assertEqual(cfg.existing, "kept")
         self.assertEqual(cfg.root_pos_w_mf, "position-term")
         self.assertEqual(cfg.root_rot_w_mf, "rotation-term")
+        self.assertFalse(hasattr(cfg, "_online_retarget_tokenizer_compat"))
 
     def test_patch_handles_nested_tokenizer_cfg_classes(self) -> None:
         module = types.ModuleType("_online_retarget_nested_tokenizer_cfg")
