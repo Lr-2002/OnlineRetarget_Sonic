@@ -7,6 +7,7 @@ import inspect
 import sys
 from types import ModuleType
 from typing import Any
+import warnings
 
 
 ONLINE_RETARGET_TOKENIZER_TERMS = (
@@ -18,6 +19,7 @@ ONLINE_RETARGET_TOKENIZER_TERMS = (
 
 _IMPORT_PATCHED = False
 _ORIGINAL_IMPORT = builtins.__import__
+_MODULE_NAME_TOKENS = ("gear_sonic", "isaaclab", "online_retarget")
 
 
 def install_tokenizer_cfg_compat() -> None:
@@ -44,7 +46,7 @@ def install_tokenizer_cfg_compat() -> None:
         level: int = 0,
     ) -> ModuleType:
         module = _ORIGINAL_IMPORT(name, globals, locals, fromlist, level)
-        _patch_loaded_tokenizer_cfgs()
+        _patch_imported_modules(name, module, fromlist)
         return module
 
     builtins.__import__ = importing
@@ -53,16 +55,50 @@ def install_tokenizer_cfg_compat() -> None:
 
 def _patch_loaded_tokenizer_cfgs() -> None:
     seen: set[int] = set()
-    for module in tuple(sys.modules.values()):
-        if module is None:
+    for name, module in tuple(sys.modules.items()):
+        if module is None or not _is_candidate_module_name(name):
             continue
-        for value in vars(module).values():
-            _patch_tokenizer_cfgs_in_value(value, seen)
+        _patch_module_tokenizer_cfgs(module, seen)
+
+
+def _patch_imported_modules(name: str, module: ModuleType, fromlist: Any) -> None:
+    seen: set[int] = set()
+    for candidate in _candidate_import_modules(name, module, fromlist):
+        if candidate is not None:
+            _patch_module_tokenizer_cfgs(candidate, seen)
+
+
+def _candidate_import_modules(
+    name: str,
+    module: ModuleType,
+    fromlist: Any,
+) -> tuple[ModuleType | None, ...]:
+    candidates: list[ModuleType | None] = []
+    if _is_candidate_module_name(name):
+        candidates.append(sys.modules.get(name))
+    if _is_candidate_module_name(getattr(module, "__name__", "")):
+        candidates.append(module)
+    for item in fromlist or ():
+        child = getattr(module, str(item), None)
+        if isinstance(child, ModuleType) and _is_candidate_module_name(child.__name__):
+            candidates.append(child)
+    return tuple(candidates)
+
+
+def _is_candidate_module_name(name: str) -> bool:
+    return any(token in name for token in _MODULE_NAME_TOKENS)
+
+
+def _patch_module_tokenizer_cfgs(module: ModuleType, seen: set[int]) -> None:
+    for value in vars(module).values():
+        _patch_tokenizer_cfgs_in_value(value, seen)
 
 
 def _patch_tokenizer_cfgs_in_value(value: Any, seen: set[int]) -> None:
-    if not inspect.isclass(value):
-        return
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        if not inspect.isclass(value):
+            return
     ident = id(value)
     if ident in seen:
         return
