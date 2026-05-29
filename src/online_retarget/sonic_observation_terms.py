@@ -139,7 +139,7 @@ def root_rot_w_mf(
         raise ValueError(f"unsupported root rotation representation: {rotation_format}")
     command = env.command_manager.get_term(command_name)
     direct = _command_tensor(command, ("root_rot_w_mf", "root_rot6d_w_mf"))
-    if direct is not None and direct.shape[-1] == 6:
+    if direct is not None:
         return _ensure_future_tensor(direct, command, width=6)
 
     root_quat = _root_body_tensor(
@@ -178,6 +178,14 @@ def _root_body_tensor(
     value = _command_tensor(command, names)
     if value is None:
         raise AttributeError(f"motion command exposes none of: {', '.join(names)}")
+    flat_root = _flat_root_body_tensor(
+        value,
+        command,
+        root_body_index=root_body_index,
+        width=width,
+    )
+    if flat_root is not None:
+        return flat_root
     tensor = _ensure_future_tensor(value, command, width=width)
     if tensor.shape[-1] == width and tensor.ndim == 3:
         return tensor
@@ -190,6 +198,10 @@ def _ensure_future_tensor(value: torch.Tensor, command: Any, *, width: int) -> t
     tensor = value
     if tensor.ndim == 2 and tensor.shape[-1] == width:
         return _repeat_future(tensor, command)
+    if tensor.ndim == 2 and tensor.shape[-1] % width == 0:
+        num_frames = _future_frame_count(command)
+        if num_frames > 0 and tensor.shape[-1] == num_frames * width:
+            return tensor.reshape(tensor.shape[0], num_frames, width)
     if tensor.ndim == 3 and tensor.shape[-1] == width:
         # Shape [B, N, C] is ambiguous.  If N looks like a body dimension, callers
         # that need a root body will select it before this function is returned.
@@ -199,6 +211,40 @@ def _ensure_future_tensor(value: torch.Tensor, command: Any, *, width: int) -> t
     if tensor.ndim >= 4 and tensor.shape[-1] == width:
         return tensor
     raise ValueError(f"expected tensor with trailing dim {width}, got {tuple(tensor.shape)}")
+
+
+def _flat_root_body_tensor(
+    value: torch.Tensor,
+    command: Any,
+    *,
+    root_body_index: int,
+    width: int,
+) -> torch.Tensor | None:
+    """Select the root body from flattened SONIC body future tensors."""
+
+    tensor = value
+    num_frames = _future_frame_count(command)
+    if tensor.ndim == 2 and tensor.shape[-1] != width:
+        total = tensor.shape[-1]
+        if num_frames > 0 and total % (num_frames * width) == 0:
+            num_bodies = total // (num_frames * width)
+            return tensor.reshape(tensor.shape[0], num_frames, num_bodies, width)[
+                :, :, int(root_body_index), :
+            ]
+        if total % width == 0:
+            num_bodies = total // width
+            root_current = tensor.reshape(tensor.shape[0], num_bodies, width)[
+                :, int(root_body_index), :
+            ]
+            return _repeat_future(root_current, command)
+    if tensor.ndim == 3 and tensor.shape[-1] != width and tensor.shape[1] == num_frames:
+        total = tensor.shape[-1]
+        if total % width == 0:
+            num_bodies = total // width
+            return tensor.reshape(tensor.shape[0], num_frames, num_bodies, width)[
+                :, :, int(root_body_index), :
+            ]
+    return None
 
 
 def _quat_wxyz_to_rot6d(quat: torch.Tensor) -> torch.Tensor:
