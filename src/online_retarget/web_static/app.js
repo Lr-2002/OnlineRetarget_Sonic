@@ -1,5 +1,6 @@
 const form = document.getElementById("runForm");
 const fileInput = document.getElementById("motionFile");
+const sourceHeightInput = document.getElementById("sourceHeightM");
 const renderFramesInput = document.getElementById("renderFrames");
 const compareRetargetersInput = document.getElementById("compareRetargeters");
 const runButton = document.getElementById("runButton");
@@ -65,6 +66,9 @@ form.addEventListener("submit", async (event) => {
   try {
     const data = new FormData();
     data.append("motion", file);
+    if (sourceHeightInput.value) {
+      data.append("source_height_m", sourceHeightInput.value);
+    }
     data.append("render_frames", renderFramesInput.checked ? "true" : "false");
     data.append("compare_retargeters", compareRetargetersInput.checked ? "true" : "false");
     const response = await fetch("/api/run", { method: "POST", body: data });

@@ -16,6 +16,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -27,7 +28,7 @@ from typing import Iterable, Mapping, Sequence
 import warnings
 import zipfile
 
-from .data.bones_seed import G1_CSV_COLUMNS, G1_JOINT_COLUMNS
+from .data.bones_seed import G1_CSV_COLUMNS, G1_JOINT_COLUMNS, METADATA_RELATIVE_PATH
 from .data.g1_quality import (
     G1KinematicModel,
     g1_fk_body_positions,
@@ -45,6 +46,7 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 DEFAULT_G1_MJCF = Path("/home/user/repos/GMR/assets/unitree_g1/g1_mocap_29dof.xml")
 DEFAULT_GMR_ROOT = Path(os.environ.get("ONLINE_RETARGET_GMR_ROOT", "/home/user/repos/GMR"))
 DEFAULT_GMR_ROBOT = "unitree_g1"
+DEFAULT_DATA_ROOT = Path(os.environ.get("ONLINE_RETARGET_DATA_ROOT", "/home/user/data/motion_data"))
 DEFAULT_MAX_FRAMES = 0
 DEFAULT_ROOT_HEIGHT = 0.793
 WEB_RUN_ROOT = Path("outputs/web_runs")
@@ -171,6 +173,7 @@ def run_web_pipeline(
     max_frames: int | None = DEFAULT_MAX_FRAMES,
     render_frames: bool = False,
     compare_retargeters: bool = False,
+    source_human_height_m: float | None = None,
 ) -> WebPipelineResult:
     """Run the upload -> retarget -> kinematic preview -> physics status pipeline."""
 
@@ -235,6 +238,7 @@ def run_web_pipeline(
         body_names=tuple(str(item) for item in loaded["body_names"]),
         max_frames=frame_limit,
         mode=str(loaded["retarget_source"]),
+        source_human_height_m=source_human_height_m,
     )
     retargets = [primary_retarget]
     if compare_retargeters and _retarget_id(primary_retarget) != "rule_based_preview":
@@ -519,8 +523,14 @@ def _retarget_source_to_g1(
     body_names: Sequence[str],
     max_frames: int | None,
     mode: str,
+    source_human_height_m: float | None,
 ) -> dict[str, object]:
-    gmr = _retarget_with_gmr(source_path, input_format=input_format, max_frames=max_frames)
+    gmr = _retarget_with_gmr(
+        source_path,
+        input_format=input_format,
+        max_frames=max_frames,
+        source_human_height_m=source_human_height_m,
+    )
     if gmr["status"] == "ok":
         return {
             "trajectory": gmr["trajectory"],
@@ -603,7 +613,13 @@ def _combined_panel_status(panels: Sequence[Mapping[str, object]]) -> str:
     return statuses[0] if statuses else "blocked"
 
 
-def _retarget_with_gmr(source_path: Path, *, input_format: str, max_frames: int | None) -> dict[str, object]:
+def _retarget_with_gmr(
+    source_path: Path,
+    *,
+    input_format: str,
+    max_frames: int | None,
+    source_human_height_m: float | None = None,
+) -> dict[str, object]:
     if not DEFAULT_GMR_ROOT.exists():
         return {
             "status": "blocked",
@@ -638,21 +654,41 @@ def _retarget_with_gmr(source_path: Path, *, input_format: str, max_frames: int 
 
     try:
         if source_kind.startswith("bvh_"):
-            frames, human_height, source_fps, bvh_adapter = _load_gmr_bvh_frames(source_path, source_kind)
+            frames, human_height, source_fps, bvh_adapter, height_report = _load_gmr_bvh_frames(
+                source_path,
+                source_kind,
+                source_human_height_m=source_human_height_m,
+            )
             gmr_config_source = source_kind
         elif source_kind == "smplx_preview":
             frames, human_height, source_fps = _load_gmr_smpl_preview_frames(source_path, max_frames=max_frames)
             gmr_config_source = "smplx"
             bvh_adapter = {}
+            height_report = _actual_height_report(
+                actual_height_m=human_height,
+                source="smpl_preview_default",
+                loader_height_m=human_height,
+            )
         else:
             frames, human_height, source_fps = _load_gmr_smplx_frames(source_path)
             gmr_config_source = source_kind
             bvh_adapter = {}
+            height_report = _actual_height_report(
+                actual_height_m=human_height,
+                source="gmr_smplx_loader",
+                loader_height_m=human_height,
+            )
+        ik_config = _load_gmr_ik_config(gmr_config_source, DEFAULT_GMR_ROBOT)
         retargeter = GeneralMotionRetargeting(
             src_human=gmr_config_source,
             tgt_robot=DEFAULT_GMR_ROBOT,
             actual_human_height=human_height,
             verbose=False,
+        )
+        scale_report = _gmr_scale_report(
+            retargeter=retargeter,
+            actual_height_m=human_height,
+            ik_config=ik_config,
         )
         trajectory: list[dict[str, object]] = []
         for frame_index, human_frame in enumerate(_limited_sequence(frames, max_frames)):
@@ -664,6 +700,7 @@ def _retarget_with_gmr(source_path: Path, *, input_format: str, max_frames: int 
         ]
         if source_kind == "smplx_preview":
             limitations.append("SMPL preview inputs use approximate joint targets, not full SMPL-X body-model decoding.")
+        source_lane = _source_dataset_lane(source_path)
         return {
             "status": "ok",
             "message": "GMR retarget completed.",
@@ -675,12 +712,16 @@ def _retarget_with_gmr(source_path: Path, *, input_format: str, max_frames: int 
                 "gmr_config_source": gmr_config_source,
                 "target_robot": DEFAULT_GMR_ROBOT,
                 "gmr_root": str(DEFAULT_GMR_ROOT),
+                "source_dataset_lane": source_lane,
+                "diagnostic_only": source_lane == "demo0506_bridge",
                 "frames": len(trajectory),
                 "source_fps": source_fps,
                 "output_joint_count": len(G1_JOINT_COLUMNS),
                 "model_xml": str(DEFAULT_G1_MJCF),
                 "limitations": limitations,
                 "gmr_bvh_adapter": bvh_adapter,
+                **height_report,
+                **scale_report,
             },
         }
     except Exception as exc:
@@ -746,7 +787,12 @@ def _looks_like_smpl_preview_npz(source_path: Path) -> bool:
         return False
 
 
-def _load_gmr_bvh_frames(source_path: Path, source_kind: str) -> tuple[Sequence[object], float, float, dict[str, object]]:
+def _load_gmr_bvh_frames(
+    source_path: Path,
+    source_kind: str,
+    *,
+    source_human_height_m: float | None,
+) -> tuple[Sequence[object], float, float, dict[str, object], dict[str, object]]:
     _ensure_gmr_package_stub()
     from general_motion_retargeting.utils.lafan1 import load_bvh_file  # type: ignore[import-not-found]
 
@@ -764,7 +810,115 @@ def _load_gmr_bvh_frames(source_path: Path, source_kind: str) -> tuple[Sequence[
                     pass
     frame_time = _bvh_frame_time(source_path)
     fps = 1.0 / frame_time if frame_time > 0 else 30.0
-    return frames, float(human_height), fps, adapter_report
+    loader_height = float(human_height)
+    actual_height, height_report = _resolve_bvh_actual_human_height(
+        source_path,
+        source_human_height_m=source_human_height_m,
+        loader_height_m=loader_height,
+    )
+    return frames, actual_height, fps, adapter_report, height_report
+
+
+def _resolve_bvh_actual_human_height(
+    source_path: Path,
+    *,
+    source_human_height_m: float | None,
+    loader_height_m: float,
+) -> tuple[float, dict[str, object]]:
+    explicit_height = _valid_height_m(source_human_height_m)
+    if explicit_height is not None:
+        return explicit_height, _actual_height_report(
+            actual_height_m=explicit_height,
+            source="explicit",
+            loader_height_m=loader_height_m,
+        )
+
+    actor_uid = _actor_uid_from_name(source_path.name)
+    metadata_height, metadata_csv = _actor_height_from_metadata(actor_uid)
+    if metadata_height is not None:
+        return metadata_height, _actual_height_report(
+            actual_height_m=metadata_height,
+            source="actor_metadata",
+            loader_height_m=loader_height_m,
+            actor_uid=actor_uid,
+            metadata_csv=metadata_csv,
+        )
+
+    return loader_height_m, _actual_height_report(
+        actual_height_m=loader_height_m,
+        source="gmr_bvh_loader",
+        loader_height_m=loader_height_m,
+        actor_uid=actor_uid,
+        metadata_csv=metadata_csv,
+    )
+
+
+def _actual_height_report(
+    *,
+    actual_height_m: float,
+    source: str,
+    loader_height_m: float,
+    actor_uid: str = "",
+    metadata_csv: str = "",
+) -> dict[str, object]:
+    return {
+        "actual_human_height": _round_float(actual_height_m),
+        "actual_human_height_source": source,
+        "bvh_loader_human_height": _round_float(loader_height_m),
+        "actor_uid": actor_uid,
+        "actor_metadata_csv": metadata_csv,
+    }
+
+
+def _actor_height_from_metadata(actor_uid: str) -> tuple[float | None, str]:
+    if not actor_uid:
+        return None, ""
+    for path in _metadata_csv_candidates():
+        if not path.exists():
+            continue
+        try:
+            with path.open(newline="", encoding="utf-8") as handle:
+                for row in csv.DictReader(handle):
+                    if row.get("actor_uid") != actor_uid:
+                        continue
+                    height_cm = _valid_float(row.get("actor_height_cm"))
+                    if height_cm is None:
+                        return None, str(path)
+                    height_m = _valid_height_m(height_cm / 100.0)
+                    return height_m, str(path)
+        except OSError:
+            continue
+    return None, ""
+
+
+def _metadata_csv_candidates() -> list[Path]:
+    explicit = os.environ.get("ONLINE_RETARGET_METADATA_CSV")
+    data_root = Path(os.environ.get("ONLINE_RETARGET_DATA_ROOT", str(DEFAULT_DATA_ROOT))).expanduser()
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+    candidates.append(data_root / METADATA_RELATIVE_PATH)
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        if path not in seen:
+            unique.append(path)
+            seen.add(path)
+    return unique
+
+
+def _actor_uid_from_name(name: str) -> str:
+    match = re.search(r"(?<![A-Za-z0-9])A\d{3,}(?![A-Za-z0-9])", name)
+    return match.group(0) if match else ""
+
+
+def _source_dataset_lane(source_path: Path) -> str:
+    name = source_path.name.lower()
+    if "demo0506_bridge" in name:
+        return "demo0506_bridge"
+    if "soma_retargeter_assets" in name:
+        return "soma_retargeter_assets"
+    return ""
 
 
 def _prepare_gmr_bvh_source(source_path: Path, source_kind: str) -> tuple[Path, dict[str, object]]:
@@ -1675,6 +1829,69 @@ def _dict_value(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def _load_gmr_ik_config(src_human: str, tgt_robot: str) -> dict[str, object]:
+    try:
+        from general_motion_retargeting.params import IK_CONFIG_DICT  # type: ignore[import-not-found]
+
+        config_path = Path(IK_CONFIG_DICT[src_human][tgt_robot])
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        if isinstance(payload, Mapping):
+            return {"path": str(config_path), "payload": dict(payload)}
+    except Exception:
+        return {}
+    return {}
+
+
+def _gmr_scale_report(
+    *,
+    retargeter: object,
+    actual_height_m: float,
+    ik_config: Mapping[str, object],
+) -> dict[str, object]:
+    config_payload = _dict_value(ik_config.get("payload"))
+    assumption = _valid_float(config_payload.get("human_height_assumption"))
+    if assumption is None:
+        assumption = _valid_float(getattr(retargeter, "human_height_assumption", None))
+    if assumption is None:
+        assumption = 1.8
+
+    ratio = actual_height_m / assumption if assumption > 0 else None
+    base_table = _scale_table_value(config_payload.get("human_scale_table"))
+    scaled_table = _scale_table_value(getattr(retargeter, "human_scale_table", None))
+    if not scaled_table and base_table and ratio is not None:
+        scaled_table = {
+            key: _scale_json_value(value, multiplier=ratio)
+            for key, value in base_table.items()
+        }
+    return {
+        "gmr_ik_config_path": str(ik_config.get("path", "")),
+        "gmr_human_height_assumption": _round_float(assumption),
+        "actual_human_height_ratio": _round_float(ratio) if ratio is not None else None,
+        "gmr_human_scale_table_base": base_table,
+        "gmr_human_scale_table": scaled_table,
+    }
+
+
+def _scale_table_value(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): _scale_json_value(item) for key, item in sorted(value.items())}
+
+
+def _scale_json_value(value: object, *, multiplier: float = 1.0) -> object:
+    number = _valid_float(value)
+    if number is not None:
+        return _round_float(number * multiplier)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _scale_json_value(item, multiplier=multiplier)
+            for key, item in sorted(value.items())
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [_scale_json_value(item, multiplier=multiplier) for item in value]
+    return value
+
+
 def _frame_list(value: object) -> list[dict[str, list[float]]]:
     if not isinstance(value, Sequence):
         return []
@@ -1755,6 +1972,27 @@ def _float_sequence(value: object, length: int) -> list[float]:
     while len(parsed) < length:
         parsed.append(0.0)
     return parsed[:length]
+
+
+def _valid_float(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _valid_height_m(value: object) -> float | None:
+    parsed = _valid_float(value)
+    if parsed is None or parsed <= 0:
+        return None
+    return parsed if 0.5 <= parsed <= 2.5 else None
+
+
+def _round_float(value: float) -> float:
+    return round(float(value), 6)
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:

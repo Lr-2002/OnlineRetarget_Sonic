@@ -18,6 +18,10 @@
             <span>Motion file</span>
             <input id="motionFile" name="motion" type="file" accept=".bvh,.npz" />
           </label>
+          <label class="number-field">
+            <span>Source height m</span>
+            <input id="sourceHeightM" name="source_height_m" type="number" min="0.5" max="2.5" step="0.01" placeholder="auto" />
+          </label>
           <label class="toggle-field">
             <input id="renderFrames" name="render_frames" type="checkbox" />
             <span>Frame axes</span>

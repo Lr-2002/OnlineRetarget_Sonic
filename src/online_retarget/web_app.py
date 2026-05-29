@@ -52,7 +52,7 @@ class RetargetWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
             return
         try:
-            filename, content, render_frames, compare_retargeters = self._read_motion_upload()
+            filename, content, render_frames, compare_retargeters, source_human_height_m = self._read_motion_upload()
             if not filename:
                 self._send_json({"error": "missing motion file"}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -66,6 +66,7 @@ class RetargetWebHandler(BaseHTTPRequestHandler):
                 model_xml=self.server.model_xml,  # type: ignore[attr-defined]
                 render_frames=render_frames,
                 compare_retargeters=compare_retargeters,
+                source_human_height_m=source_human_height_m,
             )
             self._send_json(result.to_dict())
         except Exception as exc:  # pragma: no cover - keeps web response debuggable.
@@ -77,12 +78,12 @@ class RetargetWebHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         print(f"{self.address_string()} - {format % args}")
 
-    def _read_motion_upload(self) -> tuple[str, bytes, bool, bool]:
+    def _read_motion_upload(self) -> tuple[str, bytes, bool, bool, float | None]:
         content_type = self.headers.get("Content-Type", "")
         content_length = int(self.headers.get("Content-Length", "0") or "0")
         body = self.rfile.read(content_length)
         if "multipart/form-data" not in content_type:
-            return "", b"", False, False
+            return "", b"", False, False, None
         message = BytesParser(policy=default).parsebytes(
             (
                 f"Content-Type: {content_type}\r\n"
@@ -95,6 +96,7 @@ class RetargetWebHandler(BaseHTTPRequestHandler):
         payload = b""
         render_frames = False
         compare_retargeters = False
+        source_human_height_m: float | None = None
         for part in message.iter_parts():
             name = part.get_param("name", header="content-disposition")
             if name == "motion":
@@ -107,7 +109,16 @@ class RetargetWebHandler(BaseHTTPRequestHandler):
             if name == "compare_retargeters":
                 value = (part.get_payload(decode=True) or b"").decode("utf-8", errors="ignore")
                 compare_retargeters = value.strip().lower() in {"1", "true", "yes", "on"}
-        return filename, payload, render_frames, compare_retargeters
+            if name == "source_height_m":
+                value = (part.get_payload(decode=True) or b"").decode("utf-8", errors="ignore").strip()
+                if value:
+                    try:
+                        parsed = float(value)
+                    except ValueError:
+                        parsed = 0.0
+                    if 0.5 <= parsed <= 2.5:
+                        source_human_height_m = parsed
+        return filename, payload, render_frames, compare_retargeters, source_human_height_m
 
     def _send_file(self, path: Path, content_type: str) -> None:
         if not path.exists():

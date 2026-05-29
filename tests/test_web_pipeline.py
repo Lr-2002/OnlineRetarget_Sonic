@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -147,6 +148,7 @@ class WebPipelineTests(unittest.TestCase):
                     output_root=tmp_path / "web_runs",
                     model_xml=tmp_path / "missing_g1.xml",
                     max_frames=0,
+                    source_human_height_m=1.85,
                 )
             finally:
                 web_pipeline.DEFAULT_GMR_ROOT = original_root
@@ -162,12 +164,53 @@ class WebPipelineTests(unittest.TestCase):
         self.assertEqual(report["gmr_config_source"], "bvh_nokov")
         self.assertEqual(report["frames"], 1)
         self.assertAlmostEqual(report["source_fps"], 120.0)
+        self.assertAlmostEqual(report["actual_human_height"], 1.85)
+        self.assertEqual(report["actual_human_height_source"], "explicit")
+        self.assertAlmostEqual(report["bvh_loader_human_height"], 1.75)
+        self.assertAlmostEqual(report["gmr_human_height_assumption"], 1.8)
+        self.assertAlmostEqual(report["actual_human_height_ratio"], 1.027778)
+        self.assertAlmostEqual(report["gmr_human_scale_table"]["Hips"], 0.925)
+        self.assertFalse(report["diagnostic_only"])
         self.assertTrue(report["gmr_bvh_adapter"]["applied"])
+        self.assertAlmostEqual(observations["actual_human_height"], 1.85)
         self.assertEqual(observations["bvh_format"], "nokov")
         self.assertNotIn("ROOT Root", str(observations["adapted_bvh_text"]))
         self.assertIn("ROOT Hips", str(observations["adapted_bvh_text"]))
         self.assertIn("JOINT LeftUpLeg", str(observations["adapted_bvh_text"]))
         self.assertIn("LeftFootMod", observations["frame_keys"])
+
+    def test_bvh_actual_human_height_uses_actor_metadata_when_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            metadata = tmp_path / "seed_metadata_v003.csv"
+            metadata.write_text(
+                "actor_uid,actor_height_cm\nA057,185\n",
+                encoding="utf-8",
+            )
+            previous = os.environ.get("ONLINE_RETARGET_METADATA_CSV")
+            os.environ["ONLINE_RETARGET_METADATA_CSV"] = str(metadata)
+            try:
+                actual_height, report = web_pipeline._resolve_bvh_actual_human_height(
+                    Path("Neutral_throw_ball_A057_001.bvh"),
+                    source_human_height_m=None,
+                    loader_height_m=1.75,
+                )
+            finally:
+                if previous is None:
+                    os.environ.pop("ONLINE_RETARGET_METADATA_CSV", None)
+                else:
+                    os.environ["ONLINE_RETARGET_METADATA_CSV"] = previous
+
+        self.assertAlmostEqual(actual_height, 1.85)
+        self.assertEqual(report["actual_human_height_source"], "actor_metadata")
+        self.assertEqual(report["actor_uid"], "A057")
+        self.assertEqual(report["actor_metadata_csv"], str(metadata))
+
+    def test_demo0506_bridge_lane_is_diagnostic_only(self):
+        self.assertEqual(
+            web_pipeline._source_dataset_lane(Path("demo0506_bridge_throw_A057.bvh")),
+            "demo0506_bridge",
+        )
 
 
 def _bvh_text() -> str:
@@ -361,6 +404,11 @@ def _install_fake_gmr_modules(observations: dict[str, object]) -> dict[str, type
             observations["tgt_robot"] = tgt_robot
             observations["actual_human_height"] = actual_human_height
             observations["verbose"] = verbose
+            ratio = actual_human_height / 1.8
+            self.human_scale_table = {
+                "Hips": 0.9 * ratio,
+                "LeftFootMod": 0.9 * ratio,
+            }
 
         def retarget(self, human_frame: dict[str, object]) -> list[float]:
             observations["frame_keys"] = set(human_frame)

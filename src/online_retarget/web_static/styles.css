@@ -85,7 +85,8 @@ p {
   justify-content: flex-end;
 }
 
-.file-picker {
+.file-picker,
+.number-field {
   display: grid;
   gap: 5px;
   color: var(--muted);
@@ -111,12 +112,17 @@ p {
   accent-color: var(--accent);
 }
 
-.file-picker input {
+.file-picker input,
+.number-field input {
   width: min(360px, 64vw);
   border: 1px solid var(--line);
   background: var(--panel);
   border-radius: 6px;
   padding: 8px;
+}
+
+.number-field input {
+  width: 132px;
 }
 
 button {
