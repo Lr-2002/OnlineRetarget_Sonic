@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="${ROOT:-/mnt/data_cpfs/code/wxh/OnlineRetarget}"
-PYTHON_BIN="${PYTHON_BIN:-/workspace/isaaclab/_isaac_sim/python.sh}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 CONFIG="${CONFIG:-configs/sonic_kin_soma_motionlib_proportional_4gpu.json}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
@@ -20,8 +20,13 @@ if [[ ! -f "${CONFIG}" ]]; then
   echo "missing config: ${CONFIG}" >&2
   exit 1
 fi
-if [[ ! -x "${PYTHON_BIN}" ]]; then
-  echo "missing python launcher: ${PYTHON_BIN}" >&2
+if [[ "${PYTHON_BIN}" == */* ]]; then
+  if [[ ! -x "${PYTHON_BIN}" ]]; then
+    echo "missing python launcher: ${PYTHON_BIN}" >&2
+    exit 1
+  fi
+elif ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+  echo "missing python launcher on PATH: ${PYTHON_BIN}" >&2
   exit 1
 fi
 
@@ -53,7 +58,7 @@ PY
 if "${PYTHON_BIN}" -c 'import sys; text=open(sys.argv[1], encoding="utf-8").read(); bad=("train_agent_trl.py","KinematicActionUniversalTokenModule","sonic_hydra","num_envs","reward","episode_length"); sys.exit(1 if any(item in text for item in bad) else 0)' "${CONFIG}"; then
   :
 else
-  echo "CONFIG contains PPO/Isaac/reward/episode-length tokens and is not a strict supervised config: ${CONFIG}" >&2
+  echo "CONFIG contains forbidden rollout-loop tokens and is not a strict supervised config: ${CONFIG}" >&2
   exit 1
 fi
 
@@ -190,7 +195,7 @@ manifest = {
     "tmux_session": sys.argv[12],
     "entrypoint": "scripts/train_sonic_kin_skeleton_ae.py",
     "distributed_launcher": "python -m torch.distributed.run",
-    "contract": "strict_supervised_soma_motionlib_kin_only_no_ppo_no_isaac_no_reward_episode_length",
+    "contract": "strict_supervised_soma_motionlib_kin_only_reconstruction",
 }
 out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY

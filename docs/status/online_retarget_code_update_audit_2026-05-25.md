@@ -2,12 +2,14 @@
 
 Date: 2026-05-25
 
-LR-185 supersession note (2026-05-28): the active execution surface is now
-exactly two formal kin-only SOMA encoder baselines,
+LR-177 correction note (2026-05-29): the active execution surface is now the
+strict supervised SOMA motionlib lane:
+`configs/sonic_kin_soma_motionlib_uniform_4gpu.json` and
+`configs/sonic_kin_soma_motionlib_proportional_4gpu.json`. The run names remain
 `sonic_kin_only_soma_encoder_uniform` and
-`sonic_kin_only_soma_encoder_proportional`, each launched as one 4-GPU job.
-The A1/A2/B1/B2 entries below are historical LR-147 evidence, not the current
-run matrix.
+`sonic_kin_only_soma_encoder_proportional`; both are reconstruction-only 4-GPU
+baselines. The A1/A2/B1/B2 entries below are historical LR-147 evidence, not
+the current run matrix.
 
 ## Conclusion
 
@@ -30,7 +32,7 @@ This pass tightened two missing pieces:
 | W&B traceability | Present | formal and kin configs have `wandb.enabled=true`; trainer logs config, commit, metrics, checkpoints |
 | Continuous source/dataset/inference visual validation | Updated | `SonicVisualValidationCallback` supports `every_minutes` / `every_seconds`; formal configs request hourly validation while retaining the 20k gate |
 | Four encoder variants | Present | A1 concat, A2 FiLM/contact, B1 adapter, B2 expert configs and modules |
-| Formal SONIC-native retarget route | Present | formal configs use `g1_dyn` primary and `g1_kin` auxiliary |
+| Historical SONIC-native retarget route | Superseded | active LR-177 configs use the strict supervised SOMA motionlib lane |
 | Kin-only root pose supervision | Updated | kin trainer supports `include_root_pos_target=true`, target layout `command + root_pos_w_mf + root_rot_w_mf` |
 | Validation guardrails | Updated | formal config contract now requires the hourly callback wiring in addition to the 20k step gate |
 

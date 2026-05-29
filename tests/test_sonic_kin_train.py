@@ -1,11 +1,58 @@
+import importlib.util
 import unittest
 
 import numpy as np
 
-import scripts.train_sonic_kin_skeleton_ae as sonic_train
+TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
+
+if TORCH_AVAILABLE:
+    import scripts.train_sonic_kin_skeleton_ae as sonic_train
 
 
+@unittest.skipUnless(TORCH_AVAILABLE, "torch is required for Sonic kin trainer tests")
 class SonicKinTrainTimingTests(unittest.TestCase):
+    def test_concat_retargeter_uses_explicit_hidden_dims(self):
+        model = sonic_train.make_model(
+            motion_dim=3,
+            skeleton_dim=2,
+            output_dim=4,
+            config={
+                "variant": {"type": "concat"},
+                "model": {"hidden_dims": [5, 7, 6], "dropout": 0.0},
+            },
+        )
+
+        linears = [module for module in model.net if isinstance(module, sonic_train.nn.Linear)]
+
+        self.assertEqual(
+            [(layer.in_features, layer.out_features) for layer in linears],
+            [
+                (5, 5),
+                (5, 7),
+                (7, 6),
+                (6, 4),
+            ],
+        )
+
+    def test_reconstruction_weights_prefer_new_config_key(self):
+        config = {
+            "training": {
+                "command_loss_weight": 99.0,
+                "root_pos_loss_weight": 99.0,
+                "root_rot_loss_weight": 99.0,
+                "reconstruction_weights": {
+                    "command": 1.0,
+                    "root_pos": 0.25,
+                    "root_rot": 0.5,
+                },
+            }
+        }
+
+        self.assertEqual(
+            sonic_train.reconstruction_weights(config),
+            (1.0, 0.25, 0.5),
+        )
+
     def test_robot_root_rot_to_wxyz_converts_gmr_xyzw_motionlib_quat(self):
         root_rot_xyzw = np.asarray([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
 

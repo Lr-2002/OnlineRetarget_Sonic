@@ -1,141 +1,74 @@
-# SONIC Kin-Only SOMA Encoder Contract
+# SOMA Motionlib Reconstruction Baseline Contract
 
-Date: 2026-05-20. Updated for LR-185 on 2026-05-28.
+Date: 2026-05-20. Corrected for LR-177 on 2026-05-29.
 
 ## Decision
 
-OnlineRetarget's formal training lane is now `sonic_kin_only_soma_encoder`.
+The active OnlineRetarget baseline surface is the strict supervised SOMA
+motionlib lane, not the older SONIC-native launcher surface. There are exactly
+two active 4-GPU configs:
 
-This lane is defined as:
+- `configs/sonic_kin_soma_motionlib_uniform_4gpu.json`
+- `configs/sonic_kin_soma_motionlib_proportional_4gpu.json`
+
+Both keep the run names:
+
+- `sonic_kin_only_soma_encoder_uniform`
+- `sonic_kin_only_soma_encoder_proportional`
+
+The train path is:
 
 ```text
-SOMA/BVH source motion + skeleton/morphology features
-  -> SONIC-compatible SOMA encoder baseline
-  -> SONIC shared token/latent space
-  -> SONIC g1_kin decoder as the only active retarget target
-  -> readable kin-loss / MPJPE / sliding-jitter validation
+SOMA motionlib source features + SOMA skeleton features
+  -> supervised SOMA encoder MLP
+  -> G1 g1_kin target fields
+  -> reconstruction objective
 ```
 
-Historical A1/A2/B1/B2 configs are not the current target scope. They remain as
-health/history artifacts only and are rejected by strict `--require-formal`
-validation.
+## Baseline Guardrails
 
-## Guardrails Added
+- `training_lane` must be `soma_motionlib_kin_only`.
+- Each active config is one 4-GPU job.
+- `target_decoder.primary` and `decoder_targets` must be exactly `g1_kin`.
+- `losses.primary` must be exactly `["reconstruction"]`.
+- `losses.auxiliary` must be empty.
+- The encoder MLP hidden dimensions must be `[512, 2048, 512]`.
+- Target frequency remains 50 Hz.
+- Long-run output stays under the OnlineRetarget `outputs/` tree.
 
-- Formal configs must set `training_lane: sonic_kin_only_soma_encoder`.
-- Formal configs must set `sonic_native: true`.
-- Formal config names must be exactly:
-  - `sonic_kin_only_soma_encoder_uniform`
-  - `sonic_kin_only_soma_encoder_proportional`
-- Each formal config must request one 4-GPU launch (`required_gpu_count=4`,
-  `sonic_hydra.accelerate_num_processes=4`).
-- Formal source features must include SOMA/BVH motion, root
-  orientation, and skeleton/morphology conditioning.
-- `body_pos_w` and `body_quat_w` are forbidden in formal source encoder inputs.
-- `body_pos_w` and `body_quat_w` remain allowed as target labels,
-  visualization targets, FK checks, and diagnostics.
-- `target_decoder.primary` and `active_decoders` must be exactly `g1_kin`.
-- `g1_dyn`, `g1_target_action`, and action/dynamics auxiliary losses are
-  forbidden in active formal runs.
-- Sonic target frequency must be 50 Hz.
-- Visual validation must run every 20k steps, render 8 clips of 4 seconds, and
-  upload video to W&B.
-- Remote training launch must require committed code and a latest-git check.
+The fields under `losses.reported_metrics` are reporting metrics for judging
+quality after reconstruction training. They are not additional training losses.
 
-## Shared Feature Packer
+## Launch Surface
 
-`src/online_retarget/sonic_native_features.py` defines the shared
-train/inference feature contract for the formal lane.
-
-- `SonicNativeFeatureContract.from_config_path(...)` derives source and target
-  roles from a formal config after running the strict config validator.
-- `pack_training_pair(...)` and `pack_inference_features(...)` use the same
-  deployable source keys and emit the same contract digest.
-- Source payloads are rejected if they contain target-only fields such as
-  `body_pos_w` or `body_quat_w`.
-- `assert_matching_contracts(...)` rejects train/inference feature-contract
-  drift before a run can be treated as comparable.
-
-## Morphology Features
-
-`src/online_retarget/sonic_morphology.py` converts skeleton-registry rows into
-formal source morphology features:
-
-- `actor_uid`
-- `skeleton_id`
-- `skeleton_cluster_id`
-- `height`
-- `bone_lengths`
-- `body_proportions`
-- `foot_leg_arm_torso_measurements`
-
-`pack_source_motion_with_morphology(...)` merges these morphology features with
-SOMA/BVH motion features before applying the shared deployable source contract.
-
-## Two Formal Configs
-
-- `configs/sonic_kin_only_soma_encoder_uniform.json`
-- `configs/sonic_kin_only_soma_encoder_proportional.json`
-
-Each config reserves one 4-GPU job and targets a 1M-step formal comparison.
-Both configs name a Hydra-compatible encoder module target under
-`online_retarget.sonic_encoder_modules`; the comparison is uniform versus
-proportional SOMA source topology, not A/B architecture variants.
-
-## Encoder Module Surface
-
-`src/online_retarget/sonic_encoder_modules.py` adds four SONIC-compatible
-module classes:
-
-- `ConcatSomaEncoderModule`
-- `FilmSomaEncoderModule`
-- `AdapterSomaEncoderModule`
-- `ExpertSomaEncoderModule`
-
-The remote launcher exports `PYTHONPATH=${ROOT}/src` so a SONIC process can
-import these module targets after the SONIC-side observation dimensions and
-Hydra overrides are wired.
-
-## Launcher Surface
-
-`scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh` launches one active
-baseline config as a single 4-GPU job via
-`scripts/remote_start_sonic_native_retarget_4gpu.sh`. The historical
-`4x1gpu` launcher now refuses to default-launch A1/A2/B1/B2 unless explicitly
-unlocked for archaeology, and it rejects active kin-only SOMA encoder configs.
-
-Dry-run command surface:
+Use the wrapper:
 
 ```bash
-PYTHONPATH=src PYTHON_BIN=python3 \
-  CONFIG=configs/sonic_kin_only_soma_encoder_uniform.json \
+CONFIG=configs/sonic_kin_soma_motionlib_uniform_4gpu.json \
   scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh
 
-PYTHONPATH=src PYTHON_BIN=python3 \
-  CONFIG=configs/sonic_kin_only_soma_encoder_proportional.json \
+CONFIG=configs/sonic_kin_soma_motionlib_proportional_4gpu.json \
   scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh
 ```
 
-Remote execution surface:
+The wrapper delegates to
+`scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh`, which uses
+`scripts/train_sonic_kin_skeleton_ae.py` through `torch.distributed.run`.
 
-```bash
-CHECK_SONIC_PATHS=1 EXECUTE_SONIC_NATIVE_TRAINING=1 \
-  CONFIG=configs/sonic_kin_only_soma_encoder_uniform.json \
-  scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh
+## Morphology Bucket Note
 
-CHECK_SONIC_PATHS=1 EXECUTE_SONIC_NATIVE_TRAINING=1 \
-  CONFIG=configs/sonic_kin_only_soma_encoder_proportional.json \
-  scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh
-```
+`num_clusters` is a legacy config/API key. In short: source skeleton/morphology bucket count, not actuator grouping.
+The implementation hashes `skeleton_id` into `0..num_clusters-1`, stores that
+as `skeleton_cluster_id`, and appends the normalized bucket scalar to
+`soma_morphology`.
 
-Stop condition for MLOps: both baselines either reach 1M training steps with
-kin loss, MPJPE, readable validation artifacts, and sliding/jitter review cases,
-or produce a reproducible failure report with run group, W&B run, config path,
-OnlineRetarget git SHA, and SONIC git SHA.
+The clearer future name is `num_skeleton_buckets`. Until the config/API surface
+is migrated, keep `num_clusters` for compatibility and document it as skeleton
+bucket count where it appears.
 
-## Remaining Work
+## Stop Condition
 
-- Confirm the remote uniform and proportional SOMA motionlib directories exist
-  and pass `--check-paths` immediately before execution.
-- After launch, validate the resolved Hydra runtime config for
-  `active_decoders=[g1_kin]` and absence of inherited `g1_dyn` blocks.
+Both baselines should either reach the planned step budget with reconstruction
+loss curves, G1 kinematic metrics, readable visual artifacts, and run
+manifests, or produce reproducible failure reports with run group, config path,
+git SHA, and logs.

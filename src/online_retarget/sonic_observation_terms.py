@@ -31,7 +31,10 @@ def soma_morphology(
     non_flatten: bool = True,
     strict: bool = True,
 ) -> torch.Tensor:
-    """Return per-env actor morphology features aligned to SONIC future frames."""
+    """Return per-env actor morphology features aligned to SONIC future frames.
+
+    ``num_clusters`` controls the source skeleton/morphology bucket count, not actuator grouping.
+    """
 
     command = env.command_manager.get_term(command_name)
     registry = _resolve_registry_path(registry_csv)

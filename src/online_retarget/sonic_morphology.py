@@ -39,6 +39,12 @@ class ActorMorphology:
     shape_path: str
 
     def as_source_features(self, *, num_clusters: int = 4) -> dict[str, Any]:
+        """Return actor and skeleton morphology features.
+
+        ``num_clusters`` is the source skeleton/morphology bucket count, not
+        actuator grouping. It remains the legacy public key for compatibility.
+        """
+
         return {
             "actor_uid": self.actor_uid,
             "skeleton_id": self.skeleton_id,
@@ -98,6 +104,12 @@ def morphology_from_registry_row(row: Mapping[str, Any]) -> ActorMorphology:
 
 
 def stable_skeleton_cluster(skeleton_id: str, num_clusters: int) -> int:
+    """Hash a source skeleton id into a deterministic morphology bucket.
+
+    ``num_clusters`` is the source skeleton/morphology bucket count, not actuator grouping.
+    The bucket id is used only as a morphology feature.
+    """
+
     if num_clusters <= 0:
         raise MorphologyError("num_clusters must be positive")
     digest = hashlib.sha256(skeleton_id.encode("utf-8")).hexdigest()

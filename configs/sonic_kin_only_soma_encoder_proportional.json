@@ -44,7 +44,7 @@
     "module_params_template": {
       "hidden_dims": [
         512,
-        512,
+        2048,
         512
       ],
       "dropout": 0.0
@@ -241,7 +241,7 @@
       "++manager_env.observations.tokenizer.root_rot_w_mf.params.rotation_format=rot6d_w",
       "++algo.config.actor.backbone.encoders.soma.inputs=[soma_joints_multi_future_local_nonflat,soma_root_ori_b_multi_future,soma_morphology]",
       "++algo.config.actor.backbone.encoders.soma.params._target_=online_retarget.sonic_encoder_modules.ConcatSomaEncoderModule",
-      "++algo.config.actor.backbone.encoders.soma.params.hidden_dims=[512,512,512]"
+      "++algo.config.actor.backbone.encoders.soma.params.hidden_dims=[512,2048,512]"
     ],
     "online_retarget_observations": {
       "soma_morphology_dim": 24,

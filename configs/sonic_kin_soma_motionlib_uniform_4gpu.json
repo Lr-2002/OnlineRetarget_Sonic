@@ -2,7 +2,7 @@
   "schema_version": "1.1.0",
   "owner": "OnlineRetarget",
   "training_lane": "soma_motionlib_kin_only",
-  "purpose": "Strict 4-GPU supervised uniform-SOMA baseline. SOMA motion/skeleton features to G1 g1_kin targets only; no PPO, no Isaac rollout, and no rollout metric surface.",
+  "purpose": "Strict 4-GPU supervised uniform-SOMA baseline. Reconstruction-only G1 g1_kin target prediction from SOMA motion/skeleton features.",
   "source_repo": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training",
   "source_rev": "remote-latest-required-before-training",
   "input_data": {
@@ -34,6 +34,9 @@
   ],
   "losses": {
     "primary": [
+      "reconstruction"
+    ],
+    "reported_metrics": [
       "g1_kin_joint_rmse",
       "g1_kin_velocity_rmse",
       "g1_kin_root_position_rmse",
@@ -74,8 +77,11 @@
     "frames_per_chunk": 1024
   },
   "model": {
-    "hidden_dim": 512,
-    "num_layers": 3,
+    "hidden_dims": [
+      512,
+      2048,
+      512
+    ],
     "dropout": 0.0
   },
   "training": {
@@ -95,9 +101,11 @@
     "validation_batches": 16,
     "checkpoint_every": 500,
     "keep_last_checkpoints": 5,
-    "command_loss_weight": 1.0,
-    "root_pos_loss_weight": 0.25,
-    "root_rot_loss_weight": 0.5
+    "reconstruction_weights": {
+      "command": 1.0,
+      "root_pos": 0.25,
+      "root_rot": 0.5
+    }
   },
   "visual_validation": {
     "enabled": true,

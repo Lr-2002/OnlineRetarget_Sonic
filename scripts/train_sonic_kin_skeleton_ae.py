@@ -1069,14 +1069,36 @@ class RunningStats:
         return mean.to(torch.float32), std.to(torch.float32)
 
 
-def build_mlp(input_dim: int, hidden_dim: int, output_dim: int, num_layers: int, dropout: float) -> nn.Sequential:
+def hidden_dims_from_config(cfg: Mapping[str, Any]) -> tuple[int, ...]:
+    if "hidden_dims" in cfg:
+        dims = tuple(int(value) for value in cfg["hidden_dims"])
+        if not dims:
+            raise ValueError("model.hidden_dims must not be empty")
+        return dims
+    return (int(cfg["hidden_dim"]),) * int(cfg["num_layers"])
+
+
+def uniform_hidden_config(cfg: Mapping[str, Any]) -> tuple[int, int]:
+    dims = hidden_dims_from_config(cfg)
+    if len(set(dims)) != 1:
+        raise ValueError("non-uniform model.hidden_dims is only supported by MLP trunk variants")
+    return dims[0], len(dims)
+
+
+def build_mlp(
+    input_dim: int,
+    hidden_dims: Sequence[int],
+    output_dim: int,
+    dropout: float,
+) -> nn.Sequential:
     layers: list[nn.Module] = []
     prev = input_dim
-    for _ in range(num_layers):
-        layers.extend([nn.Linear(prev, hidden_dim), nn.SiLU()])
+    for hidden_dim in hidden_dims:
+        hidden = int(hidden_dim)
+        layers.extend([nn.Linear(prev, hidden), nn.SiLU()])
         if dropout > 0:
             layers.append(nn.Dropout(dropout))
-        prev = hidden_dim
+        prev = hidden
     layers.append(nn.Linear(prev, output_dim))
     return nn.Sequential(*layers)
 
@@ -1086,9 +1108,8 @@ class ConcatRetargeter(nn.Module):
         super().__init__()
         self.net = build_mlp(
             motion_dim + skeleton_dim,
-            int(cfg["hidden_dim"]),
+            hidden_dims_from_config(cfg),
             output_dim,
-            int(cfg["num_layers"]),
             float(cfg.get("dropout", 0.0)),
         )
 
@@ -1099,8 +1120,7 @@ class ConcatRetargeter(nn.Module):
 class FilmRetargeter(nn.Module):
     def __init__(self, motion_dim: int, skeleton_dim: int, output_dim: int, cfg: dict[str, Any]) -> None:
         super().__init__()
-        hidden_dim = int(cfg["hidden_dim"])
-        num_layers = int(cfg["num_layers"])
+        hidden_dim, num_layers = uniform_hidden_config(cfg)
         self.input = nn.Linear(motion_dim, hidden_dim)
         self.layers = nn.ModuleList(nn.Linear(hidden_dim, hidden_dim) for _ in range(max(0, num_layers - 1)))
         self.film = nn.Linear(skeleton_dim, 2 * hidden_dim * max(1, num_layers))
@@ -1124,9 +1144,10 @@ class FilmRetargeter(nn.Module):
 class AdapterRetargeter(nn.Module):
     def __init__(self, motion_dim: int, skeleton_dim: int, output_dim: int, cfg: dict[str, Any]) -> None:
         super().__init__()
-        hidden_dim = int(cfg["hidden_dim"])
+        hidden_dims = hidden_dims_from_config(cfg)
+        hidden_dim = hidden_dims[-1]
         adapter_dim = int(cfg.get("adapter_dim", max(32, hidden_dim // 4)))
-        self.motion = build_mlp(motion_dim, hidden_dim, hidden_dim, int(cfg["num_layers"]), float(cfg.get("dropout", 0.0)))
+        self.motion = build_mlp(motion_dim, hidden_dims, hidden_dim, float(cfg.get("dropout", 0.0)))
         self.adapter = nn.Sequential(
             nn.Linear(skeleton_dim, adapter_dim),
             nn.SiLU(),
@@ -1141,10 +1162,11 @@ class AdapterRetargeter(nn.Module):
 class ExpertRetargeter(nn.Module):
     def __init__(self, motion_dim: int, skeleton_dim: int, output_dim: int, cfg: dict[str, Any]) -> None:
         super().__init__()
-        hidden_dim = int(cfg["hidden_dim"])
+        hidden_dims = hidden_dims_from_config(cfg)
+        hidden_dim = hidden_dims[-1]
         num_experts = int(cfg.get("num_experts", 4))
         self.experts = nn.ModuleList(
-            build_mlp(motion_dim, hidden_dim, hidden_dim, int(cfg["num_layers"]), float(cfg.get("dropout", 0.0)))
+            build_mlp(motion_dim, hidden_dims, hidden_dim, float(cfg.get("dropout", 0.0)))
             for _ in range(num_experts)
         )
         self.gate = nn.Linear(skeleton_dim, num_experts)
@@ -1318,6 +1340,26 @@ def loss_and_metrics(
     return loss, metrics
 
 
+def reconstruction_weights(config: Mapping[str, Any]) -> tuple[float, float, float]:
+    training = config["training"]
+    weights = training.get("reconstruction_weights", {})
+    return (
+        float(weights.get("command", training.get("command_loss_weight", 1.0))),
+        float(
+            weights.get(
+                "root_pos",
+                training.get("root_pos_loss_weight", training.get("anchor_loss_weight", 1.0)),
+            )
+        ),
+        float(
+            weights.get(
+                "root_rot",
+                training.get("root_rot_loss_weight", training.get("anchor_loss_weight", 1.0)),
+            )
+        ),
+    )
+
+
 def validate(
     model: nn.Module,
     loader: DataLoader,
@@ -1331,19 +1373,7 @@ def validate(
     model.eval()
     rows = []
     max_batches = int(config["training"]["validation_batches"])
-    command_weight = float(config["training"].get("command_loss_weight", 1.0))
-    root_pos_weight = float(
-        config["training"].get(
-            "root_pos_loss_weight",
-            config["training"].get("anchor_loss_weight", 1.0),
-        )
-    )
-    root_rot_weight = float(
-        config["training"].get(
-            "root_rot_loss_weight",
-            config["training"].get("anchor_loss_weight", 1.0),
-        )
-    )
+    command_weight, root_pos_weight, root_rot_weight = reconstruction_weights(config)
     with torch.no_grad():
         for batch_idx, (motion, skeleton, target) in enumerate(loader):
             if batch_idx >= max_batches:
@@ -2777,19 +2807,7 @@ def main() -> None:
         checkpoint_every = int(config["training"]["checkpoint_every"])
         keep_last = int(config["training"]["keep_last_checkpoints"])
         grad_clip = float(config["training"]["grad_clip_norm"])
-        command_weight = float(config["training"].get("command_loss_weight", 1.0))
-        root_pos_weight = float(
-            config["training"].get(
-                "root_pos_loss_weight",
-                config["training"].get("anchor_loss_weight", 1.0),
-            )
-        )
-        root_rot_weight = float(
-            config["training"].get(
-                "root_rot_loss_weight",
-                config["training"].get("anchor_loss_weight", 1.0),
-            )
-        )
+        command_weight, root_pos_weight, root_rot_weight = reconstruction_weights(config)
         precision = config["training"].get("precision", "bf16")
         use_amp = precision in {"bf16", "fp16"}
         amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16

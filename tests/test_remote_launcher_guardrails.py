@@ -16,6 +16,13 @@ SUPERVISED_CONFIGS = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_uniform_4gpu.json",
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_proportional_4gpu.json",
 )
+ACTIVE_BASELINE_DOCS = (
+    REPO_ROOT / "docs" / "status" / "online_retarget_code_update_audit_2026-05-25.md",
+    REPO_ROOT / "docs" / "status" / "online_retarget_sonic_training_boundary_2026-05-20.md",
+    REPO_ROOT / "docs" / "status" / "sonic_native_retarget_contract_2026-05-20.md",
+)
+MORPHOLOGY_SOURCE = REPO_ROOT / "src" / "online_retarget" / "sonic_morphology.py"
+OBSERVATION_TERMS_SOURCE = REPO_ROOT / "src" / "online_retarget" / "sonic_observation_terms.py"
 
 
 class RemoteLauncherGuardrailTests(unittest.TestCase):
@@ -137,15 +144,42 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                 self.assertEqual(config["training"]["required_gpu_count"], 4)
                 self.assertEqual(config["target_decoder"]["primary"], "g1_kin")
                 self.assertEqual(config["decoder_targets"], ["g1_kin"])
+                self.assertEqual(config["losses"]["primary"], ["reconstruction"])
                 self.assertEqual(config["losses"]["auxiliary"], [])
+                self.assertEqual(config["model"]["hidden_dims"], [512, 2048, 512])
+                self.assertNotIn("hidden_dim", config["model"])
+                self.assertNotIn("num_layers", config["model"])
+                self.assertEqual(
+                    config["training"]["reconstruction_weights"],
+                    {"command": 1.0, "root_pos": 0.25, "root_rot": 0.5},
+                )
                 self.assertIn(f"soma_{topology}_filtered_v1", config["input_data"]["soma_motion_dir"])
                 text = path.read_text(encoding="utf-8")
+                self.assertNotIn("Isaac", text)
+                self.assertNotIn("isaac", text)
+                self.assertNotIn("reward", text)
                 self.assertNotIn("sonic_hydra", text)
                 self.assertNotIn("train_agent_trl.py", text)
                 self.assertNotIn("KinematicActionUniversalTokenModule", text)
                 self.assertNotIn("g1_dyn", text)
                 self.assertNotIn("g1_target_action", text)
+                self.assertNotIn("dynamics", text)
+                self.assertNotIn("action", text)
                 self.assertNotIn("episode_length", text)
+
+    def test_active_baseline_docs_have_no_isaac_wording(self) -> None:
+        for path in ACTIVE_BASELINE_DOCS:
+            with self.subTest(path=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertNotIn("Isaac", text)
+                self.assertNotIn("isaac", text)
+
+    def test_num_clusters_comment_clarifies_morphology_bucket_not_actuators(self) -> None:
+        phrase = "source skeleton/morphology bucket count, not actuator grouping"
+        for path in (MORPHOLOGY_SOURCE, OBSERVATION_TERMS_SOURCE, ACTIVE_BASELINE_DOCS[-1]):
+            with self.subTest(path=path.name):
+                text = " ".join(path.read_text(encoding="utf-8").split())
+                self.assertIn(phrase, text)
 
 
 class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
@@ -156,6 +190,7 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
     def test_launcher_uses_torch_distributed_supervised_entrypoint(self) -> None:
         text = self.launcher_text
         self.assertIn("configs/sonic_kin_soma_motionlib_proportional_4gpu.json", text)
+        self.assertIn('PYTHON_BIN="${PYTHON_BIN:-python3}"', text)
         self.assertIn('NPROC_PER_NODE="${NPROC_PER_NODE:-4}"', text)
         self.assertIn("torch.distributed.run", text)
         self.assertIn("scripts/train_sonic_kin_skeleton_ae.py", text)
@@ -169,6 +204,7 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
         self.assertIn("KinematicActionUniversalTokenModule", text)
         self.assertIn("sonic_hydra", text)
         self.assertIn("episode_length", text)
+        self.assertIn("forbidden rollout-loop tokens", text)
         self.assertIn("NPROC_PER_NODE must match required_gpu_count", text)
 
     def test_launcher_supports_short_smoke_overrides(self) -> None:
@@ -189,6 +225,7 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
         self.assertIn("torch.distributed.is_available", text)
         self.assertIn("external_source_guard", text)
         self.assertIn("not_required_supervised_entrypoint_no_external_import_exec", text)
+        self.assertIn("strict_supervised_soma_motionlib_kin_only_reconstruction", text)
         self.assertNotIn("SONIC_ROOT", text)
         self.assertNotIn("SONIC source repo", text)
         self.assertNotIn('require_latest_git "${SOURCE_ROOT}"', text)
