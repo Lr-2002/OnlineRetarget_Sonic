@@ -110,6 +110,7 @@ class SonicVisualValidationCallback(TrainerCallback):
         readable_wandb_upload: bool = True,
         use_evaluation_mode: bool = False,
         empty_cuda_cache: bool = True,
+        persist_root_pose: bool = True,
     ) -> None:
         super().__init__()
         self.every_steps = int(every_steps)
@@ -128,6 +129,7 @@ class SonicVisualValidationCallback(TrainerCallback):
         self.readable_wandb_upload = bool(readable_wandb_upload)
         self.use_evaluation_mode = bool(use_evaluation_mode)
         self.empty_cuda_cache = bool(empty_cuda_cache)
+        self.persist_root_pose = bool(persist_root_pose)
         if every_seconds is not None:
             self.every_seconds = float(every_seconds)
         elif every_minutes is not None:
@@ -439,6 +441,10 @@ def _collect_rollout(
             "source_soma": [],
             "target_g1": [],
             "inferred_g1": [],
+            "target_root_pos_w": [],
+            "target_root_rot_w": [],
+            "pred_root_pos_w": [],
+            "pred_root_rot_w": [],
             "source_frame_indices": [],
             "encoder_routes": [],
             "motion_id": None,
@@ -446,6 +452,8 @@ def _collect_rollout(
             "source_fps": target_fps,
             "target_fps": target_fps,
             "physical_time_aligned": True,
+            "root_rot_format": "wxyz",
+            "initial_root_xy_zeroed": False,
             "source_soma_names": None,
             "g1_body_names": None,
         }
@@ -549,6 +557,16 @@ def _append_current_frame(
     source_soma = _maybe_tensor(_get_attr(command, "soma_joints"))
     target_g1 = _maybe_tensor(_get_attr(command, "body_pos_w"))
     inferred_g1 = _maybe_tensor(_get_attr(command, "robot_body_pos_w"))
+    target_root_pos = _root_pos_from_body_points(target_g1)
+    pred_root_pos = _root_pos_from_body_points(inferred_g1)
+    target_root_rot = _root_quat_from_command(
+        command,
+        ("root_quat_w", "root_rot_w", "body_quat_w"),
+    )
+    pred_root_rot = _root_quat_from_command(
+        command,
+        ("pred_root_quat_w", "robot_root_quat_w", "robot_body_quat_w"),
+    )
     motion_ids = _maybe_tensor(_get_attr(command, "motion_ids"))
     time_steps = _motion_time_steps(command)
     motion_keys = _motion_keys(command, motion_ids)
@@ -566,6 +584,14 @@ def _append_current_frame(
             trajectory["target_g1"].append(target_g1[env_idx])
         if inferred_g1 is not None and env_idx < len(inferred_g1):
             trajectory["inferred_g1"].append(inferred_g1[env_idx])
+        if target_root_pos is not None and env_idx < len(target_root_pos):
+            trajectory["target_root_pos_w"].append(target_root_pos[env_idx])
+        if target_root_rot is not None and env_idx < len(target_root_rot):
+            trajectory["target_root_rot_w"].append(target_root_rot[env_idx])
+        if pred_root_pos is not None and env_idx < len(pred_root_pos):
+            trajectory["pred_root_pos_w"].append(pred_root_pos[env_idx])
+        if pred_root_rot is not None and env_idx < len(pred_root_rot):
+            trajectory["pred_root_rot_w"].append(pred_root_rot[env_idx])
         if time_steps is not None and env_idx < len(time_steps):
             trajectory["source_frame_indices"].append(int(time_steps[env_idx]))
         if motion_ids is not None and env_idx < len(motion_ids):
@@ -647,6 +673,34 @@ def _motion_body_names(command: Any) -> Sequence[str]:
             if names:
                 return tuple(str(name) for name in names)
     return ()
+
+
+def _root_pos_from_body_points(points: Any) -> Any:
+    if points is None:
+        return None
+    try:
+        if getattr(points, "ndim", 0) == 4:
+            return points[:, 0, 0, :]
+        return points[:, 0, :]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _root_quat_from_command(command: Any, names: Sequence[str]) -> Any:
+    for name in names:
+        value = _maybe_tensor(_get_attr(command, name))
+        if value is None:
+            continue
+        try:
+            if getattr(value, "ndim", 0) == 4:
+                return value[:, 0, 0, :]
+            if getattr(value, "ndim", 0) == 3:
+                return value[:, 0, :]
+            if getattr(value, "ndim", 0) == 2 and value.shape[-1] == 4:
+                return value
+        except Exception:  # noqa: BLE001
+            continue
+    return None
 
 
 def _render_triplet_video(

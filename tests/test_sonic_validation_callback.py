@@ -148,6 +148,10 @@ class SonicValidationCallbackTests(unittest.TestCase):
             ("pelvis", "left_hip_roll_link", "left_knee_link"),
         )
         self.assertEqual(loaded["target_g1"].shape, (3, 14, 3))
+        self.assertEqual(loaded["target_root_pos_w"].shape, (3, 3))
+        self.assertEqual(loaded["target_root_rot_w"].shape, (3, 4))
+        self.assertEqual(loaded["root_rot_format"], "wxyz")
+        self.assertFalse(loaded["initial_root_xy_zeroed"])
 
     @unittest.skipUnless(RENDER_DEPS_AVAILABLE, "render dependencies are required")
     def test_readable_validation_render_writes_labeled_mp4(self):
@@ -165,6 +169,7 @@ class SonicValidationCallbackTests(unittest.TestCase):
             )
             self.assertEqual(report["status"], "ok")
             self.assertIn("floor_contact_grid", report["readable_features"])
+            self.assertIn("root_rotation_axes", report["readable_features"])
             self.assertIn("source_target_frame_counters", report["readable_features"])
             self.assertTrue(video_path.exists())
             self.assertGreater(video_path.stat().st_size, 0)
@@ -271,6 +276,9 @@ def _dummy_trajectory(frames: int, joints: int):
     base[..., 2] = np.linspace(0.1, 1.1, joints)
     for frame_idx in range(frames):
         base[frame_idx, :, 1] = frame_idx * 0.02
+    root_quat = np.zeros((frames, 4), dtype=np.float32)
+    root_quat[:, 0] = 1.0
+    root_pos = base[:, 0, :].astype(np.float32, copy=True)
     return {
         "clip_index": 0,
         "local_env_index": 0,
@@ -279,6 +287,12 @@ def _dummy_trajectory(frames: int, joints: int):
         "source_soma": [base[frame_idx] for frame_idx in range(frames)],
         "target_g1": [base[frame_idx] + np.array([0.0, 0.3, 0.0]) for frame_idx in range(frames)],
         "inferred_g1": [base[frame_idx] + np.array([0.0, 0.6, 0.0]) for frame_idx in range(frames)],
+        "target_root_pos_w": [root_pos[frame_idx] + np.array([0.0, 0.3, 0.0]) for frame_idx in range(frames)],
+        "target_root_rot_w": [root_quat[frame_idx] for frame_idx in range(frames)],
+        "pred_root_pos_w": [root_pos[frame_idx] + np.array([0.0, 0.6, 0.0]) for frame_idx in range(frames)],
+        "pred_root_rot_w": [root_quat[frame_idx] for frame_idx in range(frames)],
+        "root_rot_format": "wxyz",
+        "initial_root_xy_zeroed": False,
         "source_frame_indices": [10 + index for index in range(frames)],
         "encoder_routes": [1 for _ in range(frames)],
         "source_fps": 50.0,

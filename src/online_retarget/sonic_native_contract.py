@@ -26,7 +26,14 @@ FORMAL_BASELINE_NAMES = tuple(
     f"sonic_kin_only_soma_encoder_{topology}"
     for topology in FORMAL_BASELINE_TOPOLOGIES
 )
-FORBIDDEN_SOURCE_FEATURES = ("body_pos_w", "body_quat_w")
+FORBIDDEN_SOURCE_FEATURES = (
+    "body_pos_w",
+    "body_quat_w",
+    "root_pos_w_mf",
+    "root_rot_w_mf",
+    "root_pos_w_raw",
+    "root_quat_w_raw",
+)
 FORBIDDEN_DEPLOYABLE_SONIC_SOURCE_FEATURES = ("joint_pos_multi_future_wrist_for_soma",)
 TARGET_FPS = 50.0
 VISUAL_VALIDATION_EVERY_STEPS = 20_000
@@ -39,6 +46,16 @@ FORMAL_RUNTIME_BACKBONE = (
     "online_retarget.sonic_runtime_modules.KinematicActionUniversalTokenModule"
 )
 FORMAL_KINEMATIC_ACTION_OUTPUT = "command_multi_future_nonflat"
+ROOT_POS_TARGET = "root_pos_w_mf"
+ROOT_ROT_TARGET = "root_rot_w_mf"
+ROOT_POS_REPRESENTATION = "delta_xy_w_plus_z_w"
+ROOT_ROT_REPRESENTATION = "rot6d_w_from_quat_wxyz"
+ROOT_RAW_ROTATION_FORMAT = "wxyz"
+ROOT_BODY_NAME = "pelvis"
+ROOT_BODY_INDEX = 0
+ROOT_COMMAND_LOSS_WEIGHT = 1.0
+ROOT_POS_LOSS_WEIGHT = 0.25
+ROOT_ROT_LOSS_WEIGHT = 0.5
 FORBIDDEN_FORMAL_DECODERS = ("g1_dyn",)
 FORBIDDEN_FORMAL_LOSS_TOKENS = ("action", "dynamics")
 FORMAL_FORBIDDEN_DECODER_DELETE_PATHS = tuple(
@@ -254,6 +271,7 @@ def validate_config(
             "formal kin-only configs must not request action/dynamics targets or observations: "
             + ", ".join(forbidden_target_refs)
         )
+    _validate_root_pose_contract(config, errors)
 
     target_fps = _float_from_paths(
         config,
@@ -451,6 +469,30 @@ def validate_resolved_runtime_config(
         errors,
         "resolved runtime config must clear cached CUDA blocks around visual validation",
     )
+    _require(
+        _optional_bool(
+            _nested_get(config, ("callbacks", "online_retarget_visual_val", "persist_root_pose"))
+        )
+        is True,
+        errors,
+        "resolved runtime config must persist root pose trajectories for visual validation",
+    )
+    root_contract = _mapping(online_retarget.get("root_pose_contract"))
+    _require(
+        root_contract.get("enabled") is True,
+        errors,
+        "resolved runtime config must enable online_retarget.root_pose_contract",
+    )
+    _require(
+        root_contract.get("position_target") == ROOT_POS_TARGET,
+        errors,
+        f"resolved runtime config must expose root pose target {ROOT_POS_TARGET}",
+    )
+    _require(
+        root_contract.get("rotation_target") == ROOT_ROT_TARGET,
+        errors,
+        f"resolved runtime config must expose root rotation target {ROOT_ROT_TARGET}",
+    )
     if errors:
         raise ContractError(_format_errors(path, errors))
 
@@ -601,6 +643,119 @@ def _forbidden_action_target_refs(config: Mapping[str, Any]) -> tuple[str, ...]:
         if "action" in value.lower() or "dynamics" in value.lower():
             refs.append(f"{'.'.join(path)}={value!r}")
     return tuple(dict.fromkeys(refs))
+
+
+def _validate_root_pose_contract(config: Mapping[str, Any], errors: list[str]) -> None:
+    target_features = set(_string_list(config.get("target_features")))
+    _require(
+        FORMAL_KINEMATIC_ACTION_OUTPUT in target_features,
+        errors,
+        f"target_features must include {FORMAL_KINEMATIC_ACTION_OUTPUT}",
+    )
+    _require(
+        ROOT_POS_TARGET in target_features,
+        errors,
+        f"target_features must include root position target {ROOT_POS_TARGET}",
+    )
+    _require(
+        ROOT_ROT_TARGET in target_features,
+        errors,
+        f"target_features must include root rotation target {ROOT_ROT_TARGET}",
+    )
+
+    source_features = set(_source_feature_strings(config))
+    for target in (ROOT_POS_TARGET, ROOT_ROT_TARGET):
+        if target in source_features:
+            errors.append(f"{target} is target-only and forbidden in formal source encoder inputs")
+
+    root_contract = _mapping(config.get("root_pose_contract"))
+    _require(root_contract.get("enabled") is True, errors, "root_pose_contract.enabled must be true")
+    _require(
+        root_contract.get("root_body_name") == ROOT_BODY_NAME,
+        errors,
+        f"root_pose_contract.root_body_name must be {ROOT_BODY_NAME}",
+    )
+    _require(
+        _optional_int(root_contract.get("root_body_index")) == ROOT_BODY_INDEX,
+        errors,
+        f"root_pose_contract.root_body_index must be {ROOT_BODY_INDEX}",
+    )
+    _require(
+        root_contract.get("position_target") == ROOT_POS_TARGET,
+        errors,
+        f"root_pose_contract.position_target must be {ROOT_POS_TARGET}",
+    )
+    _require(
+        root_contract.get("position_representation") == ROOT_POS_REPRESENTATION,
+        errors,
+        f"root_pose_contract.position_representation must be {ROOT_POS_REPRESENTATION}",
+    )
+    _require(
+        root_contract.get("rotation_target") == ROOT_ROT_TARGET,
+        errors,
+        f"root_pose_contract.rotation_target must be {ROOT_ROT_TARGET}",
+    )
+    _require(
+        root_contract.get("rotation_representation") == ROOT_ROT_REPRESENTATION,
+        errors,
+        f"root_pose_contract.rotation_representation must be {ROOT_ROT_REPRESENTATION}",
+    )
+    _require(
+        root_contract.get("raw_rotation_format") == ROOT_RAW_ROTATION_FORMAT,
+        errors,
+        f"root_pose_contract.raw_rotation_format must be {ROOT_RAW_ROTATION_FORMAT}",
+    )
+    _require(
+        root_contract.get("source_encoder_inputs_allowed") is False,
+        errors,
+        "root_pose_contract.source_encoder_inputs_allowed must be false",
+    )
+    _require(
+        root_contract.get("command_action_extraction") == FORMAL_KINEMATIC_ACTION_OUTPUT,
+        errors,
+        "root_pose_contract.command_action_extraction must remain command_multi_future_nonflat",
+    )
+
+    weights = _mapping(root_contract.get("initial_weights"))
+    training = _mapping(config.get("training"))
+    for key, expected in (
+        ("command_loss_weight", ROOT_COMMAND_LOSS_WEIGHT),
+        ("root_pos_loss_weight", ROOT_POS_LOSS_WEIGHT),
+        ("root_rot_loss_weight", ROOT_ROT_LOSS_WEIGHT),
+    ):
+        _require(
+            _optional_float(weights.get(key)) == expected,
+            errors,
+            f"root_pose_contract.initial_weights.{key} must be {expected}",
+        )
+        _require(
+            _optional_float(training.get(key)) == expected,
+            errors,
+            f"training.{key} must be {expected}",
+        )
+
+    loss_text = " ".join(_string_list(_mapping(config.get("losses")).get("primary"))).lower()
+    _require(
+        "root_position" in loss_text,
+        errors,
+        "losses.primary must include g1_kin root position metric/loss evidence",
+    )
+    _require(
+        "root_orientation" in loss_text,
+        errors,
+        "losses.primary must include g1_kin root orientation metric/loss evidence",
+    )
+
+    visual_fields = set(_string_list(_mapping(config.get("visual_validation")).get("report_fields")))
+    for field in (
+        "target_root_pos_w",
+        "target_root_rot_w",
+        "pred_root_pos_w",
+        "pred_root_rot_w",
+        "root_rot_format",
+        "initial_root_xy_zeroed",
+    ):
+        _require(field in visual_fields, errors, f"visual_validation.report_fields must include {field}")
 
 
 def _forbidden_decoder_refs(config: Mapping[str, Any], decoder: str) -> Iterable[str]:
@@ -884,6 +1039,38 @@ def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -
         errors,
         "visual validation callback must clear cached CUDA blocks around validation",
     )
+    _require(
+        hydra.get("callbacks.online_retarget_visual_val.persist_root_pose") == "true",
+        errors,
+        "visual validation callback must persist target/predicted root pose tensors",
+    )
+    _require(
+        hydra.get("online_retarget.root_pose_contract.enabled") == "true",
+        errors,
+        "formal retarget configs must enable online_retarget.root_pose_contract",
+    )
+    _require(
+        hydra.get("online_retarget.root_pose_contract.position_target") == ROOT_POS_TARGET,
+        errors,
+        f"formal retarget configs must declare root position target {ROOT_POS_TARGET}",
+    )
+    _require(
+        hydra.get("online_retarget.root_pose_contract.rotation_target") == ROOT_ROT_TARGET,
+        errors,
+        f"formal retarget configs must declare root rotation target {ROOT_ROT_TARGET}",
+    )
+    _require(
+        hydra.get("online_retarget.root_pose_contract.position_representation")
+        == ROOT_POS_REPRESENTATION,
+        errors,
+        f"formal retarget configs must declare {ROOT_POS_REPRESENTATION}",
+    )
+    _require(
+        hydra.get("online_retarget.root_pose_contract.rotation_representation")
+        == ROOT_ROT_REPRESENTATION,
+        errors,
+        f"formal retarget configs must declare {ROOT_ROT_REPRESENTATION}",
+    )
     for feature in FORBIDDEN_DEPLOYABLE_SONIC_SOURCE_FEATURES:
         if _contains_token(hydra_text, feature):
             errors.append(
@@ -925,6 +1112,17 @@ def _validate_sonic_hydra_wiring(config: Mapping[str, Any], errors: list[str]) -
         errors,
         "formal kin-only PPO runs must derive actions from command_multi_future_nonflat",
     )
+    for target in (ROOT_POS_TARGET, ROOT_ROT_TARGET):
+        _require(
+            f"manager_env.observations.tokenizer.{target}.func" in hydra
+            and "online_retarget.sonic_observation_terms" in hydra[
+                f"manager_env.observations.tokenizer.{target}.func"
+            ],
+            errors,
+            f"formal retarget configs must wire tokenizer observation {target}",
+        )
+        if target in hydra.get("algo.config.actor.backbone.encoders.soma.inputs", ""):
+            errors.append(f"{target} must not be part of soma encoder inputs")
     for encoder_name in ("g1", "teleop", "smpl"):
         sample_prob = _optional_float(
             hydra.get(f"manager_env.commands.motion.encoder_sample_probs.{encoder_name}")

@@ -186,6 +186,27 @@ class SonicNativeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "action/dynamics targets"):
             validate_config(config, require_formal=True)
 
+    def test_formal_config_requires_root_pose_targets(self):
+        config = _base_formal_config()
+        config["target_features"].remove("root_pos_w_mf")
+
+        with self.assertRaisesRegex(ContractError, "root position target"):
+            validate_config(config, require_formal=True)
+
+    def test_formal_config_rejects_root_pose_as_source_input(self):
+        config = _base_formal_config()
+        config["source_encoder"]["inputs"].append("root_rot_w_mf")
+
+        with self.assertRaisesRegex(ContractError, "target-only"):
+            validate_config(config, require_formal=True)
+
+    def test_formal_config_requires_command_only_action_extraction_with_root_pose(self):
+        config = _base_formal_config()
+        config["root_pose_contract"]["command_action_extraction"] = "root_pos_w_mf"
+
+        with self.assertRaisesRegex(ContractError, "command_multi_future_nonflat"):
+            validate_config(config, require_formal=True)
+
     def test_formal_config_requires_integrated_visual_callback(self):
         config = _base_formal_config()
         config["sonic_hydra"]["args"] = [
@@ -555,14 +576,51 @@ def _base_formal_config():
             },
             "target_decoder": {"primary": "g1_kin", "auxiliary": []},
             "decoder_targets": ["g1_kin"],
-            "target_features": ["joint_pos", "body_pos_w", "body_quat_w"],
+            "target_features": [
+                "command_multi_future_nonflat",
+                "root_pos_w_mf",
+                "root_rot_w_mf",
+                "joint_pos",
+                "body_pos_w",
+                "body_quat_w",
+            ],
+            "root_pose_contract": {
+                "enabled": True,
+                "root_body_name": "pelvis",
+                "root_body_index": 0,
+                "position_target": "root_pos_w_mf",
+                "position_representation": "delta_xy_w_plus_z_w",
+                "rotation_target": "root_rot_w_mf",
+                "rotation_representation": "rot6d_w_from_quat_wxyz",
+                "raw_position_label": "root_pos_w_raw",
+                "raw_rotation_label": "root_quat_w_raw",
+                "raw_rotation_format": "wxyz",
+                "source_encoder_inputs_allowed": False,
+                "command_action_extraction": "command_multi_future_nonflat",
+                "initial_weights": {
+                    "command_loss_weight": 1.0,
+                    "root_pos_loss_weight": 0.25,
+                    "root_rot_loss_weight": 0.5,
+                },
+            },
             "losses": {
-                "primary": ["g1_kin_joint_rmse", "g1_kin_body_mpjpe"],
+                "primary": [
+                    "g1_kin_joint_rmse",
+                    "g1_kin_body_mpjpe",
+                    "g1_kin_root_position_rmse",
+                    "g1_kin_root_orientation_rmse",
+                ],
                 "alignment": [],
                 "auxiliary": ["temporal_smoothness"],
             },
             "frequency": {"target_fps": 50},
-            "training": {"max_steps": 1000000, "required_gpu_count": 4},
+            "training": {
+                "max_steps": 1000000,
+                "required_gpu_count": 4,
+                "command_loss_weight": 1.0,
+                "root_pos_loss_weight": 0.25,
+                "root_rot_loss_weight": 0.5,
+            },
             "visual_validation": {
                 "enabled": True,
                 "every_steps": 20000,
@@ -570,6 +628,14 @@ def _base_formal_config():
                 "num_videos": 8,
                 "duration_sec": 4.0,
                 "wandb_upload": True,
+                "report_fields": [
+                    "target_root_pos_w",
+                    "target_root_rot_w",
+                    "pred_root_pos_w",
+                    "pred_root_rot_w",
+                    "root_rot_format",
+                    "initial_root_xy_zeroed",
+                ],
             },
             "runtime": {
                 "required_gpu_count": 4,
@@ -624,6 +690,14 @@ def _base_formal_config():
                     "++callbacks.online_retarget_visual_val.readable_clip_indices=[0,6]",
                     "++callbacks.online_retarget_visual_val.use_evaluation_mode=false",
                     "++callbacks.online_retarget_visual_val.empty_cuda_cache=true",
+                    "++callbacks.online_retarget_visual_val.persist_root_pose=true",
+                    "++online_retarget.root_pose_contract.enabled=true",
+                    "++online_retarget.root_pose_contract.position_target=root_pos_w_mf",
+                    "++online_retarget.root_pose_contract.position_representation=delta_xy_w_plus_z_w",
+                    "++online_retarget.root_pose_contract.rotation_target=root_rot_w_mf",
+                    "++online_retarget.root_pose_contract.rotation_representation=rot6d_w_from_quat_wxyz",
+                    "++manager_env.observations.tokenizer.root_pos_w_mf.func=online_retarget.sonic_observation_terms:root_pos_w_mf",
+                    "++manager_env.observations.tokenizer.root_rot_w_mf.func=online_retarget.sonic_observation_terms:root_rot_w_mf",
                 ],
             },
             "variant": {"name": "sonic_kin_only_soma_encoder_proportional"},
@@ -636,6 +710,11 @@ def _base_resolved_runtime_config():
         "online_retarget": {
             "contract": FORMAL_TRAINING_LANE,
             "encoder_variant": "sonic_kin_only_soma_encoder_proportional",
+            "root_pose_contract": {
+                "enabled": True,
+                "position_target": "root_pos_w_mf",
+                "rotation_target": "root_rot_w_mf",
+            },
         },
         "algo": {
             "config": {
@@ -661,6 +740,7 @@ def _base_resolved_runtime_config():
             "online_retarget_visual_val": {
                 "use_evaluation_mode": False,
                 "empty_cuda_cache": True,
+                "persist_root_pose": True,
             },
         },
     }

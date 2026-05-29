@@ -97,9 +97,127 @@ def g1_target_action(env: Any, command_name: str) -> torch.Tensor:
     return (action_joint_pos - action_offset) / action_scale
 
 
+def root_pos_w_mf(
+    env: Any,
+    command_name: str,
+    representation: str = "delta_xy_w_plus_z_w",
+    root_body_index: int = 0,
+) -> torch.Tensor:
+    """Return target G1 root position in the formal root-pose representation.
+
+    The train target is world-frame delta XY from the current root and absolute
+    world Z height for each future frame.  If the Sonic command exposes only the
+    current ``body_pos_w`` tensor, the function still returns a valid multi-
+    future tensor with zero delta XY and the current Z repeated.
+    """
+
+    if representation != "delta_xy_w_plus_z_w":
+        raise ValueError(f"unsupported root position representation: {representation}")
+    command = env.command_manager.get_term(command_name)
+    root_pos = _root_body_tensor(
+        command,
+        ("root_pos_w_mf", "root_pos_w_multi_future", "body_pos_w_multi_future", "body_pos_w"),
+        root_body_index=root_body_index,
+        width=3,
+    )
+    if root_pos.shape[-1] != 3:
+        raise ValueError(f"root position tensor must end in 3 values, got {tuple(root_pos.shape)}")
+    base_xy = root_pos[:, :1, :2]
+    delta_xy = root_pos[..., :2] - base_xy
+    return torch.cat((delta_xy, root_pos[..., 2:3]), dim=-1)
+
+
+def root_rot_w_mf(
+    env: Any,
+    command_name: str,
+    rotation_format: str = "rot6d_w",
+    root_body_index: int = 0,
+) -> torch.Tensor:
+    """Return target G1 root rotation as world-frame rot6d future labels."""
+
+    if rotation_format not in {"rot6d_w", "rot6d_w_from_quat_wxyz"}:
+        raise ValueError(f"unsupported root rotation representation: {rotation_format}")
+    command = env.command_manager.get_term(command_name)
+    direct = _command_tensor(command, ("root_rot_w_mf", "root_rot6d_w_mf"))
+    if direct is not None and direct.shape[-1] == 6:
+        return _ensure_future_tensor(direct, command, width=6)
+
+    root_quat = _root_body_tensor(
+        command,
+        ("root_quat_w_mf", "root_quat_w_multi_future", "body_quat_w_multi_future", "body_quat_w"),
+        root_body_index=root_body_index,
+        width=4,
+    )
+    return _quat_wxyz_to_rot6d(root_quat)
+
+
 def _repeat_future(value: torch.Tensor, command: Any) -> torch.Tensor:
     num_frames = int(getattr(command, "smpl_num_future_frames", command.num_future_frames))
     return value.unsqueeze(1).expand(-1, num_frames, -1)
+
+
+def _future_frame_count(command: Any) -> int:
+    return int(getattr(command, "smpl_num_future_frames", getattr(command, "num_future_frames", 1)))
+
+
+def _command_tensor(command: Any, names: tuple[str, ...]) -> torch.Tensor | None:
+    for name in names:
+        value = getattr(command, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _root_body_tensor(
+    command: Any,
+    names: tuple[str, ...],
+    *,
+    root_body_index: int,
+    width: int,
+) -> torch.Tensor:
+    value = _command_tensor(command, names)
+    if value is None:
+        raise AttributeError(f"motion command exposes none of: {', '.join(names)}")
+    tensor = _ensure_future_tensor(value, command, width=width)
+    if tensor.shape[-1] == width and tensor.ndim == 3:
+        return tensor
+    if tensor.ndim >= 4 and tensor.shape[-1] == width:
+        return tensor[..., int(root_body_index), :]
+    raise ValueError(f"could not interpret root body tensor shape {tuple(tensor.shape)}")
+
+
+def _ensure_future_tensor(value: torch.Tensor, command: Any, *, width: int) -> torch.Tensor:
+    tensor = value
+    if tensor.ndim == 2 and tensor.shape[-1] == width:
+        return _repeat_future(tensor, command)
+    if tensor.ndim == 3 and tensor.shape[-1] == width:
+        # Shape [B, N, C] is ambiguous.  If N looks like a body dimension, callers
+        # that need a root body will select it before this function is returned.
+        if tensor.shape[1] == _future_frame_count(command):
+            return tensor
+        return _repeat_future(tensor[:, 0], command)
+    if tensor.ndim >= 4 and tensor.shape[-1] == width:
+        return tensor
+    raise ValueError(f"expected tensor with trailing dim {width}, got {tuple(tensor.shape)}")
+
+
+def _quat_wxyz_to_rot6d(quat: torch.Tensor) -> torch.Tensor:
+    quat = quat / torch.clamp(torch.linalg.norm(quat, dim=-1, keepdim=True), min=1e-8)
+    w, x, y, z = quat.unbind(dim=-1)
+    row0 = torch.stack(
+        (1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)),
+        dim=-1,
+    )
+    row1 = torch.stack(
+        (2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)),
+        dim=-1,
+    )
+    row2 = torch.stack(
+        (2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)),
+        dim=-1,
+    )
+    matrix = torch.stack((row0, row1, row2), dim=-2)
+    return matrix[..., :, :2].reshape(*matrix.shape[:-2], 6)
 
 
 def _resolve_registry_path(registry_csv: str | None) -> str | None:

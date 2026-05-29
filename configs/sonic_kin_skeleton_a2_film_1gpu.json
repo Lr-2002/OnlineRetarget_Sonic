@@ -69,7 +69,8 @@
     "checkpoint_every": 500,
     "keep_last_checkpoints": 5,
     "command_loss_weight": 1.0,
-    "anchor_loss_weight": 1.0
+    "root_pos_loss_weight": 0.25,
+    "root_rot_loss_weight": 0.5
   },
   "visual_validation": {
     "enabled": true,

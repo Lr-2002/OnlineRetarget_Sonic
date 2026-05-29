@@ -101,6 +101,7 @@ def save_raw_validation_trajectory(
     frame_count = min(len(source), len(target), len(inferred))
     if frame_count <= 0:
         raise RuntimeError("no validation trajectory frames available to persist")
+    optional_arrays = _optional_root_pose_arrays(trajectory, frame_count)
 
     source_frame_indices = np.asarray(
         list(trajectory.get("source_frame_indices") or []),
@@ -115,23 +116,24 @@ def save_raw_validation_trajectory(
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     metadata_path = output_path.with_suffix(".json")
-    np.savez_compressed(
-        output_path,
-        source_soma=source[:frame_count],
-        target_g1=target[:frame_count],
-        inferred_g1=inferred[:frame_count],
-        source_frame_indices=source_frame_indices[:frame_count],
-        encoder_routes=encoder_routes[:frame_count],
-        source_soma_names=np.asarray(
+    payload = {
+        "source_soma": source[:frame_count],
+        "target_g1": target[:frame_count],
+        "inferred_g1": inferred[:frame_count],
+        "source_frame_indices": source_frame_indices[:frame_count],
+        "encoder_routes": encoder_routes[:frame_count],
+        "source_soma_names": np.asarray(
             _body_names(trajectory.get("source_soma_names"), source.shape[1]),
             dtype="U64",
         ),
-        g1_body_names=np.asarray(
+        "g1_body_names": np.asarray(
             _body_names(trajectory.get("g1_body_names"), target.shape[1]),
             dtype="U64",
         ),
-        metadata_json=np.asarray(json.dumps(metadata, sort_keys=True), dtype="U4096"),
-    )
+        "metadata_json": np.asarray(json.dumps(metadata, sort_keys=True), dtype="U4096"),
+    }
+    payload.update(optional_arrays)
+    np.savez_compressed(output_path, **payload)
     _write_json(metadata_path, metadata)
     return {
         "status": "ok",
@@ -142,6 +144,7 @@ def save_raw_validation_trajectory(
             "source_soma",
             "target_g1",
             "inferred_g1",
+            *sorted(optional_arrays),
             "source_frame_indices",
             "encoder_routes",
             "source_soma_names",
@@ -165,6 +168,14 @@ def load_raw_validation_trajectory(path: Path) -> dict[str, Any]:
             "source_soma_names": [str(value) for value in payload["source_soma_names"]],
             "g1_body_names": [str(value) for value in payload["g1_body_names"]],
         }
+        for key in (
+            "target_root_pos_w",
+            "target_root_rot_w",
+            "pred_root_pos_w",
+            "pred_root_rot_w",
+        ):
+            if key in payload:
+                result[key] = np.asarray(payload[key], dtype=float)
         metadata_text = str(payload["metadata_json"].item()) if "metadata_json" in payload else "{}"
     metadata_path = path.with_suffix(".json")
     if metadata_path.exists():
@@ -208,12 +219,30 @@ def render_readable_validation_video(
     source_names = _body_names(trajectory.get("source_soma_names"), source.shape[1])
     g1_names = _body_names(trajectory.get("g1_body_names"), target.shape[1])
     source_indices = [int(value) for value in trajectory.get("source_frame_indices") or []]
+    target_root_rot = _optional_array(trajectory.get("target_root_rot_w"), expected_width=4)
+    pred_root_rot = _optional_array(trajectory.get("pred_root_rot_w"), expected_width=4)
     panels = (
-        ("Source SOMA skeleton", source[:frame_count], source_names, "#236192", "#134f3d"),
-        ("Dataset G1 target skeleton", target[:frame_count], g1_names, "#2f3338", "#8a5a00"),
-        ("Inferred G1 skeleton", inferred[:frame_count], g1_names, "#b23a48", "#7a1f31"),
+        ("Source SOMA skeleton", source[:frame_count], source_names, "#236192", "#134f3d", None),
+        (
+            "Dataset G1 target skeleton",
+            target[:frame_count],
+            g1_names,
+            "#2f3338",
+            "#8a5a00",
+            target_root_rot[:frame_count] if target_root_rot is not None else None,
+        ),
+        (
+            "Inferred G1 skeleton",
+            inferred[:frame_count],
+            g1_names,
+            "#b23a48",
+            "#7a1f31",
+            pred_root_rot[:frame_count] if pred_root_rot is not None else None,
+        ),
     )
-    bounds = tuple(_readable_axis_bounds(array) for _title, array, _names, _color, _key in panels)
+    bounds = tuple(
+        _readable_axis_bounds(array) for _title, array, _names, _color, _key, _root_quat in panels
+    )
     video_path.parent.mkdir(parents=True, exist_ok=True)
 
     frame_sums: list[int] = []
@@ -229,7 +258,10 @@ def render_readable_validation_video(
         for frame_idx in range(frame_count):
             fig = plt.figure(figsize=(width / 100.0, height / 100.0), dpi=100)
             fig.patch.set_facecolor("#f5f6f2")
-            for panel_index, (title, array, names, color, key_color) in enumerate(panels, start=1):
+            for panel_index, (title, array, names, color, key_color, root_quat) in enumerate(
+                panels,
+                start=1,
+            ):
                 ax = fig.add_subplot(1, 3, panel_index, projection="3d")
                 _plot_readable_panel(
                     ax=ax,
@@ -242,6 +274,9 @@ def render_readable_validation_video(
                     frame_idx=frame_idx,
                     source_frame_idx=(
                         source_indices[frame_idx] if frame_idx < len(source_indices) else None
+                    ),
+                    root_quat_w=(
+                        root_quat[frame_idx] if root_quat is not None and frame_idx < len(root_quat) else None
                     ),
                 )
             fig.tight_layout(pad=0.8)
@@ -272,6 +307,7 @@ def render_readable_validation_video(
             "g1_readable_skeleton",
             "floor_contact_grid",
             "root_axes",
+            "root_rotation_axes",
             "world_xyz_axes",
             "left_right_labels",
             "source_target_frame_counters",
@@ -441,7 +477,41 @@ def _trajectory_metadata(
         "duration_sec": float(duration_sec),
         "target_frame_count": int(frame_count),
         "physical_time_aligned": bool(trajectory.get("physical_time_aligned", False)),
+        "root_rot_format": str(trajectory.get("root_rot_format", "wxyz")),
+        "initial_root_xy_zeroed": bool(trajectory.get("initial_root_xy_zeroed", False)),
     }
+
+
+def _optional_root_pose_arrays(
+    trajectory: Mapping[str, Any],
+    frame_count: int,
+) -> dict[str, Any]:
+    arrays: dict[str, Any] = {}
+    for key, width in (
+        ("target_root_pos_w", 3),
+        ("target_root_rot_w", 4),
+        ("pred_root_pos_w", 3),
+        ("pred_root_rot_w", 4),
+    ):
+        value = _optional_array(trajectory.get(key), expected_width=width)
+        if value is not None and len(value) >= frame_count:
+            arrays[key] = value[:frame_count]
+    return arrays
+
+
+def _optional_array(value: object, *, expected_width: int) -> Any:
+    if value is None:
+        return None
+    import numpy as np
+
+    array = np.asarray(value, dtype=np.float32)
+    if array.size == 0:
+        return None
+    if array.ndim == 1 and array.shape[-1] == expected_width:
+        array = array.reshape(1, expected_width)
+    if array.ndim != 2 or array.shape[-1] != expected_width:
+        return None
+    return array
 
 
 def _json_value(value: Any) -> Any:
@@ -493,6 +563,7 @@ def _plot_readable_panel(
     bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
     frame_idx: int,
     source_frame_idx: int | None,
+    root_quat_w: Any | None,
 ) -> None:
     import numpy as np
 
@@ -515,7 +586,7 @@ def _plot_readable_panel(
     point_colors = [key_color if index in key_indices else color for index in range(len(arr))]
     point_sizes = [42 if index in key_indices else 26 for index in range(len(arr))]
     ax.scatter(arr[:, 0], arr[:, 1], arr[:, 2], s=point_sizes, c=point_colors, depthshade=True)
-    _plot_root_axes(ax, arr, names, bounds)
+    _plot_root_axes(ax, arr, names, bounds, root_quat_w=root_quat_w)
     _plot_left_right_labels(ax, arr, names)
     _plot_contact_markers(ax, arr, names)
     source_label = "n/a" if source_frame_idx is None else f"{source_frame_idx:04d}"
@@ -555,18 +626,52 @@ def _plot_root_axes(
     arr: Any,
     names: Sequence[str],
     bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+    *,
+    root_quat_w: Any | None = None,
 ) -> None:
+    import numpy as np
+
     root_index = _name_index(names, "pelvis")
     root = arr[root_index if root_index is not None else 0]
     span = max(bounds[0][1] - bounds[0][0], bounds[1][1] - bounds[1][0], 1.0)
     scale = span * 0.18
-    ax.quiver(root[0], root[1], root[2], scale, 0, 0, color="#c9372c", linewidth=2)
-    ax.quiver(root[0], root[1], root[2], 0, scale, 0, color="#2f7d32", linewidth=2)
-    ax.quiver(root[0], root[1], root[2], 0, 0, scale, color="#2f5fb3", linewidth=2)
-    ax.text(root[0] + scale, root[1], root[2], "X", color="#c9372c", fontsize=8)
-    ax.text(root[0], root[1] + scale, root[2], "Y", color="#2f7d32", fontsize=8)
-    ax.text(root[0], root[1], root[2] + scale, "Z", color="#2f5fb3", fontsize=8)
+    axes = np.eye(3, dtype=float)
+    label_prefix = "W"
+    if root_quat_w is not None:
+        axes = _quat_wxyz_to_matrix(root_quat_w)
+        label_prefix = "R"
+    colors = ("#c9372c", "#2f7d32", "#2f5fb3")
+    labels = ("X", "Y", "Z")
+    for axis, color, label in zip(axes.T, colors, labels):
+        vector = axis * scale
+        ax.quiver(root[0], root[1], root[2], vector[0], vector[1], vector[2], color=color, linewidth=2)
+        ax.text(
+            root[0] + vector[0],
+            root[1] + vector[1],
+            root[2] + vector[2],
+            f"{label_prefix}{label}",
+            color=color,
+            fontsize=8,
+        )
     ax.text(root[0], root[1], root[2], "root", color="#323b3c", fontsize=8)
+
+
+def _quat_wxyz_to_matrix(quat: Any) -> Any:
+    import numpy as np
+
+    q = np.asarray(quat, dtype=float).reshape(4)
+    norm = np.linalg.norm(q)
+    if norm < 1e-8:
+        return np.eye(3, dtype=float)
+    w, x, y, z = q / norm
+    return np.asarray(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=float,
+    )
 
 
 def _plot_left_right_labels(ax: Any, arr: Any, names: Sequence[str]) -> None:

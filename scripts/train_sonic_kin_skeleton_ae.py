@@ -602,7 +602,8 @@ def build_soma_motionlib_features(
 
     command = np.concatenate([dof[idx], joint_vel[idx]], axis=-1)
     if config is not None and include_root_pos_target(config):
-        target_root_pos = root_pos[idx]
+        target_root_pos = root_pos[idx].copy()
+        target_root_pos[..., :2] -= root_pos[frame_indices, None, :2]
         target_root_ori6d = quat_to_rot6d(root_rot[idx])
         target = np.concatenate(
             [
@@ -1260,15 +1261,31 @@ def loss_and_metrics(
     root_pose_dim: int,
     root_pos_enabled: bool,
     command_weight: float,
-    anchor_weight: float,
+    root_pos_weight: float,
+    root_rot_weight: float,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     pred_command = pred_norm[:, :command_dim]
     target_command = target_norm[:, :command_dim]
     pred_anchor = pred_norm[:, command_dim:]
     target_anchor = target_norm[:, command_dim:]
     command_loss = torch.mean((pred_command - target_command) ** 2)
-    anchor_loss = torch.mean((pred_anchor - target_anchor) ** 2)
-    loss = command_weight * command_loss + anchor_weight * anchor_loss
+    if root_pos_enabled:
+        window = root_pose_dim // 9
+        pred_pose = pred_anchor.reshape(pred_anchor.shape[0], window, 9)
+        target_pose = target_anchor.reshape(target_anchor.shape[0], window, 9)
+        root_pos_loss = torch.mean((pred_pose[..., :3] - target_pose[..., :3]) ** 2)
+        root_rot_loss = torch.mean((pred_pose[..., 3:] - target_pose[..., 3:]) ** 2)
+        anchor_loss = torch.mean((pred_anchor - target_anchor) ** 2)
+        loss = (
+            command_weight * command_loss
+            + root_pos_weight * root_pos_loss
+            + root_rot_weight * root_rot_loss
+        )
+    else:
+        anchor_loss = torch.mean((pred_anchor - target_anchor) ** 2)
+        root_pos_loss = pred_anchor.new_tensor(float("nan"))
+        root_rot_loss = anchor_loss
+        loss = command_weight * command_loss + root_rot_weight * anchor_loss
 
     with torch.no_grad():
         pred_raw = pred_norm * stats["target_std"] + stats["target_mean"]
@@ -1290,6 +1307,8 @@ def loss_and_metrics(
             "loss": float(loss.detach().item()),
             "command_mse_norm": float(command_loss.detach().item()),
             "anchor_mse_norm": float(anchor_loss.detach().item()),
+            "root_pos_mse_norm": float(root_pos_loss.detach().item()),
+            "root_rot_mse_norm": float(root_rot_loss.detach().item()),
             "joint_pos_rmse_raw": float(torch.sqrt(torch.mean(joint_pos_error**2)).item()),
             "joint_vel_rmse_raw": float(torch.sqrt(torch.mean(joint_vel_error**2)).item()),
             "anchor_rmse_raw": float(torch.sqrt(torch.mean(anchor_raw**2)).item()),
@@ -1313,7 +1332,18 @@ def validate(
     rows = []
     max_batches = int(config["training"]["validation_batches"])
     command_weight = float(config["training"].get("command_loss_weight", 1.0))
-    anchor_weight = float(config["training"].get("anchor_loss_weight", 1.0))
+    root_pos_weight = float(
+        config["training"].get(
+            "root_pos_loss_weight",
+            config["training"].get("anchor_loss_weight", 1.0),
+        )
+    )
+    root_rot_weight = float(
+        config["training"].get(
+            "root_rot_loss_weight",
+            config["training"].get("anchor_loss_weight", 1.0),
+        )
+    )
     with torch.no_grad():
         for batch_idx, (motion, skeleton, target) in enumerate(loader):
             if batch_idx >= max_batches:
@@ -1333,7 +1363,8 @@ def validate(
                 root_pose_dim,
                 include_root_pos_target(config),
                 command_weight,
-                anchor_weight,
+                root_pos_weight,
+                root_rot_weight,
             )
             rows.append(metrics)
     model.train()
@@ -2387,6 +2418,8 @@ def write_loss_header(path: Path) -> None:
                 "train_loss",
                 "train_command_mse_norm",
                 "train_anchor_mse_norm",
+                "train_root_pos_mse_norm",
+                "train_root_rot_mse_norm",
                 "train_joint_pos_rmse_raw",
                 "train_joint_vel_rmse_raw",
                 "train_anchor_rmse_raw",
@@ -2406,6 +2439,8 @@ def append_loss_row(path: Path, step: int, elapsed: float, metrics: dict[str, fl
                 f"{metrics['loss']:.10f}",
                 f"{metrics['command_mse_norm']:.10f}",
                 f"{metrics['anchor_mse_norm']:.10f}",
+                f"{metrics.get('root_pos_mse_norm', float('nan')):.10f}",
+                f"{metrics.get('root_rot_mse_norm', float('nan')):.10f}",
                 f"{metrics['joint_pos_rmse_raw']:.10f}",
                 f"{metrics['joint_vel_rmse_raw']:.10f}",
                 f"{metrics['anchor_rmse_raw']:.10f}",
@@ -2743,7 +2778,18 @@ def main() -> None:
         keep_last = int(config["training"]["keep_last_checkpoints"])
         grad_clip = float(config["training"]["grad_clip_norm"])
         command_weight = float(config["training"].get("command_loss_weight", 1.0))
-        anchor_weight = float(config["training"].get("anchor_loss_weight", 1.0))
+        root_pos_weight = float(
+            config["training"].get(
+                "root_pos_loss_weight",
+                config["training"].get("anchor_loss_weight", 1.0),
+            )
+        )
+        root_rot_weight = float(
+            config["training"].get(
+                "root_rot_loss_weight",
+                config["training"].get("anchor_loss_weight", 1.0),
+            )
+        )
         precision = config["training"].get("precision", "bf16")
         use_amp = precision in {"bf16", "fp16"}
         amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
@@ -2803,7 +2849,8 @@ def main() -> None:
                         root_pose_dim,
                         include_root_pos_target(config),
                         command_weight,
-                        anchor_weight,
+                        root_pos_weight,
+                        root_rot_weight,
                     )
                 loss.backward()
                 if grad_clip > 0:

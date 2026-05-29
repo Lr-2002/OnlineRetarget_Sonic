@@ -23,7 +23,10 @@ class SonicNativeFeatureContractTests(unittest.TestCase):
         self.assertIn("soma_joints_multi_future_local_nonflat", contract.source_keys)
         self.assertIn("soma_root_ori_b_multi_future", contract.source_keys)
         self.assertNotIn("body_pos_w", contract.source_keys)
+        self.assertNotIn("root_pos_w_mf", contract.source_keys)
         self.assertIn("body_pos_w", contract.target_label_keys)
+        self.assertIn("root_pos_w_mf", contract.target_label_keys)
+        self.assertIn("root_rot_w_mf", contract.target_label_keys)
         self.assertEqual(contract.target_fps, 50.0)
         self.assertEqual(len(contract.digest), 16)
 
@@ -57,6 +60,14 @@ class SonicNativeFeatureContractTests(unittest.TestCase):
         contract = SonicNativeFeatureContract.from_config_path(PROPORTIONAL_CONFIG)
         source = _source_payload(contract)
         source["body_pos_w"] = "target-state"
+
+        with self.assertRaisesRegex(FeatureContractError, "target-only fields"):
+            pack_inference_features(source, contract)
+
+    def test_source_payload_rejects_target_only_root_pose(self):
+        contract = SonicNativeFeatureContract.from_config_path(PROPORTIONAL_CONFIG)
+        source = _source_payload(contract)
+        source["root_pos_w_mf"] = "target-state"
 
         with self.assertRaisesRegex(FeatureContractError, "target-only fields"):
             pack_inference_features(source, contract)

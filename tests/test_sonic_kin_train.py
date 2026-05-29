@@ -124,6 +124,15 @@ class SonicKinTrainTimingTests(unittest.TestCase):
         self.assertEqual(target.shape, (2, command_dim + 3 * 3 + 3 * 6))
         np.testing.assert_allclose(target[0, root_pos_start : root_pos_start + 3], root_pos[0])
         np.testing.assert_allclose(
+            target[1, root_pos_start : root_pos_start + 3],
+            np.asarray([0.0, 0.0, 1.0], dtype=np.float32),
+        )
+        np.testing.assert_allclose(
+            target[1, root_pos_start + 3 : root_pos_start + 6],
+            np.asarray([0.1, 0.0, 1.0], dtype=np.float32),
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
             target[0, root_rot_start : root_rot_start + 6],
             np.asarray([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32),
         )

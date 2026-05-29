@@ -1,5 +1,5 @@
 {
-  "schema_version": "2.1.0",
+  "schema_version": "2.2.0",
   "owner": "OnlineRetarget",
   "training_lane": "sonic_kin_only_soma_encoder",
   "sonic_native": true,
@@ -61,18 +61,41 @@
   ],
   "target_features": [
     "command_multi_future_nonflat",
+    "root_pos_w_mf",
+    "root_rot_w_mf",
     "motion_anchor_ori_b_mf_nonflat",
     "joint_pos",
     "joint_vel",
     "body_pos_w",
     "body_quat_w"
   ],
+  "root_pose_contract": {
+    "enabled": true,
+    "root_body_name": "pelvis",
+    "root_body_index": 0,
+    "position_target": "root_pos_w_mf",
+    "position_representation": "delta_xy_w_plus_z_w",
+    "rotation_target": "root_rot_w_mf",
+    "rotation_representation": "rot6d_w_from_quat_wxyz",
+    "raw_position_label": "root_pos_w_raw",
+    "raw_rotation_label": "root_quat_w_raw",
+    "raw_rotation_format": "wxyz",
+    "source_encoder_inputs_allowed": false,
+    "command_action_extraction": "command_multi_future_nonflat",
+    "initial_weights": {
+      "command_loss_weight": 1.0,
+      "root_pos_loss_weight": 0.25,
+      "root_rot_loss_weight": 0.5
+    }
+  },
   "losses": {
     "primary": [
       "g1_kin_joint_rmse",
       "g1_kin_velocity_rmse",
       "g1_kin_body_mpjpe",
-      "g1_kin_anchor_orientation_rmse"
+      "g1_kin_anchor_orientation_rmse",
+      "g1_kin_root_position_rmse",
+      "g1_kin_root_orientation_rmse"
     ],
     "alignment": [],
     "auxiliary": []
@@ -93,6 +116,9 @@
     "required_gpu_count": 4,
     "precision": "bf16",
     "batch_envs": 4096,
+    "command_loss_weight": 1.0,
+    "root_pos_loss_weight": 0.25,
+    "root_rot_loss_weight": 0.5,
     "notes": "Formal uniform baseline; launch as one multi-GPU job."
   },
   "visual_validation": {
@@ -114,6 +140,12 @@
       "source_frame_indices",
       "target_frame_count",
       "duration_sec",
+      "target_root_pos_w",
+      "target_root_rot_w",
+      "pred_root_pos_w",
+      "pred_root_rot_w",
+      "root_rot_format",
+      "initial_root_xy_zeroed",
       "git_sha"
     ]
   },
@@ -152,6 +184,13 @@
       "++callbacks.online_retarget_visual_val.readable_wandb_upload=true",
       "++callbacks.online_retarget_visual_val.use_evaluation_mode=false",
       "++callbacks.online_retarget_visual_val.empty_cuda_cache=true",
+      "++callbacks.online_retarget_visual_val.persist_root_pose=true",
+      "++online_retarget.root_pose_contract.enabled=true",
+      "++online_retarget.root_pose_contract.position_target=root_pos_w_mf",
+      "++online_retarget.root_pose_contract.position_representation=delta_xy_w_plus_z_w",
+      "++online_retarget.root_pose_contract.rotation_target=root_rot_w_mf",
+      "++online_retarget.root_pose_contract.rotation_representation=rot6d_w_from_quat_wxyz",
+      "++online_retarget.root_pose_contract.raw_rotation_format=wxyz",
       "++manager_env.commands.motion.motion_lib_cfg.target_fps=50",
       "++manager_env.commands.motion.motion_lib_cfg.body_names=[pelvis,left_hip_roll_link,left_knee_link,left_ankle_roll_link,right_hip_roll_link,right_knee_link,right_ankle_roll_link,torso_link,left_shoulder_roll_link,left_elbow_link,left_wrist_yaw_link,right_shoulder_roll_link,right_elbow_link,right_wrist_yaw_link]",
       "++manager_env.commands.motion.motion_lib_cfg.motion_file=/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/robot_filtered_v1",
@@ -187,12 +226,22 @@
       "++manager_env.observations.tokenizer.soma_morphology.params.num_clusters=1",
       "++manager_env.observations.tokenizer.soma_morphology.params.non_flatten=true",
       "++manager_env.observations.tokenizer.soma_morphology.params.strict=true",
+      "++manager_env.observations.tokenizer.root_pos_w_mf._target_=isaaclab.managers.ObservationTermCfg",
+      "++manager_env.observations.tokenizer.root_pos_w_mf.func=online_retarget.sonic_observation_terms:root_pos_w_mf",
+      "++manager_env.observations.tokenizer.root_pos_w_mf.params.command_name=motion",
+      "++manager_env.observations.tokenizer.root_pos_w_mf.params.representation=delta_xy_w_plus_z_w",
+      "++manager_env.observations.tokenizer.root_rot_w_mf._target_=isaaclab.managers.ObservationTermCfg",
+      "++manager_env.observations.tokenizer.root_rot_w_mf.func=online_retarget.sonic_observation_terms:root_rot_w_mf",
+      "++manager_env.observations.tokenizer.root_rot_w_mf.params.command_name=motion",
+      "++manager_env.observations.tokenizer.root_rot_w_mf.params.rotation_format=rot6d_w",
       "++algo.config.actor.backbone.encoders.soma.inputs=[soma_joints_multi_future_local_nonflat,soma_root_ori_b_multi_future,soma_morphology]",
       "++algo.config.actor.backbone.encoders.soma.params._target_=online_retarget.sonic_encoder_modules.ConcatSomaEncoderModule",
       "++algo.config.actor.backbone.encoders.soma.params.hidden_dims=[512,512,512]"
     ],
     "online_retarget_observations": {
-      "soma_morphology_dim": 24
+      "soma_morphology_dim": 24,
+      "root_pos_w_mf_dim": 3,
+      "root_rot_w_mf_dim": 6
     },
     "online_retarget_aux_losses": []
   },
