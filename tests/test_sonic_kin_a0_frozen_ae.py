@@ -51,6 +51,7 @@ class A0FrozenAEConfigTests(unittest.TestCase):
                 self.assertEqual(config["features"]["expected_dims"]["motion_token"], 840)
                 self.assertEqual(config["features"]["expected_dims"]["model_input"], 904)
                 self.assertEqual(config["features"]["expected_dims"]["target"], 670)
+                self.assertFalse(config["ddp"]["init_sync"])
                 self.assertIn(f"soma_{topology}_filtered_v1", config["input_data"]["soma_motion_dir"])
                 self.assertEqual(config["variant"]["family"], "A0_frozen_skeleton_ae")
                 text = path.read_text(encoding="utf-8")
@@ -83,6 +84,10 @@ class A0FrozenAEConfigTests(unittest.TestCase):
             "first_batch_collation",
             "model_to_device",
             "model_to_device_cuda_synchronize",
+            "model_init_seed",
+            "model_construct",
+            "model_parameter_checksum",
+            "all_rank_parameter_checksums",
             "model_ddp_preflight",
             "ddp_wrap",
             "ddp_wrap_probe_minimal_mlp",
@@ -94,8 +99,10 @@ class A0FrozenAEConfigTests(unittest.TestCase):
             "ddp_probe_single_linear_1154",
             "_ddp_ctor",
             "_forward",
+            "_backward",
             "_cuda_synchronize_pre_ddp",
             "_cuda_synchronize_post_forward",
+            "_cuda_synchronize_post_backward",
             "first_forward",
             "logs/a0_stage_trace",
             "named_parameters",
@@ -106,10 +113,16 @@ class A0FrozenAEConfigTests(unittest.TestCase):
             "A0_DDP_PROBE",
             "A0_DDP_PROBE_ONLY",
             "A0_DDP_PROBE_INIT_SYNC",
+            "A0_DDP_INIT_SYNC",
+            "A0_DDP_PROBE_BACKWARD",
             "A0_DDP_PROBE_BUCKET_CAP_MB",
             "A0_DDP_PROBE_STATIC_GRAPH",
             "A0_DDP_PROBE_FIND_UNUSED_PARAMETERS",
             "A0_DDP_BROADCAST_BUFFERS",
+            "dummy_loss",
+            "loss.backward",
+            "gradient_sha256",
+            "parameter_sha256",
             "init_sync",
             "bucket_cap_mb",
             "static_graph",
@@ -228,6 +241,8 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
             self.assertEqual(manifest["feature_dims"]["target"], 670)
             self.assertTrue(manifest["skeleton_ae"]["skeleton_encoder_frozen"])
             self.assertFalse(manifest["optimizer"]["contains_skeleton_encoder_params"])
+            self.assertFalse(manifest["ddp"]["init_sync"])
+            self.assertEqual(manifest["ddp"]["init_sync_source"], "config.ddp.init_sync")
             self.assertEqual(summary["mapping_report"]["missing_skeleton_geometry_count"], 0)
             self.assertIn("skeleton_embedding_mean", norm)
             self.assertIn("skeleton_embedding_std", norm)
@@ -322,6 +337,7 @@ def _minimal_a0_config(root: Path, checkpoint: Path, stats: Path, registry: Path
             "require_committed_code": False,
             "require_latest_code": False,
         },
+        "ddp": {"init_sync": False},
     }
 
 
@@ -422,6 +438,7 @@ def _write_dry_run_config(root: Path, checkpoint: Path, stats: Path, registry: P
             "require_latest_code": False,
             "device": "cpu",
         },
+        "ddp": {"init_sync": False},
         "wandb": {"enabled": False},
     }
     config_path = root / "a0_dry_run_config.json"

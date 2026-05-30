@@ -146,6 +146,9 @@
     "require_committed_code": true,
     "require_latest_code": true
   },
+  "ddp": {
+    "init_sync": false
+  },
   "wandb": {
     "enabled": true,
     "project": "OnlineRetarget",

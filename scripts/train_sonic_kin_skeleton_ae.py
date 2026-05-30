@@ -379,6 +379,146 @@ def a0_ddp_broadcast_buffers(config: Mapping[str, Any]) -> tuple[bool, str]:
     return True, "torch_default"
 
 
+def _ddp_mapping(config: Mapping[str, Any]) -> Mapping[str, Any]:
+    ddp = config.get("ddp", {})
+    return ddp if isinstance(ddp, Mapping) else {}
+
+
+def a0_ddp_init_sync(config: Mapping[str, Any]) -> tuple[bool | None, str]:
+    env_enabled = env_flag_enabled(os.environ.get("A0_DDP_INIT_SYNC"))
+    if env_enabled is not None:
+        return env_enabled, "A0_DDP_INIT_SYNC"
+    ddp = _ddp_mapping(config)
+    if "init_sync" in ddp:
+        return bool(ddp["init_sync"]), "config.ddp.init_sync"
+    return None, "unset"
+
+
+def should_run_a0_ddp_probe_backward(config: Mapping[str, Any], *, probe_only: bool) -> tuple[bool, str]:
+    env_enabled = env_flag_enabled(os.environ.get("A0_DDP_PROBE_BACKWARD"))
+    if env_enabled is not None:
+        return env_enabled, "A0_DDP_PROBE_BACKWARD"
+    diagnostics = _diagnostics_mapping(config)
+    if "a0_ddp_probe_backward" in diagnostics:
+        return bool(diagnostics["a0_ddp_probe_backward"]), "config.diagnostics.a0_ddp_probe_backward"
+    if probe_only:
+        return True, "a0_ddp_probe_only_default"
+    return False, "default"
+
+
+def module_parameter_report(model: nn.Module) -> dict[str, Any]:
+    hasher = hashlib.sha256()
+    parameter_numel = 0
+    trainable_parameter_numel = 0
+    parameter_abs_sum = 0.0
+    parameter_l2_sq = 0.0
+    parameters = []
+    for name, parameter in model.named_parameters():
+        detached = parameter.detach().cpu().float().contiguous()
+        hasher.update(name.encode("utf-8"))
+        hasher.update(str(tuple(detached.shape)).encode("utf-8"))
+        hasher.update(str(detached.dtype).encode("utf-8"))
+        hasher.update(detached.numpy().tobytes())
+        numel = int(detached.numel())
+        parameter_numel += numel
+        if parameter.requires_grad:
+            trainable_parameter_numel += numel
+        parameter_abs_sum += float(detached.abs().sum().item())
+        parameter_l2_sq += float(detached.pow(2).sum().item())
+        parameters.append(
+            {
+                "name": name,
+                "shape": list(detached.shape),
+                "dtype": str(parameter.dtype),
+                "device": str(parameter.device),
+                "requires_grad": bool(parameter.requires_grad),
+                "numel": numel,
+            }
+        )
+    return {
+        "parameter_sha256": hasher.hexdigest(),
+        "parameter_count": len(parameters),
+        "parameter_numel": parameter_numel,
+        "trainable_parameter_numel": trainable_parameter_numel,
+        "parameter_abs_sum": parameter_abs_sum,
+        "parameter_l2": math.sqrt(parameter_l2_sq),
+        "parameters": parameters,
+    }
+
+
+def verify_rank_parameter_report(
+    *,
+    output_dir: Path,
+    runtime: Mapping[str, Any],
+    stage_trace: StageTracer,
+    stage_name: str,
+    report: Mapping[str, Any],
+) -> dict[str, Any]:
+    rank = int(runtime.get("rank", 0))
+    world_size = int(runtime.get("world_size", 1))
+    checksum_dir = output_dir / "logs" / "a0_parameter_checksums"
+    checksum_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"rank": rank, "world_size": world_size, **dict(report)}
+    path = checksum_dir / f"{stage_name}_rank_{rank:04d}.json"
+    tmp_path = checksum_dir / f".{stage_name}_rank_{rank:04d}.{os.getpid()}.tmp"
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+    distributed_barrier(runtime)
+    reports = []
+    missing = []
+    for expected_rank in range(world_size):
+        expected_path = checksum_dir / f"{stage_name}_rank_{expected_rank:04d}.json"
+        if not expected_path.exists():
+            missing.append(str(expected_path))
+            continue
+        reports.append(json.loads(expected_path.read_text(encoding="utf-8")))
+    checksums = sorted({str(item.get("parameter_sha256")) for item in reports})
+    summary = {
+        "checksum_dir": str(checksum_dir),
+        "rank_reports": reports,
+        "missing_rank_report_paths": missing,
+        "all_rank_parameter_checksums": checksums,
+        "all_rank_parameter_checksums_equal": not missing and len(checksums) == 1,
+    }
+    stage_trace.log(f"{stage_name}_all_rank_parameter_checksums", "details", **summary)
+    if missing:
+        raise RuntimeError(f"missing parameter checksum report(s): {missing}")
+    if len(checksums) != 1:
+        raise RuntimeError(f"rank parameter checksums differ: {checksums}")
+    distributed_barrier(runtime)
+    return summary
+
+
+def module_gradient_report(model: nn.Module) -> dict[str, Any]:
+    hasher = hashlib.sha256()
+    gradient_numel = 0
+    gradient_abs_sum = 0.0
+    gradient_l2_sq = 0.0
+    missing_gradients = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if parameter.grad is None:
+            missing_gradients.append(name)
+            continue
+        detached = parameter.grad.detach().cpu().float().contiguous()
+        hasher.update(name.encode("utf-8"))
+        hasher.update(str(tuple(detached.shape)).encode("utf-8"))
+        hasher.update(str(detached.dtype).encode("utf-8"))
+        hasher.update(detached.numpy().tobytes())
+        gradient_numel += int(detached.numel())
+        gradient_abs_sum += float(detached.abs().sum().item())
+        gradient_l2_sq += float(detached.pow(2).sum().item())
+    return {
+        "gradient_sha256": hasher.hexdigest(),
+        "gradient_numel": gradient_numel,
+        "gradient_abs_sum": gradient_abs_sum,
+        "gradient_l2": math.sqrt(gradient_l2_sq),
+        "missing_gradient_names": missing_gradients,
+    }
+
+
 def tensor_stage_snapshot(kind: str, name: str, tensor: torch.Tensor, requires_grad: bool | None) -> dict[str, Any]:
     return {
         "kind": kind,
@@ -438,6 +578,7 @@ def ddp_constructor_kwargs(
     config: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     broadcast_buffers, broadcast_source = a0_ddp_broadcast_buffers(config)
+    init_sync, init_sync_source = a0_ddp_init_sync(config)
     if device.type == "cuda":
         local_rank = int(runtime["local_rank"])
         kwargs: dict[str, Any] = {
@@ -447,12 +588,23 @@ def ddp_constructor_kwargs(
         }
     else:
         kwargs = {"broadcast_buffers": broadcast_buffers}
+    if init_sync is not None:
+        kwargs["init_sync"] = init_sync
     serializable = {
         "device_ids": kwargs.get("device_ids"),
         "output_device": kwargs.get("output_device"),
         "broadcast_buffers": bool(kwargs["broadcast_buffers"]),
         "broadcast_buffers_source": broadcast_source,
     }
+    if init_sync is not None:
+        serializable["init_sync"] = bool(init_sync)
+        serializable["init_sync_source"] = init_sync_source
+    supported = _supported_ddp_kwargs()
+    if supported and "init_sync" in kwargs and "init_sync" not in supported:
+        if int(runtime.get("world_size", 1)) > 1:
+            raise RuntimeError("config requested DDP init_sync, but this torch DistributedDataParallel lacks init_sync")
+        kwargs.pop("init_sync", None)
+        serializable["unsupported_kwargs"] = ["init_sync"]
     return kwargs, serializable
 
 
@@ -531,6 +683,7 @@ def ddp_probe_constructor_kwargs(
         if value is not None:
             kwargs[kwarg] = value
             serializable[kwarg] = value
+            serializable[f"{kwarg}_source"] = source
             optional_sources[kwarg] = source
 
     supported = _supported_ddp_kwargs()
@@ -541,6 +694,7 @@ def ddp_probe_constructor_kwargs(
                 unsupported.append(key)
                 kwargs.pop(key)
                 serializable.pop(key, None)
+                serializable.pop(f"{key}_source", None)
                 optional_sources.pop(key, None)
     if optional_sources:
         serializable["optional_sources"] = optional_sources
@@ -568,7 +722,28 @@ def run_ddp_probe_model(
     runtime: Mapping[str, Any],
     device: torch.device,
     config: Mapping[str, Any],
+    output_dir: Path | None = None,
+    run_backward: bool = False,
 ) -> None:
+    parameter_report = module_parameter_report(model)
+    stage_trace.log(
+        f"{stage_name}_parameter_checksum",
+        "details",
+        **parameter_report,
+    )
+    if output_dir is not None and runtime.get("distributed"):
+        parameter_consistency = verify_rank_parameter_report(
+            output_dir=output_dir,
+            runtime=runtime,
+            stage_trace=stage_trace,
+            stage_name=f"{stage_name}_parameter_checksum",
+            report=parameter_report,
+        )
+    else:
+        parameter_consistency = {
+            "all_rank_parameter_checksums": [parameter_report["parameter_sha256"]],
+            "all_rank_parameter_checksums_equal": True,
+        }
     with stage_trace.span(f"{stage_name}_to_device", module_type=type(model).__name__, device=str(device)):
         model = model.to(device)
     if device.type == "cuda":
@@ -582,6 +757,8 @@ def run_ddp_probe_model(
         kwargs=ddp_kwargs_log,
         input_shapes=[list(tensor.shape) for tensor in inputs],
         input_devices=[str(tensor.device) for tensor in inputs],
+        parameter_checksum=parameter_report,
+        parameter_checksum_consistency=parameter_consistency,
         **module_ddp_preflight_snapshot(model),
     )
     with stage_trace.span(f"{stage_name}_ddp_ctor", **ddp_kwargs_log):
@@ -592,15 +769,28 @@ def run_ddp_probe_model(
         input_devices=[str(tensor.device) for tensor in inputs],
     ):
         output = wrapped_probe(*inputs)
-    if device.type == "cuda":
-        with stage_trace.span(f"{stage_name}_cuda_synchronize_post_forward", device=str(device)):
-            torch.cuda.synchronize(device)
     stage_trace.log(
         f"{stage_name}_forward",
         "details",
         output_shape=list(output.shape),
         output_device=str(output.device),
     )
+    if device.type == "cuda":
+        with stage_trace.span(f"{stage_name}_cuda_synchronize_post_forward", device=str(device)):
+            torch.cuda.synchronize(device)
+    if run_backward:
+        with stage_trace.span(f"{stage_name}_backward", output_shape=list(output.shape)):
+            dummy_loss = output.float().pow(2).mean()
+            dummy_loss.backward()
+        if device.type == "cuda":
+            with stage_trace.span(f"{stage_name}_cuda_synchronize_post_backward", device=str(device)):
+                torch.cuda.synchronize(device)
+        stage_trace.log(
+            f"{stage_name}_backward",
+            "details",
+            dummy_loss=float(dummy_loss.detach().cpu().item()),
+            **module_gradient_report(model),
+        )
 
 
 def run_a0_minimal_ddp_wrap_probe(
@@ -609,10 +799,13 @@ def run_a0_minimal_ddp_wrap_probe(
     runtime: Mapping[str, Any],
     device: torch.device,
     config: Mapping[str, Any],
+    output_dir: Path | None = None,
+    run_backward: bool = False,
 ) -> None:
     if not runtime.get("distributed"):
         stage_trace.log("ddp_wrap_probe_minimal_mlp", "skipped", reason="not_distributed")
         return
+    set_model_init_seed(config, stage_trace, "ddp_wrap_probe_minimal_mlp_model_init_seed")
     run_ddp_probe_model(
         stage_name="ddp_wrap_probe_minimal_mlp",
         model=nn.Sequential(nn.Linear(4, 8), nn.SiLU(), nn.Linear(8, 2)),
@@ -621,6 +814,8 @@ def run_a0_minimal_ddp_wrap_probe(
         runtime=runtime,
         device=device,
         config=config,
+        output_dir=output_dir,
+        run_backward=run_backward,
     )
 
 
@@ -633,6 +828,8 @@ def run_a0_ddp_probe_suite(
     motion_dim: int,
     skeleton_dim: int,
     target_dim: int,
+    output_dir: Path | None = None,
+    run_backward: bool = False,
 ) -> None:
     if not runtime.get("distributed"):
         stage_trace.log("ddp_probe_suite", "skipped", reason="not_distributed")
@@ -647,8 +844,17 @@ def run_a0_ddp_probe_suite(
         skeleton_dim=int(skeleton_dim),
         target_dim=int(target_dim),
         concat_input_dim=concat_input_dim,
+        run_backward=bool(run_backward),
     ):
-        run_a0_minimal_ddp_wrap_probe(stage_trace=stage_trace, runtime=runtime, device=device, config=config)
+        run_a0_minimal_ddp_wrap_probe(
+            stage_trace=stage_trace,
+            runtime=runtime,
+            device=device,
+            config=config,
+            output_dir=output_dir,
+            run_backward=run_backward,
+        )
+        set_model_init_seed(config, stage_trace, "ddp_probe_same_shape_sequential_model_init_seed")
         run_ddp_probe_model(
             stage_name="ddp_probe_same_shape_sequential",
             model=build_mlp(concat_input_dim, hidden_dim, int(target_dim), num_layers, dropout),
@@ -659,7 +865,10 @@ def run_a0_ddp_probe_suite(
             runtime=runtime,
             device=device,
             config=config,
+            output_dir=output_dir,
+            run_backward=run_backward,
         )
+        set_model_init_seed(config, stage_trace, "ddp_probe_fresh_concat_retargeter_model_init_seed")
         run_ddp_probe_model(
             stage_name="ddp_probe_fresh_concat_retargeter",
             model=ConcatRetargeter(int(motion_dim), int(skeleton_dim), int(target_dim), dict(config["model"])),
@@ -671,12 +880,15 @@ def run_a0_ddp_probe_suite(
             runtime=runtime,
             device=device,
             config=config,
+            output_dir=output_dir,
+            run_backward=run_backward,
         )
         for stage_name, features in (
             ("ddp_probe_single_linear_512", 512),
             ("ddp_probe_single_linear_1024", 1024),
             ("ddp_probe_single_linear_1154", 1154),
         ):
+            set_model_init_seed(config, stage_trace, f"{stage_name}_model_init_seed")
             run_ddp_probe_model(
                 stage_name=stage_name,
                 model=nn.Linear(features, features),
@@ -687,6 +899,8 @@ def run_a0_ddp_probe_suite(
                 runtime=runtime,
                 device=device,
                 config=config,
+                output_dir=output_dir,
+                run_backward=run_backward,
             )
 
 
@@ -3372,6 +3586,11 @@ def write_manifest(
             "target": target_dim,
         }
     optimizer_has_encoder_params = any("skeleton_encoder" in name or ".encoder" in name for name in optimizer_parameter_names)
+    ddp_runtime = runtime or {"rank": 0, "world_size": 1, "local_rank": 0, "device": torch.device("cpu"), "backend": "none"}
+    ddp_device = ddp_runtime.get("device", torch.device("cpu"))
+    if not isinstance(ddp_device, torch.device):
+        ddp_device = torch.device(str(ddp_device))
+    _ddp_kwargs, ddp_settings = ddp_constructor_kwargs(ddp_runtime, ddp_device, config)
     manifest = {
         "run_id": f"sonic-kin-skeleton-{config['variant']['name']}-{timestamp_compact()}",
         "run_group": run_group,
@@ -3399,6 +3618,7 @@ def write_manifest(
             "local_rank": int(runtime.get("local_rank", 0)) if runtime is not None else 0,
             "backend": str(runtime.get("backend", "none")) if runtime is not None else "none",
         },
+        "ddp": ddp_settings,
         "data_snapshot": data_snapshot,
         "metrics_path": str(output_dir / "loss_curve.csv"),
         "notes": config["purpose"],
@@ -3513,6 +3733,14 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+def set_model_init_seed(config: Mapping[str, Any], stage_trace: StageTracer, stage_name: str) -> int:
+    seed = int(config["training"]["seed"])
+    stage_trace.log(stage_name, "before", seed=seed, rank_independent=True)
+    set_seed(seed)
+    stage_trace.log(stage_name, "after")
+    return seed
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, type=Path)
@@ -3599,6 +3827,16 @@ def main() -> None:
             source=probe_only_source,
         )
         if probe_only_enabled:
+            probe_backward_enabled, probe_backward_source = should_run_a0_ddp_probe_backward(
+                config,
+                probe_only=True,
+            )
+            stage_trace.log(
+                "ddp_probe_backward",
+                "configured",
+                enabled=probe_backward_enabled,
+                source=probe_backward_source,
+            )
             motion_dim, skeleton_dim, target_dim = a0_probe_expected_dims(config)
             run_a0_ddp_probe_suite(
                 stage_trace=stage_trace,
@@ -3608,6 +3846,8 @@ def main() -> None:
                 motion_dim=motion_dim,
                 skeleton_dim=skeleton_dim,
                 target_dim=target_dim,
+                output_dir=output_dir,
+                run_backward=probe_backward_enabled,
             )
             if is_main:
                 summary = {
@@ -3621,6 +3861,8 @@ def main() -> None:
                         "target": target_dim,
                     },
                     "probe_only_source": probe_only_source,
+                    "probe_backward_enabled": probe_backward_enabled,
+                    "probe_backward_source": probe_backward_source,
                 }
                 (output_dir / "dry_run_summary.json").write_text(
                     json.dumps(summary, indent=2, sort_keys=True) + "\n",
@@ -3732,19 +3974,58 @@ def main() -> None:
                 skeleton_shape=list(diagnostic_batch[1].shape),
                 target_shape=list(diagnostic_batch[2].shape),
             )
+        set_model_init_seed(config, stage_trace, "model_init_seed")
+        with stage_trace.span("model_construct", motion_dim=motion_dim, skeleton_dim=skeleton_dim, target_dim=target_dim):
+            raw_model = make_model(motion_dim, skeleton_dim, target_dim, config)
+        model_parameter_report = module_parameter_report(raw_model)
+        stage_trace.log("model_parameter_checksum", "details", **model_parameter_report)
+        if runtime["distributed"] and is_skeleton_ae_enabled(config):
+            model_parameter_consistency = verify_rank_parameter_report(
+                output_dir=output_dir,
+                runtime=runtime,
+                stage_trace=stage_trace,
+                stage_name="model_parameter_checksum",
+                report=model_parameter_report,
+            )
+        else:
+            model_parameter_consistency = {
+                "all_rank_parameter_checksums": [model_parameter_report["parameter_sha256"]],
+                "all_rank_parameter_checksums_equal": True,
+            }
+            stage_trace.log(
+                "model_parameter_checksum_all_rank_parameter_checksums",
+                "details",
+                **model_parameter_consistency,
+            )
         with stage_trace.span("model_to_device", device=str(device), motion_dim=motion_dim, skeleton_dim=skeleton_dim):
-            raw_model = make_model(motion_dim, skeleton_dim, target_dim, config).to(device)
-        stage_trace.log("model_ddp_preflight", "details", **module_ddp_preflight_snapshot(raw_model))
+            raw_model = raw_model.to(device)
+        stage_trace.log(
+            "model_ddp_preflight",
+            "details",
+            parameter_checksum=model_parameter_report,
+            parameter_checksum_consistency=model_parameter_consistency,
+            **module_ddp_preflight_snapshot(raw_model),
+        )
         if device.type == "cuda":
             with stage_trace.span("model_to_device_cuda_synchronize", device=str(device)):
                 torch.cuda.synchronize(device)
         if runtime["distributed"]:
             probe_enabled, probe_source = should_run_a0_ddp_probe(config, args, stage_trace)
+            probe_backward_enabled, probe_backward_source = should_run_a0_ddp_probe_backward(
+                config,
+                probe_only=False,
+            )
             stage_trace.log(
                 "ddp_wrap_probe_minimal_mlp",
                 "configured",
                 enabled=probe_enabled,
                 source=probe_source,
+            )
+            stage_trace.log(
+                "ddp_probe_backward",
+                "configured",
+                enabled=probe_backward_enabled,
+                source=probe_backward_source,
             )
             if probe_enabled:
                 run_a0_ddp_probe_suite(
@@ -3755,6 +4036,8 @@ def main() -> None:
                     motion_dim=motion_dim,
                     skeleton_dim=skeleton_dim,
                     target_dim=target_dim,
+                    output_dir=output_dir,
+                    run_backward=probe_backward_enabled,
                 )
             ddp_kwargs, ddp_kwargs_log = ddp_constructor_kwargs(runtime, device, config)
             stage_trace.log("ddp_wrap", "details", kwargs=ddp_kwargs_log)
