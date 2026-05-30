@@ -29,6 +29,7 @@ import sys
 import tarfile
 import time
 from collections import deque
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -249,6 +250,96 @@ def resolve_text(value: str, config: dict[str, Any], run_group: str) -> str:
 
 def resolve_output_dir(config: dict[str, Any], run_group: str) -> Path:
     return Path(resolve_text(str(config["output_dir"]), config, run_group))
+
+
+class StageTracer:
+    def __init__(self, *, enabled: bool, env: Mapping[str, int], reason: str) -> None:
+        self.enabled = enabled
+        self.rank = int(env.get("rank", 0))
+        self.world_size = int(env.get("world_size", 1))
+        self.local_rank = int(env.get("local_rank", self.rank))
+        self.reason = reason
+        self.started = time.perf_counter()
+        self.log_path: Path | None = None
+        self._pending_lines: list[str] = []
+
+    def update_runtime(self, runtime: Mapping[str, Any]) -> None:
+        self.rank = int(runtime.get("rank", self.rank))
+        self.world_size = int(runtime.get("world_size", self.world_size))
+        self.local_rank = int(runtime.get("local_rank", self.local_rank))
+
+    def attach(self, output_dir: Path) -> None:
+        if not self.enabled:
+            return
+        log_dir = output_dir / "logs" / "a0_stage_trace"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self.log_path = log_dir / f"rank_{self.rank:04d}_local_{self.local_rank:04d}.jsonl"
+        for line in self._pending_lines:
+            self._write_line(line)
+        self._pending_lines.clear()
+        self.log("stage_trace_file", "attached", path=str(self.log_path))
+
+    def log(self, stage: str, event: str, **fields: Any) -> None:
+        if not self.enabled:
+            return
+        payload = {
+            "ts": utc_now(),
+            "elapsed_sec": round(time.perf_counter() - self.started, 6),
+            "pid": os.getpid(),
+            "rank": self.rank,
+            "world_size": self.world_size,
+            "local_rank": self.local_rank,
+            "reason": self.reason,
+            "stage": stage,
+            "event": event,
+            **fields,
+        }
+        line = json.dumps(payload, sort_keys=True, default=str)
+        print(f"A0_STAGE_TRACE {line}", flush=True)
+        if self.log_path is None:
+            self._pending_lines.append(line)
+        else:
+            self._write_line(line)
+
+    @contextmanager
+    def span(self, stage: str, **fields: Any) -> Any:
+        self.log(stage, "before", **fields)
+        try:
+            yield
+        except BaseException as exc:
+            self.log(stage, "error", error_type=type(exc).__name__, error=repr(exc))
+            raise
+        else:
+            self.log(stage, "after")
+
+    def _write_line(self, line: str) -> None:
+        if self.log_path is None:
+            return
+        with self.log_path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+
+
+def env_flag_enabled(value: str | None) -> bool | None:
+    if value is None or value == "":
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"expected boolean env flag value, got {value!r}")
+
+
+def should_enable_a0_stage_trace(config: Mapping[str, Any], args: argparse.Namespace) -> tuple[bool, str]:
+    env_enabled = env_flag_enabled(os.environ.get("A0_STAGE_TRACE"))
+    if env_enabled is not None:
+        return env_enabled, "A0_STAGE_TRACE"
+    diagnostics = config.get("diagnostics", {})
+    if isinstance(diagnostics, Mapping) and "a0_stage_trace" in diagnostics:
+        return bool(diagnostics["a0_stage_trace"]), "config.diagnostics.a0_stage_trace"
+    if bool(getattr(args, "stage_trace", False)):
+        return True, "--stage-trace"
+    return bool(args.dry_run and is_skeleton_ae_enabled(config)), "a0_dry_run_default"
 
 
 class SkeletonAEFeatureLookup:
@@ -482,6 +573,7 @@ def skeleton_ae_registry_cache_device(cfg: Mapping[str, Any]) -> torch.device:
 def build_skeleton_ae_feature_lookup(
     config: Mapping[str, Any],
     device: torch.device,
+    stage_trace: StageTracer | None = None,
 ) -> SkeletonAEFeatureLookup | None:
     cfg = skeleton_ae_config(config)
     if cfg is None:
@@ -492,23 +584,54 @@ def build_skeleton_ae_feature_lookup(
     checkpoint_path = Path(str(cfg["checkpoint"]))
     stats_path = Path(str(cfg["normalization"]))
     registry_csv = Path(str(cfg["registry_csv"]))
-    rows_by_id, lookup_index = _load_skeleton_ae_registry(registry_csv)
+    with (stage_trace.span("skeleton_ae_registry_load", registry_csv=str(registry_csv)) if stage_trace else nullcontext()):
+        rows_by_id, lookup_index = _load_skeleton_ae_registry(registry_csv)
     cache_device = skeleton_ae_registry_cache_device(cfg)
-    ae_model, checkpoint = load_skeleton_geometry_ae_checkpoint(
-        checkpoint_path,
-        device=cache_device,
-        freeze_encoder=True,
-    )
-    ae_stats = load_skeleton_geometry_ae_stats(stats_path, device=cache_device)
+    if stage_trace is not None:
+        stage_trace.log(
+            "skeleton_ae_registry_load",
+            "details",
+            registry_rows=len(rows_by_id),
+            lookup_keys=len(lookup_index),
+        )
+    with (
+        stage_trace.span(
+            "skeleton_ae_checkpoint_load",
+            checkpoint=str(checkpoint_path),
+            cache_device=str(cache_device),
+        )
+        if stage_trace
+        else nullcontext()
+    ):
+        ae_model, checkpoint = load_skeleton_geometry_ae_checkpoint(
+            checkpoint_path,
+            device=cache_device,
+            freeze_encoder=True,
+        )
+    with (
+        stage_trace.span("skeleton_ae_stats_load", stats=str(stats_path), cache_device=str(cache_device))
+        if stage_trace
+        else nullcontext()
+    ):
+        ae_stats = load_skeleton_geometry_ae_stats(stats_path, device=cache_device)
     embeddings_by_id: dict[str, np.ndarray] = {}
-    with torch.inference_mode():
-        for encoder_id, row in rows_by_id.items():
-            x = torch.from_numpy(row["geometry"]).to(device=cache_device, dtype=torch.float32).unsqueeze(0)
-            x_norm = (x - ae_stats["skeleton_mean"]) / ae_stats["skeleton_std"]
-            z = ae_model.encode(x_norm).squeeze(0).detach().cpu().numpy().astype(np.float32, copy=False)
-            if z.shape != (SKELETON_GEOMETRY_LATENT_DIM,):
-                raise ValueError(f"{encoder_id} encoded to unexpected shape {z.shape}")
-            embeddings_by_id[encoder_id] = z
+    with (
+        stage_trace.span(
+            "skeleton_ae_cpu_z_cache_build",
+            row_count=len(rows_by_id),
+            cache_device=str(cache_device),
+        )
+        if stage_trace
+        else nullcontext()
+    ):
+        with torch.inference_mode():
+            for encoder_id, row in rows_by_id.items():
+                x = torch.from_numpy(row["geometry"]).to(device=cache_device, dtype=torch.float32).unsqueeze(0)
+                x_norm = (x - ae_stats["skeleton_mean"]) / ae_stats["skeleton_std"]
+                z = ae_model.encode(x_norm).squeeze(0).detach().cpu().numpy().astype(np.float32, copy=False)
+                if z.shape != (SKELETON_GEOMETRY_LATENT_DIM,):
+                    raise ValueError(f"{encoder_id} encoded to unexpected shape {z.shape}")
+                embeddings_by_id[encoder_id] = z
     artifact_info = {
         "checkpoint": file_stats(checkpoint_path),
         "normalization": file_stats(stats_path),
@@ -537,13 +660,22 @@ def distributed_env(env: Mapping[str, str] | None = None) -> dict[str, int]:
     return {"rank": rank, "world_size": world_size, "local_rank": local_rank}
 
 
-def setup_distributed_runtime() -> dict[str, Any]:
+def setup_distributed_runtime(stage_trace: StageTracer | None = None) -> dict[str, Any]:
     env = distributed_env()
     distributed = env["world_size"] > 1
+    if stage_trace is not None:
+        stage_trace.log("distributed_env", "after", **env, distributed=distributed)
+        stage_trace.log("cuda_available", "before")
     cuda_available = torch.cuda.is_available()
+    if stage_trace is not None:
+        stage_trace.log("cuda_available", "after", cuda_available=cuda_available)
     if cuda_available:
         device_index = env["local_rank"] if distributed else 0
+        if stage_trace is not None:
+            stage_trace.log("cuda_set_device", "before", device_index=device_index)
         torch.cuda.set_device(device_index)
+        if stage_trace is not None:
+            stage_trace.log("cuda_set_device", "after", device_index=device_index)
         device = torch.device("cuda", device_index)
         backend = "nccl"
     else:
@@ -553,7 +685,11 @@ def setup_distributed_runtime() -> dict[str, Any]:
         if not torch.distributed.is_available():
             raise RuntimeError("torch.distributed is required for WORLD_SIZE > 1")
         if not torch.distributed.is_initialized():
+            if stage_trace is not None:
+                stage_trace.log("distributed_init_process_group", "before", backend=backend)
             torch.distributed.init_process_group(backend=backend, init_method="env://")
+            if stage_trace is not None:
+                stage_trace.log("distributed_init_process_group", "after", backend=backend)
     return {**env, "distributed": distributed, "device": device, "backend": backend}
 
 
@@ -3049,49 +3185,98 @@ def main() -> None:
         action="store_true",
         help="Load data/model/artifacts, write manifest and dry-run summary, then exit before training.",
     )
+    parser.add_argument(
+        "--stage-trace",
+        action="store_true",
+        help="Write per-rank A0 dry-run stage diagnostics under logs/a0_stage_trace.",
+    )
     parser.add_argument("--local-rank", "--local_rank", type=int, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.local_rank is not None and "LOCAL_RANK" not in os.environ:
         os.environ["LOCAL_RANK"] = str(args.local_rank)
 
     config = apply_cli_overrides(read_config(args.config), args)
-    runtime = setup_distributed_runtime()
+    run_group = os.environ.get("KIN_RUN_GROUP", timestamp_compact())
+    output_dir = resolve_output_dir(config, run_group)
+    stage_trace_on, stage_trace_reason = should_enable_a0_stage_trace(config, args)
+    stage_trace = StageTracer(enabled=stage_trace_on, env=distributed_env(), reason=stage_trace_reason)
+    stage_trace.log(
+        "main_entry",
+        "after_config",
+        config=str(args.config),
+        dry_run=bool(args.dry_run),
+        output_dir=str(output_dir),
+    )
+    with stage_trace.span("distributed_runtime_setup"):
+        runtime = setup_distributed_runtime(stage_trace)
     try:
+        stage_trace.update_runtime(runtime)
+        stage_trace.log(
+            "distributed_runtime_setup",
+            "details",
+            backend=str(runtime.get("backend")),
+            device=str(runtime.get("device")),
+            distributed=bool(runtime.get("distributed")),
+        )
         is_main = is_main_process(runtime)
         rank = int(runtime["rank"])
         world_size = int(runtime["world_size"])
-        run_group = os.environ.get("KIN_RUN_GROUP", timestamp_compact())
-        output_dir = resolve_output_dir(config, run_group)
-        validate_runtime(config, output_dir, runtime)
+        with stage_trace.span("validate_runtime", output_dir=str(output_dir)):
+            validate_runtime(config, output_dir, runtime)
         if is_main:
             output_dir.mkdir(parents=True, exist_ok=True)
             (output_dir / "logs").mkdir(parents=True, exist_ok=True)
-        distributed_barrier(runtime)
+        stage_trace.attach(output_dir)
+        with stage_trace.span("post_output_dir_barrier"):
+            distributed_barrier(runtime)
 
         seed = int(config["training"]["seed"])
-        set_seed(seed)
+        with stage_trace.span("set_seed", seed=seed):
+            set_seed(seed)
         device = runtime["device"]
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-        skeleton_feature_lookup = build_skeleton_ae_feature_lookup(config, device)
+        skeleton_feature_lookup = build_skeleton_ae_feature_lookup(config, device, stage_trace)
         data_root = Path(config["input_data"].get("data_root", config["input_data"].get("robot_motion_dir", ".")))
-        rows, skipped = rows_from_index(config, data_root)
-        split_rows(rows, float(config["split"]["validation_ratio"]), str(config["split"]["hash_salt"]))
+        with stage_trace.span("rows_from_index", data_root=str(data_root)):
+            rows, skipped = rows_from_index(config, data_root)
+        stage_trace.log("rows_from_index", "details", row_count=len(rows), skipped_count=len(skipped))
+        with stage_trace.span("deterministic_split", row_count=len(rows)):
+            split_rows(rows, float(config["split"]["validation_ratio"]), str(config["split"]["hash_salt"]))
         if skeleton_feature_lookup is not None:
-            skeleton_feature_lookup.validate_and_annotate_rows(rows)
+            with stage_trace.span("skeleton_ae_row_mapping", row_count=len(rows)):
+                skeleton_feature_lookup.validate_and_annotate_rows(rows)
+            stage_trace.log(
+                "skeleton_ae_row_mapping",
+                "details",
+                **skeleton_feature_lookup.mapping_report,
+            )
             if is_main:
-                skeleton_feature_lookup.write_cache(output_dir)
-        train_dataset = KinWindowDataset(rows, "train", config, skeleton_feature_lookup)
-        validation_dataset = KinWindowDataset(rows, "validation", config, skeleton_feature_lookup)
+                with stage_trace.span("skeleton_ae_cache_write", output_dir=str(output_dir)):
+                    skeleton_feature_lookup.write_cache(output_dir)
+        with stage_trace.span("train_dataset_build"):
+            train_dataset = KinWindowDataset(rows, "train", config, skeleton_feature_lookup)
+        with stage_trace.span("validation_dataset_build"):
+            validation_dataset = KinWindowDataset(rows, "validation", config, skeleton_feature_lookup)
         stats_load_device = torch.device("cpu") if is_skeleton_ae_enabled(config) else device
-        stats = compute_or_load_stats(output_dir, train_dataset, config, stats_load_device, runtime)
+        with stage_trace.span("normalization_stats_motion_z", stats_load_device=str(stats_load_device)):
+            stats = compute_or_load_stats(output_dir, train_dataset, config, stats_load_device, runtime)
 
         feature_cfg = config["features"]
         window = int(feature_cfg["future_window_frames"])
         motion_dim = int(stats["motion_mean"].numel())
         skeleton_dim = skeleton_feature_dim(stats, config)
         target_dim = int(stats["target_mean"].numel())
+        stage_trace.log(
+            "normalization_stats_motion_z",
+            "details",
+            motion_dim=motion_dim,
+            skeleton_dim=skeleton_dim,
+            target_dim=target_dim,
+            skeleton_mean_key=skeleton_normalization_keys(config)[0],
+            skeleton_std_key=skeleton_normalization_keys(config)[1],
+        )
         root_pose_dim = root_pose_target_dim(config, window)
         command_dim = target_command_dim(target_dim, window, config)
         if command_dim <= 0 or command_dim % (window * 2) != 0:
@@ -3099,23 +3284,6 @@ def main() -> None:
                 f"target_dim={target_dim} is incompatible with window={window} and root pose target"
             )
         joint_dim = command_dim // (window * 2)
-        raw_model = make_model(motion_dim, skeleton_dim, target_dim, config).to(device)
-        if runtime["distributed"]:
-            model: nn.Module = nn.parallel.DistributedDataParallel(
-                raw_model,
-                device_ids=[int(runtime["local_rank"])] if device.type == "cuda" else None,
-            )
-        else:
-            model = raw_model
-        if stats_load_device != device:
-            stats = {key: value.to(device) for key, value in stats.items()}
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=float(config["training"]["learning_rate"]),
-            weight_decay=float(config["training"]["weight_decay"]),
-        )
-        optimizer_parameter_names = trainable_parameter_names(raw_model)
-
         train_sampler = (
             DistributedSampler(
                 train_dataset,
@@ -3138,25 +3306,66 @@ def main() -> None:
             if runtime["distributed"]
             else None
         )
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=1,
-            shuffle=train_sampler is None,
-            sampler=train_sampler,
-            num_workers=int(config["training"]["num_workers"]),
-            collate_fn=collate_chunks,
-            pin_memory=True,
-            persistent_workers=int(config["training"]["num_workers"]) > 0,
+        with stage_trace.span("train_loader_build"):
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=1,
+                shuffle=train_sampler is None,
+                sampler=train_sampler,
+                num_workers=int(config["training"]["num_workers"]),
+                collate_fn=collate_chunks,
+                pin_memory=True,
+                persistent_workers=int(config["training"]["num_workers"]) > 0,
+            )
+        with stage_trace.span("validation_loader_build"):
+            val_loader = DataLoader(
+                validation_dataset,
+                batch_size=1,
+                shuffle=False,
+                sampler=val_sampler,
+                num_workers=max(0, int(config["training"]["num_workers"]) // 2),
+                collate_fn=collate_chunks,
+                pin_memory=True,
+            )
+        diagnostic_batch = None
+        if stage_trace.enabled:
+            with stage_trace.span("first_batch_collation", loader="validation"):
+                diagnostic_batch = next(iter(val_loader))
+            stage_trace.log(
+                "first_batch_collation",
+                "details",
+                motion_shape=list(diagnostic_batch[0].shape),
+                skeleton_shape=list(diagnostic_batch[1].shape),
+                target_shape=list(diagnostic_batch[2].shape),
+            )
+        with stage_trace.span("model_to_device", device=str(device), motion_dim=motion_dim, skeleton_dim=skeleton_dim):
+            raw_model = make_model(motion_dim, skeleton_dim, target_dim, config).to(device)
+        if runtime["distributed"]:
+            with stage_trace.span("ddp_wrap", backend=str(runtime["backend"]), device=str(device)):
+                model = nn.parallel.DistributedDataParallel(
+                    raw_model,
+                    device_ids=[int(runtime["local_rank"])] if device.type == "cuda" else None,
+                )
+        else:
+            model = raw_model
+        if stats_load_device != device:
+            with stage_trace.span("normalization_stats_to_device", device=str(device)):
+                stats = {key: value.to(device) for key, value in stats.items()}
+        if diagnostic_batch is not None:
+            with stage_trace.span("first_forward", device=str(device)):
+                motion, skeleton, target = diagnostic_batch
+                motion = motion.to(device, non_blocking=True)
+                skeleton = skeleton.to(device, non_blocking=True)
+                target = target.to(device, non_blocking=True)
+                motion_n, skeleton_n, _target_n = normalize_batch(motion, skeleton, target, stats, config)
+                pred_n = model(motion_n, skeleton_n)
+            stage_trace.log("first_forward", "details", output_shape=list(pred_n.shape), output_device=str(pred_n.device))
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=float(config["training"]["learning_rate"]),
+            weight_decay=float(config["training"]["weight_decay"]),
         )
-        val_loader = DataLoader(
-            validation_dataset,
-            batch_size=1,
-            shuffle=False,
-            sampler=val_sampler,
-            num_workers=max(0, int(config["training"]["num_workers"]) // 2),
-            collate_fn=collate_chunks,
-            pin_memory=True,
-        )
+        optimizer_parameter_names = trainable_parameter_names(raw_model)
         loss_curve = output_dir / "loss_curve.csv"
         if is_main:
             write_loss_header(loss_curve)
@@ -3176,21 +3385,25 @@ def main() -> None:
                 skeleton_feature_lookup,
                 runtime,
             )
-        distributed_barrier(runtime)
+        with stage_trace.span("manifest_barrier"):
+            distributed_barrier(runtime)
         if not is_main:
-            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+            with stage_trace.span("manifest_load_non_main"):
+                manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
         if args.dry_run:
-            val_metrics = validate(
-                model,
-                val_loader,
-                stats,
-                device,
-                config,
-                command_dim,
-                joint_dim,
-                root_pose_dim,
-            )
-            val_metrics = average_metric_dict(val_metrics, runtime, device)
+            with stage_trace.span("dry_run_validate"):
+                val_metrics = validate(
+                    model,
+                    val_loader,
+                    stats,
+                    device,
+                    config,
+                    command_dim,
+                    joint_dim,
+                    root_pose_dim,
+                )
+            with stage_trace.span("dry_run_metric_all_reduce"):
+                val_metrics = average_metric_dict(val_metrics, runtime, device)
             if is_main:
                 summary = {
                     "event": "dry_run",
@@ -3214,7 +3427,8 @@ def main() -> None:
                     encoding="utf-8",
                 )
                 print(json.dumps(summary, sort_keys=True), flush=True)
-            distributed_barrier(runtime)
+            with stage_trace.span("dry_run_summary_barrier"):
+                distributed_barrier(runtime)
             return
         wandb_run = init_wandb(config, manifest, output_dir, run_group) if is_main else None
 

@@ -67,6 +67,28 @@ class A0FrozenAEConfigTests(unittest.TestCase):
                 ):
                     self.assertNotIn(token, text)
 
+    def test_a0_stage_trace_covers_requested_dry_run_boundaries(self) -> None:
+        text = (REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py").read_text(encoding="utf-8")
+        for token in (
+            "--stage-trace",
+            "distributed_runtime_setup",
+            "distributed_init_process_group",
+            "cuda_set_device",
+            "skeleton_ae_checkpoint_load",
+            "skeleton_ae_stats_load",
+            "skeleton_ae_registry_load",
+            "skeleton_ae_cpu_z_cache_build",
+            "normalization_stats_motion_z",
+            "skeleton_ae_row_mapping",
+            "first_batch_collation",
+            "model_to_device",
+            "ddp_wrap",
+            "first_forward",
+            "logs/a0_stage_trace",
+        ):
+            self.assertIn(token, text)
+        self.assertIn("expected torchrun WORLD_SIZE", text)
+
 
 @unittest.skipIf(torch is None, "torch is required for A0 frozen AE tests")
 class A0FrozenAEFeatureTests(unittest.TestCase):
