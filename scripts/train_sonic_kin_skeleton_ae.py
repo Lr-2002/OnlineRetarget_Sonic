@@ -469,6 +469,16 @@ def _load_skeleton_ae_registry(
     return rows_by_id, lookup_index
 
 
+def skeleton_ae_registry_cache_device(cfg: Mapping[str, Any]) -> torch.device:
+    requested = str(cfg.get("cache_device", "cpu") or "cpu").strip().lower()
+    if requested != "cpu":
+        raise ValueError(
+            "A0 frozen Skeleton AE registry cache must be built on CPU; "
+            f"got skeleton_ae.cache_device={requested!r}"
+        )
+    return torch.device("cpu")
+
+
 def build_skeleton_ae_feature_lookup(
     config: Mapping[str, Any],
     device: torch.device,
@@ -483,16 +493,17 @@ def build_skeleton_ae_feature_lookup(
     stats_path = Path(str(cfg["normalization"]))
     registry_csv = Path(str(cfg["registry_csv"]))
     rows_by_id, lookup_index = _load_skeleton_ae_registry(registry_csv)
+    cache_device = skeleton_ae_registry_cache_device(cfg)
     ae_model, checkpoint = load_skeleton_geometry_ae_checkpoint(
         checkpoint_path,
-        device=device,
+        device=cache_device,
         freeze_encoder=True,
     )
-    ae_stats = load_skeleton_geometry_ae_stats(stats_path, device=device)
+    ae_stats = load_skeleton_geometry_ae_stats(stats_path, device=cache_device)
     embeddings_by_id: dict[str, np.ndarray] = {}
-    with torch.no_grad():
+    with torch.inference_mode():
         for encoder_id, row in rows_by_id.items():
-            x = torch.from_numpy(row["geometry"]).to(device=device, dtype=torch.float32).unsqueeze(0)
+            x = torch.from_numpy(row["geometry"]).to(device=cache_device, dtype=torch.float32).unsqueeze(0)
             x_norm = (x - ae_stats["skeleton_mean"]) / ae_stats["skeleton_std"]
             z = ae_model.encode(x_norm).squeeze(0).detach().cpu().numpy().astype(np.float32, copy=False)
             if z.shape != (SKELETON_GEOMETRY_LATENT_DIM,):
@@ -507,6 +518,8 @@ def build_skeleton_ae_feature_lookup(
         "x_skel_dim": SKELETON_GEOMETRY_DIM,
         "z_skel_dim": SKELETON_GEOMETRY_LATENT_DIM,
         "skeleton_encoder_frozen": True,
+        "embedding_cache_device": str(cache_device),
+        "training_device": str(device),
     }
     return SkeletonAEFeatureLookup(
         embeddings_by_id=embeddings_by_id,
@@ -1482,6 +1495,7 @@ def compute_or_load_stats(
         num_workers=int(config["training"]["num_workers"]),
         collate_fn=collate_chunks,
     )
+    stats_device = torch.device("cpu") if is_skeleton_ae_enabled(config) else device
     motion_stats = None
     skeleton_stats = None
     target_stats = None
@@ -1492,13 +1506,13 @@ def compute_or_load_stats(
         if motion.shape[0] > frames_per_chunk:
             select = torch.randperm(motion.shape[0])[:frames_per_chunk]
             motion, skeleton, target = motion[select], skeleton[select], target[select]
-        motion = motion.to(device)
-        skeleton = skeleton.to(device)
-        target = target.to(device)
+        motion = motion.to(stats_device)
+        skeleton = skeleton.to(stats_device)
+        target = target.to(stats_device)
         if motion_stats is None:
-            motion_stats = RunningStats(motion.shape[-1], device)
-            skeleton_stats = RunningStats(skeleton.shape[-1], device)
-            target_stats = RunningStats(target.shape[-1], device)
+            motion_stats = RunningStats(motion.shape[-1], stats_device)
+            skeleton_stats = RunningStats(skeleton.shape[-1], stats_device)
+            target_stats = RunningStats(target.shape[-1], stats_device)
         motion_stats.update(motion)
         skeleton_stats.update(skeleton)
         target_stats.update(target)
@@ -1523,7 +1537,7 @@ def compute_or_load_stats(
     torch.save({key: value.cpu() for key, value in payload.items()}, stats_path)
     if runtime is not None and runtime.get("distributed"):
         distributed_barrier(runtime)
-    return payload
+    return {key: value.to(device) for key, value in payload.items()}
 
 
 def skeleton_normalization_keys(config: Mapping[str, Any]) -> tuple[str, str]:
@@ -3070,7 +3084,8 @@ def main() -> None:
                 skeleton_feature_lookup.write_cache(output_dir)
         train_dataset = KinWindowDataset(rows, "train", config, skeleton_feature_lookup)
         validation_dataset = KinWindowDataset(rows, "validation", config, skeleton_feature_lookup)
-        stats = compute_or_load_stats(output_dir, train_dataset, config, device, runtime)
+        stats_load_device = torch.device("cpu") if is_skeleton_ae_enabled(config) else device
+        stats = compute_or_load_stats(output_dir, train_dataset, config, stats_load_device, runtime)
 
         feature_cfg = config["features"]
         window = int(feature_cfg["future_window_frames"])
@@ -3092,6 +3107,8 @@ def main() -> None:
             )
         else:
             model = raw_model
+        if stats_load_device != device:
+            stats = {key: value.to(device) for key, value in stats.items()}
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=float(config["training"]["learning_rate"]),

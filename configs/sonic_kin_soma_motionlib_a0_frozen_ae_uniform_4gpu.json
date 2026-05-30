@@ -22,6 +22,7 @@
     "normalization": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/skeleton_geometry_ae_runs/lr177_skeleton_geometry_ae_20260530T0602Z/all_skeletons/stats/skeleton_geometry_normalization.pt",
     "registry_csv": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/skeleton_ae_registry/bones_sonic_all_skeleton_ae_registry_v0/skeleton_ae_registry.csv",
     "freeze_encoder": true,
+    "cache_device": "cpu",
     "expected_architecture": [104, 256, 128, 64, 128, 256, 104],
     "x_skel_dim": 104,
     "z_skel_dim": 64

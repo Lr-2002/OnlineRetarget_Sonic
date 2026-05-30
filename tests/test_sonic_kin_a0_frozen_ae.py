@@ -47,6 +47,7 @@ class A0FrozenAEConfigTests(unittest.TestCase):
                 self.assertEqual(config["skeleton_ae"]["expected_architecture"], SKELETON_GEOMETRY_AE_ARCHITECTURE)
                 self.assertEqual(config["skeleton_ae"]["x_skel_dim"], 104)
                 self.assertEqual(config["skeleton_ae"]["z_skel_dim"], 64)
+                self.assertEqual(config["skeleton_ae"]["cache_device"], "cpu")
                 self.assertEqual(config["features"]["expected_dims"]["motion_token"], 840)
                 self.assertEqual(config["features"]["expected_dims"]["model_input"], 904)
                 self.assertEqual(config["features"]["expected_dims"]["target"], 670)
@@ -104,6 +105,30 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
             self.assertEqual(tuple(embedding.shape), (64,))
             self.assertEqual(rows[0]["skeleton_ae_encoder_id"], "A001")
             self.assertFalse(any("encoder" in name for name in parameter_names))
+            self.assertEqual(lookup.artifact_info["embedding_cache_device"], "cpu")
+
+    def test_feature_lookup_keeps_registry_encoding_off_training_cuda_device(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checkpoint, stats, registry = _write_ae_artifacts(root)
+            config = _minimal_a0_config(root, checkpoint, stats, registry)
+            config["skeleton_ae"]["cache_device"] = "cpu"
+
+            lookup = sonic_train.build_skeleton_ae_feature_lookup(config, torch.device("cuda", 0))
+            assert lookup is not None
+
+            self.assertEqual(lookup.artifact_info["embedding_cache_device"], "cpu")
+            self.assertEqual(lookup.artifact_info["training_device"], "cuda:0")
+
+    def test_feature_lookup_rejects_cuda_registry_cache_device(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checkpoint, stats, registry = _write_ae_artifacts(root)
+            config = _minimal_a0_config(root, checkpoint, stats, registry)
+            config["skeleton_ae"]["cache_device"] = "cuda"
+
+            with self.assertRaisesRegex(ValueError, "registry cache must be built on CPU"):
+                sonic_train.build_skeleton_ae_feature_lookup(config, torch.device("cpu"))
 
     def test_a0_dry_run_writes_manifest_dims_and_freeze_proof(self) -> None:
         try:
@@ -230,6 +255,7 @@ def _minimal_a0_config(root: Path, checkpoint: Path, stats: Path, registry: Path
             "normalization": str(stats),
             "registry_csv": str(registry),
             "freeze_encoder": True,
+            "cache_device": "cpu",
         },
         "runtime": {
             "write_root": str(root / "runs"),
@@ -294,6 +320,7 @@ def _write_dry_run_config(root: Path, checkpoint: Path, stats: Path, registry: P
             "normalization": str(stats),
             "registry_csv": str(registry),
             "freeze_encoder": True,
+            "cache_device": "cpu",
         },
         "output_dir": str(root / "runs" / "{run_group}"),
         "validation_command": "",
