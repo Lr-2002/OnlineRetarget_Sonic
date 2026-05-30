@@ -72,6 +72,7 @@ class A0FrozenAEConfigTests(unittest.TestCase):
         text = (REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py").read_text(encoding="utf-8")
         for token in (
             "--stage-trace",
+            "--index-only",
             "distributed_runtime_setup",
             "distributed_init_process_group",
             "cuda_set_device",
@@ -82,6 +83,19 @@ class A0FrozenAEConfigTests(unittest.TestCase):
             "normalization_stats_motion_z",
             "skeleton_ae_row_mapping",
             "first_batch_collation",
+            "index_only_preflight",
+            "index_only_summary.json",
+            "rows_from_index_cache",
+            "rows_from_index_cache_path",
+            "cache/rows_from_index",
+            "rows_from_index_stat",
+            "rows_from_index_glob",
+            "rows_from_index_progress",
+            "rows_from_index_read",
+            "rows_from_index_parse",
+            "rows_from_index_filter",
+            "rows_from_index_sample",
+            "rows_from_index_row_count",
             "model_to_device",
             "model_to_device_cuda_synchronize",
             "model_init_seed",
@@ -247,6 +261,63 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
             self.assertIn("skeleton_embedding_mean", norm)
             self.assertIn("skeleton_embedding_std", norm)
             self.assertTrue((output_dir / "cache" / "skeleton_embedding_cache.pt").exists())
+
+    def test_index_only_preflight_writes_rows_cache_and_trace(self) -> None:
+        try:
+            import joblib  # noqa: F401
+        except ModuleNotFoundError:
+            self.skipTest("joblib is required for soma_motionlib index-only fixture")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checkpoint, stats, registry = _write_ae_artifacts(root)
+            config_path = _write_dry_run_config(root, checkpoint, stats, registry)
+            env = dict(os.environ)
+            env["KIN_RUN_GROUP"] = "a0_index_only_test"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py"),
+                    "--config",
+                    str(config_path),
+                    "--index-only",
+                    "--stage-trace",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            output_dir = root / "runs" / "a0_index_only_test"
+            summary = json.loads((output_dir / "index_only_summary.json").read_text(encoding="utf-8"))
+            cache_path = output_dir / "cache" / "rows_from_index" / "rows_from_index_cache.json"
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            trace_text = "\n".join(
+                path.read_text(encoding="utf-8")
+                for path in (output_dir / "logs" / "a0_stage_trace").glob("*.jsonl")
+            )
+
+            self.assertEqual(summary["event"], "index_only_preflight")
+            self.assertEqual(summary["row_count"], 3)
+            self.assertEqual(summary["skipped_count"], 0)
+            self.assertEqual(summary["rows_cache"], str(cache_path))
+            self.assertEqual(cache["row_count"], 3)
+            self.assertEqual(cache["skipped_count"], 0)
+            self.assertFalse((output_dir / "manifest.json").exists())
+            for token in (
+                "rows_from_index_stat",
+                "rows_from_index_glob",
+                "rows_from_index_read",
+                "rows_from_index_parse",
+                "rows_from_index_filter",
+                "rows_from_index_sample",
+                "rows_from_index_row_count",
+            ):
+                self.assertIn(token, trace_text)
 
 
 def _write_ae_artifacts(root: Path, *, duplicate_source: bool = False) -> tuple[Path, Path, Path]:

@@ -340,6 +340,8 @@ def should_enable_a0_stage_trace(config: Mapping[str, Any], args: argparse.Names
         return bool(diagnostics["a0_stage_trace"]), "config.diagnostics.a0_stage_trace"
     if bool(getattr(args, "stage_trace", False)):
         return True, "--stage-trace"
+    if bool(getattr(args, "index_only", False)):
+        return True, "--index-only"
     return bool(args.dry_run and is_skeleton_ae_enabled(config)), "a0_dry_run_default"
 
 
@@ -1814,7 +1816,18 @@ def rows_from_csv_index(config: dict[str, Any], data_root: Path) -> tuple[list[d
     return rows, skipped
 
 
-def rows_from_soma_motionlib_pair(config: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
+ROWS_FROM_INDEX_CACHE_SUBDIR = "cache/rows_from_index"
+
+
+def rows_from_index_cache_path(output_dir: Path) -> Path:
+    return output_dir / ROWS_FROM_INDEX_CACHE_SUBDIR / "rows_from_index_cache.json"
+
+
+def rows_from_soma_motionlib_pair(
+    config: dict[str, Any],
+    *,
+    stage_trace: StageTracer | None = None,
+) -> tuple[list[dict[str, Any]], int]:
     input_cfg = config["input_data"]
     robot_dir = Path(input_cfg["robot_motion_dir"])
     soma_dir = Path(input_cfg["soma_motion_dir"])
@@ -1822,16 +1835,82 @@ def rows_from_soma_motionlib_pair(config: dict[str, Any]) -> tuple[list[dict[str
     max_duration_delta = float(input_cfg.get("max_duration_delta_sec", 0.05))
     rows: list[dict[str, Any]] = []
     skipped = 0
-    for robot_path in sorted(robot_dir.glob("*.pkl")):
+    missing_soma = 0
+    invalid_rows = 0
+    duration_filtered = 0
+    accepted_samples: list[dict[str, Any]] = []
+    if stage_trace:
+        with stage_trace.span(
+            "rows_from_index_stat",
+            robot_motion_dir=str(robot_dir),
+            soma_motion_dir=str(soma_dir),
+        ):
+            robot_dir_exists = robot_dir.exists()
+            soma_dir_exists = soma_dir.exists()
+        stage_trace.log(
+            "rows_from_index_stat",
+            "details",
+            robot_motion_dir=str(robot_dir),
+            robot_motion_dir_exists=robot_dir_exists,
+            soma_motion_dir=str(soma_dir),
+            soma_motion_dir_exists=soma_dir_exists,
+        )
+    with (
+        stage_trace.span(
+            "rows_from_index_glob",
+            robot_motion_dir=str(robot_dir),
+            soma_motion_dir=str(soma_dir),
+            max_clips=max_clips,
+            max_duration_delta_sec=max_duration_delta,
+        )
+        if stage_trace
+        else nullcontext()
+    ):
+        robot_paths = sorted(robot_dir.glob("*.pkl"))
+    if stage_trace:
+        stage_trace.log(
+            "rows_from_index_glob",
+            "details",
+            robot_path_count=len(robot_paths),
+            robot_motion_dir=str(robot_dir),
+            soma_motion_dir=str(soma_dir),
+            max_clips=max_clips,
+            max_duration_delta_sec=max_duration_delta,
+        )
+    for robot_path_index, robot_path in enumerate(robot_paths, start=1):
         if robot_path.name == "metadata.pkl":
             continue
         soma_path = soma_dir / robot_path.name
         if not soma_path.exists():
+            missing_soma += 1
             skipped += 1
             continue
         try:
-            _, robot = _single_motionlib_entry(robot_path)
-            _, soma = _single_motionlib_entry(soma_path)
+            if stage_trace and (robot_path_index == 1 or robot_path_index % 100 == 0):
+                stage_trace.log(
+                    "rows_from_index_progress",
+                    "details",
+                    robot_path_index=robot_path_index,
+                    robot_path_count=len(robot_paths),
+                    robot_path=str(robot_path),
+                    soma_path=str(soma_path),
+                    accepted_count=len(rows),
+                    skipped_count=skipped,
+                    missing_soma_count=missing_soma,
+                    invalid_rows_count=invalid_rows,
+                    duration_filtered_count=duration_filtered,
+                )
+            with (
+                stage_trace.span(
+                    "rows_from_index_read",
+                    robot_path=str(robot_path),
+                    soma_path=str(soma_path),
+                )
+                if stage_trace and robot_path_index <= 3
+                else nullcontext()
+            ):
+                _, robot = _single_motionlib_entry(robot_path)
+                _, soma = _single_motionlib_entry(soma_path)
             _require_motionlib_keys(robot, REQUIRED_ROBOT_MOTIONLIB_KEYS, robot_path)
             _require_motionlib_keys(soma, REQUIRED_SOMA_MOTIONLIB_KEYS, soma_path)
             robot_frames = int(np.asarray(robot["dof"]).shape[0])
@@ -1843,10 +1922,25 @@ def rows_from_soma_motionlib_pair(config: dict[str, Any]) -> tuple[list[dict[str
                 continue
             source_duration = soma_frames / source_fps
             target_duration = robot_frames / target_fps
+            if stage_trace and robot_path_index <= 3:
+                stage_trace.log(
+                    "rows_from_index_parse",
+                    "details",
+                    robot_path=str(robot_path),
+                    soma_path=str(soma_path),
+                    robot_frames=robot_frames,
+                    soma_frames=soma_frames,
+                    target_fps=target_fps,
+                    source_fps=source_fps,
+                    source_duration_sec=source_duration,
+                    target_duration_sec=target_duration,
+                )
             if target_fps >= source_fps or abs(source_duration - target_duration) > max_duration_delta:
+                duration_filtered += 1
                 skipped += 1
                 continue
         except Exception:
+            invalid_rows += 1
             skipped += 1
             continue
 
@@ -1869,8 +1963,40 @@ def rows_from_soma_motionlib_pair(config: dict[str, Any]) -> tuple[list[dict[str
                 "category": "",
             }
         )
+        if len(accepted_samples) < 5:
+            accepted_samples.append(
+                {
+                    "robot_path": str(robot_path),
+                    "soma_path": str(soma_path),
+                    "frame_count": robot_frames,
+                    "source_frame_count": soma_frames,
+                    "source_fps": source_fps,
+                    "target_fps": target_fps,
+                }
+            )
         if max_clips > 0 and len(rows) >= max_clips:
             break
+    if stage_trace:
+        stage_trace.log(
+            "rows_from_index_row_count",
+            "details",
+            robot_path_count=len(robot_paths),
+            row_count=len(rows),
+            skipped_count=skipped,
+            missing_soma_count=missing_soma,
+            invalid_rows_count=invalid_rows,
+            duration_filtered_count=duration_filtered,
+            accepted_samples=accepted_samples,
+        )
+        stage_trace.log(
+            "rows_from_index_filter",
+            "details",
+            skipped_count=skipped,
+            missing_soma_count=missing_soma,
+            invalid_rows_count=invalid_rows,
+            duration_filtered_count=duration_filtered,
+        )
+        stage_trace.log("rows_from_index_sample", "details", accepted_samples=accepted_samples)
     return rows, skipped
 
 
@@ -1929,13 +2055,105 @@ def _optional_float(value: Any) -> float | None:
     return result
 
 
-def rows_from_index(config: dict[str, Any], data_root: Path) -> tuple[list[dict[str, Any]], int]:
+def rows_from_index(
+    config: dict[str, Any],
+    data_root: Path,
+    *,
+    stage_trace: StageTracer | None = None,
+    output_dir: Path | None = None,
+    runtime: Mapping[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    cache_path = rows_from_index_cache_path(output_dir) if output_dir is not None else None
+    use_cache = cache_path is not None
     if config["input_data"].get("format") == "soma_motionlib":
-        return rows_from_soma_motionlib_pair(config)
+        if use_cache and runtime is not None and runtime.get("distributed"):
+            if is_main_process(runtime):
+                rows, skipped = rows_from_soma_motionlib_pair(config, stage_trace=stage_trace)
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                payload = {
+                    "cache_version": 1,
+                    "created_at": utc_now(),
+                    "config": {
+                        "format": config["input_data"].get("format"),
+                        "robot_motion_dir": config["input_data"].get("robot_motion_dir"),
+                        "soma_motion_dir": config["input_data"].get("soma_motion_dir"),
+                        "data_root": str(data_root),
+                        "max_clips": int(config["input_data"].get("max_clips", 0)),
+                        "max_duration_delta_sec": float(config["input_data"].get("max_duration_delta_sec", 0.05)),
+                    },
+                    "rows": rows,
+                    "row_count": len(rows),
+                    "skipped_count": int(skipped),
+                }
+                cache_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+                if stage_trace:
+                    stage_trace.log(
+                        "rows_from_index_cache",
+                        "written",
+                        cache_path=str(cache_path),
+                        row_count=len(rows),
+                        skipped_count=int(skipped),
+                    )
+            distributed_barrier(runtime)
+            if not is_main_process(runtime):
+                if stage_trace:
+                    stage_trace.log("rows_from_index_cache", "before_read", cache_path=str(cache_path))
+                payload = json.loads(cache_path.read_text(encoding="utf-8"))
+                rows = payload["rows"]
+                skipped = int(payload["skipped_count"])
+                if stage_trace:
+                    stage_trace.log(
+                        "rows_from_index_cache",
+                        "read",
+                        cache_path=str(cache_path),
+                        row_count=len(rows),
+                        skipped_count=skipped,
+                    )
+            distributed_barrier(runtime)
+            return rows, skipped
+        rows, skipped = rows_from_soma_motionlib_pair(config, stage_trace=stage_trace)
+        if use_cache:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "cache_version": 1,
+                "created_at": utc_now(),
+                "config": {
+                    "format": config["input_data"].get("format"),
+                    "robot_motion_dir": config["input_data"].get("robot_motion_dir"),
+                    "soma_motion_dir": config["input_data"].get("soma_motion_dir"),
+                    "data_root": str(data_root),
+                    "max_clips": int(config["input_data"].get("max_clips", 0)),
+                    "max_duration_delta_sec": float(config["input_data"].get("max_duration_delta_sec", 0.05)),
+                },
+                "rows": rows,
+                "row_count": len(rows),
+                "skipped_count": int(skipped),
+            }
+            cache_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+            if stage_trace:
+                stage_trace.log(
+                    "rows_from_index_cache",
+                    "written",
+                    cache_path=str(cache_path),
+                    row_count=len(rows),
+                    skipped_count=int(skipped),
+                )
+        return rows, skipped
     indexing = config["input_data"].get("indexing", {})
     if indexing.get("index_csv"):
-        return rows_from_csv_index(config, data_root)
-    return rows_from_jsonl_index(config, data_root)
+        rows, skipped = rows_from_csv_index(config, data_root)
+    else:
+        rows, skipped = rows_from_jsonl_index(config, data_root)
+    if stage_trace:
+        stage_trace.log(
+            "rows_from_index_row_count",
+            "details",
+            row_count=len(rows),
+            skipped_count=int(skipped),
+            index_path=str(index_path_from_config(config)),
+            data_root=str(data_root),
+        )
+    return rows, skipped
 
 
 def stable_hash_int(text: str) -> int:
@@ -3674,6 +3892,7 @@ def validate_runtime(
     runtime: Mapping[str, Any] | None = None,
     *,
     check_data_artifacts: bool = True,
+    index_only: bool = False,
 ) -> None:
     write_root = Path(config["runtime"]["write_root"])
     if output_dir != write_root and write_root not in output_dir.parents:
@@ -3683,7 +3902,9 @@ def validate_runtime(
         if output_dir == forbidden_path or forbidden_path in output_dir.parents:
             raise ValueError(f"output_dir must not be under {forbidden_path}: {output_dir}")
     requested_device = str(config["runtime"].get("device", "cuda")).lower()
-    if requested_device == "cpu":
+    if index_only:
+        required_gpu_count = 0
+    elif requested_device == "cpu":
         required_gpu_count = 0
     elif not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
@@ -3765,6 +3986,11 @@ def main() -> None:
         help="Load data/model/artifacts, write manifest and dry-run summary, then exit before training.",
     )
     parser.add_argument(
+        "--index-only",
+        action="store_true",
+        help="Build rows_from_index on one CPU process, write index_only_summary.json, then exit before model/data-loader setup.",
+    )
+    parser.add_argument(
         "--stage-trace",
         action="store_true",
         help="Write per-rank A0 dry-run stage diagnostics under logs/a0_stage_trace.",
@@ -3784,8 +4010,59 @@ def main() -> None:
         "after_config",
         config=str(args.config),
         dry_run=bool(args.dry_run),
+        index_only=bool(args.index_only),
         output_dir=str(output_dir),
     )
+    if args.index_only:
+        index_runtime = {
+            "rank": 0,
+            "world_size": 1,
+            "local_rank": 0,
+            "distributed": False,
+            "device": torch.device("cpu"),
+            "backend": "none",
+        }
+        stage_trace.update_runtime(index_runtime)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "logs").mkdir(parents=True, exist_ok=True)
+        stage_trace.attach(output_dir)
+        with stage_trace.span("validate_runtime", output_dir=str(output_dir), index_only=True):
+            validate_runtime(config, output_dir, index_runtime, check_data_artifacts=True, index_only=True)
+        data_root = Path(config["input_data"].get("data_root", config["input_data"].get("robot_motion_dir", ".")))
+        with stage_trace.span(
+            "rows_from_index",
+            data_root=str(data_root),
+            index_path=str(index_path_from_config(config)),
+            index_only=True,
+        ):
+            rows, skipped = rows_from_index(
+                config,
+                data_root,
+                stage_trace=stage_trace,
+                output_dir=output_dir,
+                runtime=index_runtime,
+            )
+        summary = {
+            "event": "index_only_preflight",
+            "variant": config["variant"],
+            "config_path": str(args.config),
+            "output_dir": str(output_dir),
+            "data_root": str(data_root),
+            "index_path": str(index_path_from_config(config)),
+            "robot_motion_dir": config["input_data"].get("robot_motion_dir", ""),
+            "soma_motion_dir": config["input_data"].get("soma_motion_dir", ""),
+            "rows_cache": str(rows_from_index_cache_path(output_dir)),
+            "row_count": len(rows),
+            "skipped_count": int(skipped),
+            "sample_rows": rows[:5],
+        }
+        (output_dir / "index_only_summary.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        stage_trace.log("index_only_preflight", "details", **summary)
+        print(json.dumps(summary, sort_keys=True), flush=True)
+        return
     with stage_trace.span("distributed_runtime_setup"):
         runtime = setup_distributed_runtime(stage_trace)
     try:
@@ -3875,8 +4152,18 @@ def main() -> None:
 
         skeleton_feature_lookup = build_skeleton_ae_feature_lookup(config, device, stage_trace)
         data_root = Path(config["input_data"].get("data_root", config["input_data"].get("robot_motion_dir", ".")))
-        with stage_trace.span("rows_from_index", data_root=str(data_root)):
-            rows, skipped = rows_from_index(config, data_root)
+        with stage_trace.span(
+            "rows_from_index",
+            data_root=str(data_root),
+            index_path=str(index_path_from_config(config)),
+        ):
+            rows, skipped = rows_from_index(
+                config,
+                data_root,
+                stage_trace=stage_trace,
+                output_dir=output_dir,
+                runtime=runtime,
+            )
         stage_trace.log("rows_from_index", "details", row_count=len(rows), skipped_count=int(skipped))
         with stage_trace.span("deterministic_split", row_count=len(rows)):
             split_rows(rows, float(config["split"]["validation_ratio"]), str(config["split"]["hash_salt"]))
