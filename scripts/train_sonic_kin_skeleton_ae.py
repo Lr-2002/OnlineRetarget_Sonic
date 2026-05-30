@@ -17,6 +17,7 @@ import copy
 import csv
 import datetime as dt
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -31,7 +32,7 @@ import time
 from collections import deque
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -356,6 +357,16 @@ def should_run_a0_ddp_probe(
     return bool(args.dry_run and stage_trace.enabled and is_skeleton_ae_enabled(config)), "a0_stage_trace_default"
 
 
+def should_run_a0_ddp_probe_only(config: Mapping[str, Any]) -> tuple[bool, str]:
+    env_enabled = env_flag_enabled(os.environ.get("A0_DDP_PROBE_ONLY"))
+    if env_enabled is not None:
+        return env_enabled, "A0_DDP_PROBE_ONLY"
+    diagnostics = config.get("diagnostics", {})
+    if isinstance(diagnostics, Mapping) and "a0_ddp_probe_only" in diagnostics:
+        return bool(diagnostics["a0_ddp_probe_only"]), "config.diagnostics.a0_ddp_probe_only"
+    return False, "default"
+
+
 def a0_ddp_broadcast_buffers(config: Mapping[str, Any]) -> tuple[bool, str]:
     env_enabled = env_flag_enabled(os.environ.get("A0_DDP_BROADCAST_BUFFERS"))
     if env_enabled is not None:
@@ -445,45 +456,238 @@ def ddp_constructor_kwargs(
     return kwargs, serializable
 
 
+def _diagnostics_mapping(config: Mapping[str, Any]) -> Mapping[str, Any]:
+    diagnostics = config.get("diagnostics", {})
+    return diagnostics if isinstance(diagnostics, Mapping) else {}
+
+
+def _optional_bool_control(
+    config: Mapping[str, Any],
+    *,
+    env_name: str,
+    diagnostics_key: str,
+) -> tuple[bool | None, str]:
+    env_enabled = env_flag_enabled(os.environ.get(env_name))
+    if env_enabled is not None:
+        return env_enabled, env_name
+    diagnostics = _diagnostics_mapping(config)
+    if diagnostics_key in diagnostics:
+        return bool(diagnostics[diagnostics_key]), f"config.diagnostics.{diagnostics_key}"
+    return None, "unset"
+
+
+def _optional_float_control(
+    config: Mapping[str, Any],
+    *,
+    env_name: str,
+    diagnostics_key: str,
+) -> tuple[float | None, str]:
+    raw = os.environ.get(env_name)
+    if raw not in (None, ""):
+        return float(raw), env_name
+    diagnostics = _diagnostics_mapping(config)
+    value = diagnostics.get(diagnostics_key)
+    if value not in (None, ""):
+        return float(value), f"config.diagnostics.{diagnostics_key}"
+    return None, "unset"
+
+
+def _supported_ddp_kwargs() -> set[str]:
+    try:
+        return set(inspect.signature(nn.parallel.DistributedDataParallel).parameters)
+    except (TypeError, ValueError):
+        return set()
+
+
+def ddp_probe_constructor_kwargs(
+    runtime: Mapping[str, Any],
+    device: torch.device,
+    config: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    kwargs, serializable = ddp_constructor_kwargs(runtime, device, config)
+    optional_sources: dict[str, str] = {}
+
+    bucket_cap_mb, bucket_source = _optional_float_control(
+        config,
+        env_name="A0_DDP_PROBE_BUCKET_CAP_MB",
+        diagnostics_key="a0_ddp_probe_bucket_cap_mb",
+    )
+    if bucket_cap_mb is not None:
+        bucket_value = int(bucket_cap_mb) if bucket_cap_mb.is_integer() else bucket_cap_mb
+        kwargs["bucket_cap_mb"] = bucket_value
+        serializable["bucket_cap_mb"] = bucket_value
+        optional_sources["bucket_cap_mb"] = bucket_source
+
+    for kwarg, env_name, diagnostics_key in (
+        ("init_sync", "A0_DDP_PROBE_INIT_SYNC", "a0_ddp_probe_init_sync"),
+        ("static_graph", "A0_DDP_PROBE_STATIC_GRAPH", "a0_ddp_probe_static_graph"),
+        (
+            "find_unused_parameters",
+            "A0_DDP_PROBE_FIND_UNUSED_PARAMETERS",
+            "a0_ddp_probe_find_unused_parameters",
+        ),
+    ):
+        value, source = _optional_bool_control(config, env_name=env_name, diagnostics_key=diagnostics_key)
+        if value is not None:
+            kwargs[kwarg] = value
+            serializable[kwarg] = value
+            optional_sources[kwarg] = source
+
+    supported = _supported_ddp_kwargs()
+    unsupported = []
+    if supported:
+        for key in list(kwargs):
+            if key not in supported:
+                unsupported.append(key)
+                kwargs.pop(key)
+                serializable.pop(key, None)
+                optional_sources.pop(key, None)
+    if optional_sources:
+        serializable["optional_sources"] = optional_sources
+    if unsupported:
+        serializable["unsupported_probe_kwargs"] = unsupported
+    return kwargs, serializable
+
+
+def a0_probe_expected_dims(config: Mapping[str, Any]) -> tuple[int, int, int]:
+    expected_dims = config.get("features", {}).get("expected_dims", {})
+    if not isinstance(expected_dims, Mapping):
+        raise ValueError("features.expected_dims is required for A0 DDP probe-only mode")
+    motion_dim = int(expected_dims["motion_token"])
+    skeleton_dim = int(expected_dims["z_skel"])
+    target_dim = int(expected_dims["target"])
+    return motion_dim, skeleton_dim, target_dim
+
+
+def run_ddp_probe_model(
+    *,
+    stage_name: str,
+    model: nn.Module,
+    input_factory: Callable[[torch.device], tuple[torch.Tensor, ...]],
+    stage_trace: StageTracer,
+    runtime: Mapping[str, Any],
+    device: torch.device,
+    config: Mapping[str, Any],
+) -> None:
+    with stage_trace.span(f"{stage_name}_to_device", module_type=type(model).__name__, device=str(device)):
+        model = model.to(device)
+    if device.type == "cuda":
+        with stage_trace.span(f"{stage_name}_cuda_synchronize_pre_ddp", device=str(device)):
+            torch.cuda.synchronize(device)
+    inputs = input_factory(device)
+    ddp_kwargs, ddp_kwargs_log = ddp_probe_constructor_kwargs(runtime, device, config)
+    stage_trace.log(
+        f"{stage_name}_preflight",
+        "details",
+        kwargs=ddp_kwargs_log,
+        input_shapes=[list(tensor.shape) for tensor in inputs],
+        input_devices=[str(tensor.device) for tensor in inputs],
+        **module_ddp_preflight_snapshot(model),
+    )
+    with stage_trace.span(f"{stage_name}_ddp_ctor", **ddp_kwargs_log):
+        wrapped_probe = nn.parallel.DistributedDataParallel(model, **ddp_kwargs)
+    with stage_trace.span(
+        f"{stage_name}_forward",
+        input_shapes=[list(tensor.shape) for tensor in inputs],
+        input_devices=[str(tensor.device) for tensor in inputs],
+    ):
+        output = wrapped_probe(*inputs)
+    if device.type == "cuda":
+        with stage_trace.span(f"{stage_name}_cuda_synchronize_post_forward", device=str(device)):
+            torch.cuda.synchronize(device)
+    stage_trace.log(
+        f"{stage_name}_forward",
+        "details",
+        output_shape=list(output.shape),
+        output_device=str(output.device),
+    )
+
+
 def run_a0_minimal_ddp_wrap_probe(
     *,
     stage_trace: StageTracer,
     runtime: Mapping[str, Any],
     device: torch.device,
+    config: Mapping[str, Any],
 ) -> None:
     if not runtime.get("distributed"):
         stage_trace.log("ddp_wrap_probe_minimal_mlp", "skipped", reason="not_distributed")
         return
-    probe = nn.Sequential(nn.Linear(4, 8), nn.SiLU(), nn.Linear(8, 2)).to(device)
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-    probe_kwargs: dict[str, Any]
-    if device.type == "cuda":
-        local_rank = int(runtime["local_rank"])
-        probe_kwargs = {
-            "device_ids": [local_rank],
-            "output_device": local_rank,
-            "broadcast_buffers": False,
-        }
-    else:
-        probe_kwargs = {"broadcast_buffers": False}
-    stage_trace.log(
-        "ddp_wrap_probe_minimal_mlp",
-        "details",
-        kwargs={key: value for key, value in probe_kwargs.items()},
-        **module_ddp_preflight_snapshot(probe),
+    run_ddp_probe_model(
+        stage_name="ddp_wrap_probe_minimal_mlp",
+        model=nn.Sequential(nn.Linear(4, 8), nn.SiLU(), nn.Linear(8, 2)),
+        input_factory=lambda probe_device: (torch.ones(2, 4, device=probe_device),),
+        stage_trace=stage_trace,
+        runtime=runtime,
+        device=device,
+        config=config,
     )
-    wrapped_probe = nn.parallel.DistributedDataParallel(probe, **probe_kwargs)
-    x = torch.ones(2, 4, device=device)
-    y = wrapped_probe(x)
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-    stage_trace.log(
-        "ddp_wrap_probe_minimal_mlp",
-        "forward",
-        output_shape=list(y.shape),
-        output_device=str(y.device),
-    )
+
+
+def run_a0_ddp_probe_suite(
+    *,
+    stage_trace: StageTracer,
+    runtime: Mapping[str, Any],
+    device: torch.device,
+    config: Mapping[str, Any],
+    motion_dim: int,
+    skeleton_dim: int,
+    target_dim: int,
+) -> None:
+    if not runtime.get("distributed"):
+        stage_trace.log("ddp_probe_suite", "skipped", reason="not_distributed")
+        return
+    hidden_dim = int(config["model"]["hidden_dim"])
+    num_layers = int(config["model"]["num_layers"])
+    dropout = float(config["model"].get("dropout", 0.0))
+    concat_input_dim = int(motion_dim) + int(skeleton_dim)
+    with stage_trace.span(
+        "ddp_probe_suite",
+        motion_dim=int(motion_dim),
+        skeleton_dim=int(skeleton_dim),
+        target_dim=int(target_dim),
+        concat_input_dim=concat_input_dim,
+    ):
+        run_a0_minimal_ddp_wrap_probe(stage_trace=stage_trace, runtime=runtime, device=device, config=config)
+        run_ddp_probe_model(
+            stage_name="ddp_probe_same_shape_sequential",
+            model=build_mlp(concat_input_dim, hidden_dim, int(target_dim), num_layers, dropout),
+            input_factory=lambda probe_device: (
+                torch.ones(2, concat_input_dim, device=probe_device),
+            ),
+            stage_trace=stage_trace,
+            runtime=runtime,
+            device=device,
+            config=config,
+        )
+        run_ddp_probe_model(
+            stage_name="ddp_probe_fresh_concat_retargeter",
+            model=ConcatRetargeter(int(motion_dim), int(skeleton_dim), int(target_dim), dict(config["model"])),
+            input_factory=lambda probe_device: (
+                torch.ones(2, int(motion_dim), device=probe_device),
+                torch.ones(2, int(skeleton_dim), device=probe_device),
+            ),
+            stage_trace=stage_trace,
+            runtime=runtime,
+            device=device,
+            config=config,
+        )
+        for stage_name, features in (
+            ("ddp_probe_single_linear_512", 512),
+            ("ddp_probe_single_linear_1024", 1024),
+            ("ddp_probe_single_linear_1154", 1154),
+        ):
+            run_ddp_probe_model(
+                stage_name=stage_name,
+                model=nn.Linear(features, features),
+                input_factory=lambda probe_device, input_features=features: (
+                    torch.ones(2, input_features, device=probe_device),
+                ),
+                stage_trace=stage_trace,
+                runtime=runtime,
+                device=device,
+                config=config,
+            )
 
 
 class SkeletonAEFeatureLookup:
@@ -3248,6 +3452,8 @@ def validate_runtime(
     config: dict[str, Any],
     output_dir: Path,
     runtime: Mapping[str, Any] | None = None,
+    *,
+    check_data_artifacts: bool = True,
 ) -> None:
     write_root = Path(config["runtime"]["write_root"])
     if output_dir != write_root and write_root not in output_dir.parents:
@@ -3270,23 +3476,24 @@ def validate_runtime(
         raise RuntimeError(
             f"expected torchrun WORLD_SIZE={required_gpu_count} for this config, got {world_size}"
         )
-    if config["input_data"].get("format") == "soma_motionlib":
-        for key in ("robot_motion_dir", "soma_motion_dir"):
-            path = Path(config["input_data"][key])
-            if not path.exists():
-                raise FileNotFoundError(f"{key} is missing: {path}")
-    else:
-        data_root = Path(config["input_data"]["data_root"])
-        if not data_root.exists():
-            raise FileNotFoundError(f"data_root is missing: {data_root}")
-        if not index_path_from_config(config).exists():
-            raise FileNotFoundError(f"index is missing: {index_path_from_config(config)}")
-    cfg = skeleton_ae_config(config)
-    if cfg is not None:
-        for key in ("checkpoint", "normalization", "registry_csv"):
-            path = Path(str(cfg[key]))
-            if not path.exists():
-                raise FileNotFoundError(f"skeleton_ae.{key} is missing: {path}")
+    if check_data_artifacts:
+        if config["input_data"].get("format") == "soma_motionlib":
+            for key in ("robot_motion_dir", "soma_motion_dir"):
+                path = Path(config["input_data"][key])
+                if not path.exists():
+                    raise FileNotFoundError(f"{key} is missing: {path}")
+        else:
+            data_root = Path(config["input_data"]["data_root"])
+            if not data_root.exists():
+                raise FileNotFoundError(f"data_root is missing: {data_root}")
+            if not index_path_from_config(config).exists():
+                raise FileNotFoundError(f"index is missing: {index_path_from_config(config)}")
+        cfg = skeleton_ae_config(config)
+        if cfg is not None:
+            for key in ("checkpoint", "normalization", "registry_csv"):
+                path = Path(str(cfg[key]))
+                if not path.exists():
+                    raise FileNotFoundError(f"skeleton_ae.{key} is missing: {path}")
     if runtime is not None and not is_main_process(runtime):
         return
     if config["runtime"].get("require_committed_code", True):
@@ -3365,8 +3572,13 @@ def main() -> None:
         is_main = is_main_process(runtime)
         rank = int(runtime["rank"])
         world_size = int(runtime["world_size"])
-        with stage_trace.span("validate_runtime", output_dir=str(output_dir)):
-            validate_runtime(config, output_dir, runtime)
+        probe_only_enabled, probe_only_source = should_run_a0_ddp_probe_only(config)
+        with stage_trace.span(
+            "validate_runtime",
+            output_dir=str(output_dir),
+            ddp_probe_only=probe_only_enabled,
+        ):
+            validate_runtime(config, output_dir, runtime, check_data_artifacts=not probe_only_enabled)
         if is_main:
             output_dir.mkdir(parents=True, exist_ok=True)
             (output_dir / "logs").mkdir(parents=True, exist_ok=True)
@@ -3380,6 +3592,44 @@ def main() -> None:
         device = runtime["device"]
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        stage_trace.log(
+            "ddp_probe_only",
+            "configured",
+            enabled=probe_only_enabled,
+            source=probe_only_source,
+        )
+        if probe_only_enabled:
+            motion_dim, skeleton_dim, target_dim = a0_probe_expected_dims(config)
+            run_a0_ddp_probe_suite(
+                stage_trace=stage_trace,
+                runtime=runtime,
+                device=device,
+                config=config,
+                motion_dim=motion_dim,
+                skeleton_dim=skeleton_dim,
+                target_dim=target_dim,
+            )
+            if is_main:
+                summary = {
+                    "event": "a0_ddp_probe_only",
+                    "variant": config["variant"],
+                    "output_dir": str(output_dir),
+                    "feature_dims": {
+                        "motion": motion_dim,
+                        "skeleton_embedding": skeleton_dim,
+                        "model_input": motion_dim + skeleton_dim,
+                        "target": target_dim,
+                    },
+                    "probe_only_source": probe_only_source,
+                }
+                (output_dir / "dry_run_summary.json").write_text(
+                    json.dumps(summary, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                print(json.dumps(summary, sort_keys=True), flush=True)
+            with stage_trace.span("ddp_probe_only_barrier"):
+                distributed_barrier(runtime)
+            return
 
         skeleton_feature_lookup = build_skeleton_ae_feature_lookup(config, device, stage_trace)
         data_root = Path(config["input_data"].get("data_root", config["input_data"].get("robot_motion_dir", ".")))
@@ -3497,8 +3747,15 @@ def main() -> None:
                 source=probe_source,
             )
             if probe_enabled:
-                with stage_trace.span("ddp_wrap_probe_minimal_mlp", backend=str(runtime["backend"]), device=str(device)):
-                    run_a0_minimal_ddp_wrap_probe(stage_trace=stage_trace, runtime=runtime, device=device)
+                run_a0_ddp_probe_suite(
+                    stage_trace=stage_trace,
+                    runtime=runtime,
+                    device=device,
+                    config=config,
+                    motion_dim=motion_dim,
+                    skeleton_dim=skeleton_dim,
+                    target_dim=target_dim,
+                )
             ddp_kwargs, ddp_kwargs_log = ddp_constructor_kwargs(runtime, device, config)
             stage_trace.log("ddp_wrap", "details", kwargs=ddp_kwargs_log)
             with stage_trace.span("ddp_wrap", backend=str(runtime["backend"]), device=str(device), **ddp_kwargs_log):
