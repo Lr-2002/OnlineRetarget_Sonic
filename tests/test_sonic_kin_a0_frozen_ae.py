@@ -82,9 +82,23 @@ class A0FrozenAEConfigTests(unittest.TestCase):
             "skeleton_ae_row_mapping",
             "first_batch_collation",
             "model_to_device",
+            "model_to_device_cuda_synchronize",
+            "model_ddp_preflight",
             "ddp_wrap",
+            "ddp_wrap_probe_minimal_mlp",
             "first_forward",
             "logs/a0_stage_trace",
+            "named_parameters",
+            "named_buffers",
+            "requires_grad",
+            "contains_skeleton_encoder_params",
+            "contains_frozen_encoder_parameter",
+            "A0_DDP_PROBE",
+            "A0_DDP_BROADCAST_BUFFERS",
+            "broadcast_buffers",
+            "device_ids",
+            "output_device",
+            "torch.cuda.synchronize",
         ):
             self.assertIn(token, text)
         self.assertIn("expected torchrun WORLD_SIZE", text)

@@ -342,6 +342,150 @@ def should_enable_a0_stage_trace(config: Mapping[str, Any], args: argparse.Names
     return bool(args.dry_run and is_skeleton_ae_enabled(config)), "a0_dry_run_default"
 
 
+def should_run_a0_ddp_probe(
+    config: Mapping[str, Any],
+    args: argparse.Namespace,
+    stage_trace: StageTracer,
+) -> tuple[bool, str]:
+    env_enabled = env_flag_enabled(os.environ.get("A0_DDP_PROBE"))
+    if env_enabled is not None:
+        return env_enabled, "A0_DDP_PROBE"
+    diagnostics = config.get("diagnostics", {})
+    if isinstance(diagnostics, Mapping) and "a0_ddp_probe" in diagnostics:
+        return bool(diagnostics["a0_ddp_probe"]), "config.diagnostics.a0_ddp_probe"
+    return bool(args.dry_run and stage_trace.enabled and is_skeleton_ae_enabled(config)), "a0_stage_trace_default"
+
+
+def a0_ddp_broadcast_buffers(config: Mapping[str, Any]) -> tuple[bool, str]:
+    env_enabled = env_flag_enabled(os.environ.get("A0_DDP_BROADCAST_BUFFERS"))
+    if env_enabled is not None:
+        return env_enabled, "A0_DDP_BROADCAST_BUFFERS"
+    diagnostics = config.get("diagnostics", {})
+    if isinstance(diagnostics, Mapping) and "a0_ddp_broadcast_buffers" in diagnostics:
+        return bool(diagnostics["a0_ddp_broadcast_buffers"]), "config.diagnostics.a0_ddp_broadcast_buffers"
+    if is_skeleton_ae_enabled(config):
+        return False, "a0_default"
+    return True, "torch_default"
+
+
+def tensor_stage_snapshot(kind: str, name: str, tensor: torch.Tensor, requires_grad: bool | None) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "name": name,
+        "shape": list(tensor.shape),
+        "device": str(tensor.device),
+        "dtype": str(tensor.dtype),
+        "requires_grad": requires_grad,
+        "numel": int(tensor.numel()),
+    }
+
+
+def module_ddp_preflight_snapshot(model: nn.Module) -> dict[str, Any]:
+    named_parameters = [
+        tensor_stage_snapshot("parameter", name, parameter, bool(parameter.requires_grad))
+        for name, parameter in model.named_parameters()
+    ]
+    named_buffers = [
+        tensor_stage_snapshot("buffer", name, buffer, None)
+        for name, buffer in model.named_buffers()
+    ]
+    named_tensors = named_parameters + named_buffers
+    encoder_name_markers = ("skeleton_ae", "skeleton_encoder", "encoder")
+    contains_encoder_named_tensor = any(
+        any(marker in item["name"] for marker in encoder_name_markers)
+        for item in named_tensors
+    )
+    contains_skeleton_encoder_params = any(
+        any(marker in item["name"] for marker in encoder_name_markers)
+        for item in named_parameters
+    )
+    contains_frozen_encoder_parameter = any(
+        any(marker in item["name"] for marker in encoder_name_markers) and not bool(item["requires_grad"])
+        for item in named_parameters
+    )
+    return {
+        "module_type": type(model).__name__,
+        "parameter_count": len(named_parameters),
+        "buffer_count": len(named_buffers),
+        "parameter_numel": int(sum(item["numel"] for item in named_parameters)),
+        "buffer_numel": int(sum(item["numel"] for item in named_buffers)),
+        "trainable_parameter_numel": int(
+            sum(item["numel"] for item in named_parameters if item["requires_grad"])
+        ),
+        "frozen_parameter_numel": int(sum(item["numel"] for item in named_parameters if not item["requires_grad"])),
+        "contains_encoder_named_tensor": contains_encoder_named_tensor,
+        "contains_skeleton_encoder_params": contains_skeleton_encoder_params,
+        "contains_frozen_encoder_parameter": contains_frozen_encoder_parameter,
+        "named_parameters": named_parameters,
+        "named_buffers": named_buffers,
+    }
+
+
+def ddp_constructor_kwargs(
+    runtime: Mapping[str, Any],
+    device: torch.device,
+    config: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    broadcast_buffers, broadcast_source = a0_ddp_broadcast_buffers(config)
+    if device.type == "cuda":
+        local_rank = int(runtime["local_rank"])
+        kwargs: dict[str, Any] = {
+            "device_ids": [local_rank],
+            "output_device": local_rank,
+            "broadcast_buffers": broadcast_buffers,
+        }
+    else:
+        kwargs = {"broadcast_buffers": broadcast_buffers}
+    serializable = {
+        "device_ids": kwargs.get("device_ids"),
+        "output_device": kwargs.get("output_device"),
+        "broadcast_buffers": bool(kwargs["broadcast_buffers"]),
+        "broadcast_buffers_source": broadcast_source,
+    }
+    return kwargs, serializable
+
+
+def run_a0_minimal_ddp_wrap_probe(
+    *,
+    stage_trace: StageTracer,
+    runtime: Mapping[str, Any],
+    device: torch.device,
+) -> None:
+    if not runtime.get("distributed"):
+        stage_trace.log("ddp_wrap_probe_minimal_mlp", "skipped", reason="not_distributed")
+        return
+    probe = nn.Sequential(nn.Linear(4, 8), nn.SiLU(), nn.Linear(8, 2)).to(device)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    probe_kwargs: dict[str, Any]
+    if device.type == "cuda":
+        local_rank = int(runtime["local_rank"])
+        probe_kwargs = {
+            "device_ids": [local_rank],
+            "output_device": local_rank,
+            "broadcast_buffers": False,
+        }
+    else:
+        probe_kwargs = {"broadcast_buffers": False}
+    stage_trace.log(
+        "ddp_wrap_probe_minimal_mlp",
+        "details",
+        kwargs={key: value for key, value in probe_kwargs.items()},
+        **module_ddp_preflight_snapshot(probe),
+    )
+    wrapped_probe = nn.parallel.DistributedDataParallel(probe, **probe_kwargs)
+    x = torch.ones(2, 4, device=device)
+    y = wrapped_probe(x)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    stage_trace.log(
+        "ddp_wrap_probe_minimal_mlp",
+        "forward",
+        output_shape=list(y.shape),
+        output_device=str(y.device),
+    )
+
+
 class SkeletonAEFeatureLookup:
     def __init__(
         self,
@@ -3340,12 +3484,25 @@ def main() -> None:
             )
         with stage_trace.span("model_to_device", device=str(device), motion_dim=motion_dim, skeleton_dim=skeleton_dim):
             raw_model = make_model(motion_dim, skeleton_dim, target_dim, config).to(device)
+        stage_trace.log("model_ddp_preflight", "details", **module_ddp_preflight_snapshot(raw_model))
+        if device.type == "cuda":
+            with stage_trace.span("model_to_device_cuda_synchronize", device=str(device)):
+                torch.cuda.synchronize(device)
         if runtime["distributed"]:
-            with stage_trace.span("ddp_wrap", backend=str(runtime["backend"]), device=str(device)):
-                model = nn.parallel.DistributedDataParallel(
-                    raw_model,
-                    device_ids=[int(runtime["local_rank"])] if device.type == "cuda" else None,
-                )
+            probe_enabled, probe_source = should_run_a0_ddp_probe(config, args, stage_trace)
+            stage_trace.log(
+                "ddp_wrap_probe_minimal_mlp",
+                "configured",
+                enabled=probe_enabled,
+                source=probe_source,
+            )
+            if probe_enabled:
+                with stage_trace.span("ddp_wrap_probe_minimal_mlp", backend=str(runtime["backend"]), device=str(device)):
+                    run_a0_minimal_ddp_wrap_probe(stage_trace=stage_trace, runtime=runtime, device=device)
+            ddp_kwargs, ddp_kwargs_log = ddp_constructor_kwargs(runtime, device, config)
+            stage_trace.log("ddp_wrap", "details", kwargs=ddp_kwargs_log)
+            with stage_trace.span("ddp_wrap", backend=str(runtime["backend"]), device=str(device), **ddp_kwargs_log):
+                model = nn.parallel.DistributedDataParallel(raw_model, **ddp_kwargs)
         else:
             model = raw_model
         if stats_load_device != device:
