@@ -88,6 +88,8 @@ class A0FrozenAEConfigTests(unittest.TestCase):
         ):
             self.assertIn(token, text)
         self.assertIn("expected torchrun WORLD_SIZE", text)
+        self.assertIn("skipped_count=int(skipped)", text)
+        self.assertNotIn("skipped_count=len(skipped)", text)
 
 
 @unittest.skipIf(torch is None, "torch is required for A0 frozen AE tests")

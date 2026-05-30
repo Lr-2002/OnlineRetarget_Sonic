@@ -3241,7 +3241,7 @@ def main() -> None:
         data_root = Path(config["input_data"].get("data_root", config["input_data"].get("robot_motion_dir", ".")))
         with stage_trace.span("rows_from_index", data_root=str(data_root)):
             rows, skipped = rows_from_index(config, data_root)
-        stage_trace.log("rows_from_index", "details", row_count=len(rows), skipped_count=len(skipped))
+        stage_trace.log("rows_from_index", "details", row_count=len(rows), skipped_count=int(skipped))
         with stage_trace.span("deterministic_split", row_count=len(rows)):
             split_rows(rows, float(config["split"]["validation_ratio"]), str(config["split"]["hash_salt"]))
         if skeleton_feature_lookup is not None:
