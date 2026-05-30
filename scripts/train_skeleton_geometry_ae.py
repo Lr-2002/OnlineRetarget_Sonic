@@ -28,6 +28,7 @@ if SRC_ROOT.exists() and str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from online_retarget.data.skeleton_ae_registry import SKELETON_GEOMETRY_DIM  # noqa: E402
+from online_retarget.models.skeleton_geometry_ae import SkeletonGeometryAE  # noqa: E402
 
 
 def utc_now() -> str:
@@ -149,39 +150,6 @@ class SkeletonGeometryDataset(Dataset[tuple[torch.Tensor, str]]):
 
 def collate_skeletons(batch: list[tuple[torch.Tensor, str]]) -> tuple[torch.Tensor, list[str]]:
     return torch.stack([item[0] for item in batch], dim=0), [item[1] for item in batch]
-
-
-class SkeletonGeometryAE(nn.Module):
-    def __init__(self, *, input_dim: int = 104, latent_dim: int = 64) -> None:
-        super().__init__()
-        if input_dim != SKELETON_GEOMETRY_DIM:
-            raise ValueError(f"input_dim must be {SKELETON_GEOMETRY_DIM}")
-        if latent_dim != 64:
-            raise ValueError("latent_dim must be 64")
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 256),
-            nn.SiLU(),
-            nn.Linear(256, 128),
-            nn.SiLU(),
-            nn.Linear(128, latent_dim),
-        )
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 128),
-            nn.SiLU(),
-            nn.Linear(128, 256),
-            nn.SiLU(),
-            nn.Linear(256, input_dim),
-        )
-
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        return self.encoder(x)
-
-    def decode(self, z: torch.Tensor) -> torch.Tensor:
-        return self.decoder(z)
-
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        z = self.encode(x)
-        return self.decode(z), z
 
 
 def compute_or_load_normalization(

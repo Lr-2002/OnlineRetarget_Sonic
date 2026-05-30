@@ -44,6 +44,14 @@ SRC_ROOT = ROOT / "src"
 if SRC_ROOT.exists() and str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from online_retarget.data.skeleton_ae_registry import SKELETON_GEOMETRY_DIM  # noqa: E402
+from online_retarget.models.skeleton_geometry_ae import (  # noqa: E402
+    SKELETON_GEOMETRY_AE_ARCHITECTURE,
+    SKELETON_GEOMETRY_LATENT_DIM,
+    load_skeleton_geometry_ae_checkpoint,
+    load_skeleton_geometry_ae_stats,
+)
+
 
 REQUIRED_NPZ_KEYS = ("joint_pos", "joint_vel", "body_pos_w", "body_quat_w")
 REQUIRED_ROBOT_MOTIONLIB_KEYS = ("dof", "root_rot", "fps")
@@ -241,6 +249,271 @@ def resolve_text(value: str, config: dict[str, Any], run_group: str) -> str:
 
 def resolve_output_dir(config: dict[str, Any], run_group: str) -> Path:
     return Path(resolve_text(str(config["output_dir"]), config, run_group))
+
+
+class SkeletonAEFeatureLookup:
+    def __init__(
+        self,
+        *,
+        embeddings_by_id: dict[str, np.ndarray],
+        registry_rows_by_id: dict[str, dict[str, Any]],
+        lookup_index: dict[tuple[str, str], set[str]],
+        artifact_info: dict[str, Any],
+    ) -> None:
+        self.embeddings_by_id = embeddings_by_id
+        self.registry_rows_by_id = registry_rows_by_id
+        self.lookup_index = lookup_index
+        self.artifact_info = artifact_info
+        self.mapping_report: dict[str, Any] = {
+            "missing_skeleton_geometry_count": 0,
+            "ambiguous_skeleton_geometry_count": 0,
+            "resolved_row_count": 0,
+            "resolved_samples": [],
+        }
+        self.cache_path = ""
+
+    @property
+    def embedding_dim(self) -> int:
+        return SKELETON_GEOMETRY_LATENT_DIM
+
+    def resolve_row_ids(self, row: Mapping[str, Any]) -> set[str]:
+        resolved: set[str] = set()
+        for field, value in _row_skeleton_lookup_values(row):
+            if field == "source_path":
+                for alias in _path_aliases(value):
+                    resolved.update(self.lookup_index.get((field, alias), set()))
+            else:
+                text = _clean_text(value)
+                if text:
+                    resolved.update(self.lookup_index.get((field, text), set()))
+        return resolved
+
+    def validate_and_annotate_rows(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        missing: list[dict[str, Any]] = []
+        ambiguous: list[dict[str, Any]] = []
+        resolved_samples: list[dict[str, Any]] = []
+        for row_index, row in enumerate(rows):
+            resolved = self.resolve_row_ids(row)
+            sample = {
+                "row_index": row_index,
+                "relative_path": row.get("relative_path", ""),
+                "actor_uid": row.get("actor_uid", ""),
+                "source_soma_proportional_path": row.get("source_soma_proportional_path", ""),
+                "source_bvh": row.get("source_bvh", ""),
+                "candidate_encoder_ids": sorted(resolved),
+            }
+            if not resolved:
+                missing.append(sample)
+                continue
+            if len(resolved) > 1:
+                ambiguous.append(sample)
+                continue
+            encoder_id = next(iter(resolved))
+            registry_row = self.registry_rows_by_id[encoder_id]
+            row["skeleton_ae_encoder_id"] = encoder_id
+            row["skeleton_ae_source_soma_proportional_path"] = registry_row.get(
+                "source_soma_proportional_path",
+                "",
+            )
+            if len(resolved_samples) < 10:
+                resolved_samples.append(
+                    {
+                        "row_index": row_index,
+                        "relative_path": row.get("relative_path", ""),
+                        "encoder_id": encoder_id,
+                        "source_soma_proportional_path": registry_row.get(
+                            "source_soma_proportional_path",
+                            "",
+                        ),
+                    }
+                )
+        self.mapping_report = {
+            "missing_skeleton_geometry_count": len(missing),
+            "ambiguous_skeleton_geometry_count": len(ambiguous),
+            "resolved_row_count": len(rows) - len(missing) - len(ambiguous),
+            "row_count": len(rows),
+            "missing_examples": missing[:10],
+            "ambiguous_examples": ambiguous[:10],
+            "resolved_samples": resolved_samples,
+        }
+        if missing or ambiguous:
+            raise ValueError(
+                "Skeleton AE registry mapping failed: "
+                f"missing_skeleton_geometry_count={len(missing)} "
+                f"ambiguous_skeleton_geometry_count={len(ambiguous)} "
+                f"missing_examples={missing[:3]} ambiguous_examples={ambiguous[:3]}"
+            )
+        return self.mapping_report
+
+    def embedding_for_row(self, row: Mapping[str, Any]) -> np.ndarray:
+        encoder_id = str(row.get("skeleton_ae_encoder_id", ""))
+        if not encoder_id:
+            resolved = self.resolve_row_ids(row)
+            if len(resolved) != 1:
+                raise ValueError(f"row does not resolve to one Skeleton AE embedding: {row}")
+            encoder_id = next(iter(resolved))
+        return self.embeddings_by_id[encoder_id]
+
+    def write_cache(self, output_dir: Path) -> str:
+        cache_path = output_dir / "cache" / "skeleton_embedding_cache.pt"
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "embeddings_by_id": {
+                    key: torch.from_numpy(value.astype(np.float32, copy=False))
+                    for key, value in self.embeddings_by_id.items()
+                },
+                "artifact_info": self.artifact_info,
+                "mapping_report": self.mapping_report,
+            },
+            cache_path,
+        )
+        self.cache_path = str(cache_path)
+        return self.cache_path
+
+
+def skeleton_ae_config(config: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    cfg = config.get("skeleton_ae")
+    if not isinstance(cfg, Mapping) or not bool(cfg.get("enabled", False)):
+        return None
+    return cfg
+
+
+def is_skeleton_ae_enabled(config: Mapping[str, Any]) -> bool:
+    return skeleton_ae_config(config) is not None
+
+
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _path_aliases(value: Any) -> set[str]:
+    text = _clean_text(value)
+    if not text:
+        return set()
+    path = Path(text)
+    normalized = text.replace("\\", "/")
+    return {
+        text,
+        normalized,
+        normalized.lstrip("./"),
+        path.name,
+        path.stem,
+    } - {""}
+
+
+def _actor_ids_from_text(value: Any) -> set[str]:
+    text = _clean_text(value)
+    if not text:
+        return set()
+    return {match.group(1) for match in re.finditer(r"(A\d{3,})", text)}
+
+
+def _row_skeleton_lookup_values(row: Mapping[str, Any]) -> list[tuple[str, Any]]:
+    values: list[tuple[str, Any]] = []
+    for field in ("encoder_id", "skeleton_id", "actor_uid"):
+        text = _clean_text(row.get(field, ""))
+        if text:
+            values.append((field, text))
+    for field in ("source_soma_proportional_path", "source_bvh", "relative_path", "path"):
+        text = _clean_text(row.get(field, ""))
+        if text:
+            values.append(("source_path", text))
+            for actor_id in _actor_ids_from_text(text):
+                values.append(("actor_uid", actor_id))
+                values.append(("encoder_id", actor_id))
+    return values
+
+
+def _add_lookup_key(
+    lookup_index: dict[tuple[str, str], set[str]],
+    field: str,
+    value: Any,
+    encoder_id: str,
+) -> None:
+    text = _clean_text(value)
+    if not text:
+        return
+    lookup_index.setdefault((field, text), set()).add(encoder_id)
+
+
+def _load_skeleton_ae_registry(
+    registry_csv: Path,
+) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], set[str]]]:
+    if not registry_csv.exists():
+        raise FileNotFoundError(f"skeleton_ae.registry_csv is missing: {registry_csv}")
+    rows_by_id: dict[str, dict[str, Any]] = {}
+    lookup_index: dict[tuple[str, str], set[str]] = {}
+    with registry_csv.open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            encoder_id = _clean_text(row.get("encoder_id") or row.get("actor_uid"))
+            if not encoder_id:
+                raise ValueError(f"registry row has no encoder_id/actor_uid: {row}")
+            if encoder_id in rows_by_id:
+                raise ValueError(f"duplicate encoder_id in Skeleton AE registry: {encoder_id}")
+            geometry = json.loads(row["geometry_json"])
+            if len(geometry) != SKELETON_GEOMETRY_DIM:
+                raise ValueError(f"{encoder_id} has geometry dim {len(geometry)}")
+            payload = dict(row)
+            payload["geometry"] = np.asarray(geometry, dtype=np.float32)
+            rows_by_id[encoder_id] = payload
+            for field in ("encoder_id", "actor_uid"):
+                _add_lookup_key(lookup_index, field, row.get(field, ""), encoder_id)
+            for alias in _path_aliases(row.get("source_soma_proportional_path", "")):
+                _add_lookup_key(lookup_index, "source_path", alias, encoder_id)
+            for actor_id in _actor_ids_from_text(row.get("source_soma_proportional_path", "")):
+                _add_lookup_key(lookup_index, "actor_uid", actor_id, encoder_id)
+                _add_lookup_key(lookup_index, "encoder_id", actor_id, encoder_id)
+    if not rows_by_id:
+        raise ValueError(f"Skeleton AE registry has no rows: {registry_csv}")
+    return rows_by_id, lookup_index
+
+
+def build_skeleton_ae_feature_lookup(
+    config: Mapping[str, Any],
+    device: torch.device,
+) -> SkeletonAEFeatureLookup | None:
+    cfg = skeleton_ae_config(config)
+    if cfg is None:
+        return None
+    freeze_encoder = bool(cfg.get("freeze_encoder", True))
+    if not freeze_encoder:
+        raise ValueError("A0 requires skeleton_ae.freeze_encoder=true")
+    checkpoint_path = Path(str(cfg["checkpoint"]))
+    stats_path = Path(str(cfg["normalization"]))
+    registry_csv = Path(str(cfg["registry_csv"]))
+    rows_by_id, lookup_index = _load_skeleton_ae_registry(registry_csv)
+    ae_model, checkpoint = load_skeleton_geometry_ae_checkpoint(
+        checkpoint_path,
+        device=device,
+        freeze_encoder=True,
+    )
+    ae_stats = load_skeleton_geometry_ae_stats(stats_path, device=device)
+    embeddings_by_id: dict[str, np.ndarray] = {}
+    with torch.no_grad():
+        for encoder_id, row in rows_by_id.items():
+            x = torch.from_numpy(row["geometry"]).to(device=device, dtype=torch.float32).unsqueeze(0)
+            x_norm = (x - ae_stats["skeleton_mean"]) / ae_stats["skeleton_std"]
+            z = ae_model.encode(x_norm).squeeze(0).detach().cpu().numpy().astype(np.float32, copy=False)
+            if z.shape != (SKELETON_GEOMETRY_LATENT_DIM,):
+                raise ValueError(f"{encoder_id} encoded to unexpected shape {z.shape}")
+            embeddings_by_id[encoder_id] = z
+    artifact_info = {
+        "checkpoint": file_stats(checkpoint_path),
+        "normalization": file_stats(stats_path),
+        "registry_csv": file_stats(registry_csv),
+        "checkpoint_architecture": list(checkpoint.get("architecture") or []),
+        "expected_architecture": SKELETON_GEOMETRY_AE_ARCHITECTURE,
+        "x_skel_dim": SKELETON_GEOMETRY_DIM,
+        "z_skel_dim": SKELETON_GEOMETRY_LATENT_DIM,
+        "skeleton_encoder_frozen": True,
+    }
+    return SkeletonAEFeatureLookup(
+        embeddings_by_id=embeddings_by_id,
+        registry_rows_by_id=rows_by_id,
+        lookup_index=lookup_index,
+        artifact_info=artifact_info,
+    )
 
 
 def distributed_env(env: Mapping[str, str] | None = None) -> dict[str, int]:
@@ -970,9 +1243,16 @@ def split_rows(rows: list[dict[str, Any]], validation_ratio: float, hash_salt: s
 
 
 class KinWindowDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]):
-    def __init__(self, rows: list[dict[str, Any]], split: str, config: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        split: str,
+        config: dict[str, Any],
+        skeleton_feature_lookup: SkeletonAEFeatureLookup | None = None,
+    ) -> None:
         self.rows = [row for row in rows if row["split"] == split]
         self.config = config
+        self.skeleton_feature_lookup = skeleton_feature_lookup
         self.input_format = str(config["input_data"].get("format", "npz"))
         self.data_root = Path(config["input_data"].get("data_root", config["input_data"].get("robot_motion_dir", ".")))
         self.window = int(config["features"]["future_window_frames"])
@@ -1037,6 +1317,9 @@ class KinWindowDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]])
                 self.step,
                 self.config,
             )
+        if self.skeleton_feature_lookup is not None:
+            embedding = self.skeleton_feature_lookup.embedding_for_row(row)
+            skeleton = np.repeat(embedding[None, :], motion.shape[0], axis=0).astype(np.float32, copy=False)
         return torch.from_numpy(motion), torch.from_numpy(skeleton), torch.from_numpy(target)
 
 
@@ -1179,13 +1462,18 @@ def compute_or_load_stats(
     runtime: Mapping[str, Any] | None = None,
 ) -> dict[str, torch.Tensor]:
     stats_path = output_dir / "stats" / "normalization.pt"
+    skeleton_mean_key, skeleton_std_key = skeleton_normalization_keys(config)
     if stats_path.exists():
         payload = torch.load(stats_path, map_location=device, weights_only=False)
-        return {key: value.to(device) for key, value in payload.items() if torch.is_tensor(value)}
+        stats = {key: value.to(device) for key, value in payload.items() if torch.is_tensor(value)}
+        require_normalization_keys(stats, config)
+        return stats
     if runtime is not None and runtime.get("distributed") and not is_main_process(runtime):
         distributed_barrier(runtime)
         payload = torch.load(stats_path, map_location=device, weights_only=False)
-        return {key: value.to(device) for key, value in payload.items() if torch.is_tensor(value)}
+        stats = {key: value.to(device) for key, value in payload.items() if torch.is_tensor(value)}
+        require_normalization_keys(stats, config)
+        return stats
 
     loader = DataLoader(
         train_dataset,
@@ -1226,8 +1514,8 @@ def compute_or_load_stats(
     payload = {
         "motion_mean": motion_mean,
         "motion_std": motion_std,
-        "skeleton_mean": skeleton_mean,
-        "skeleton_std": skeleton_std,
+        skeleton_mean_key: skeleton_mean,
+        skeleton_std_key: skeleton_std,
         "target_mean": target_mean,
         "target_std": target_std,
     }
@@ -1238,15 +1526,43 @@ def compute_or_load_stats(
     return payload
 
 
+def skeleton_normalization_keys(config: Mapping[str, Any]) -> tuple[str, str]:
+    if is_skeleton_ae_enabled(config):
+        return "skeleton_embedding_mean", "skeleton_embedding_std"
+    return "skeleton_mean", "skeleton_std"
+
+
+def require_normalization_keys(stats: Mapping[str, torch.Tensor], config: Mapping[str, Any]) -> None:
+    required = ["motion_mean", "motion_std", "target_mean", "target_std", *skeleton_normalization_keys(config)]
+    missing = [key for key in required if key not in stats]
+    if missing:
+        raise ValueError(f"normalization stats missing required keys: {', '.join(missing)}")
+
+
+def skeleton_stats_pair(
+    stats: Mapping[str, torch.Tensor],
+    config: Mapping[str, Any],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    mean_key, std_key = skeleton_normalization_keys(config)
+    return stats[mean_key], stats[std_key]
+
+
+def skeleton_feature_dim(stats: Mapping[str, torch.Tensor], config: Mapping[str, Any]) -> int:
+    mean, _std = skeleton_stats_pair(stats, config)
+    return int(mean.numel())
+
+
 def normalize_batch(
     motion: torch.Tensor,
     skeleton: torch.Tensor,
     target: torch.Tensor,
     stats: dict[str, torch.Tensor],
+    config: Mapping[str, Any],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    skeleton_mean, skeleton_std = skeleton_stats_pair(stats, config)
     return (
         (motion - stats["motion_mean"]) / stats["motion_std"],
-        (skeleton - stats["skeleton_mean"]) / stats["skeleton_std"],
+        (skeleton - skeleton_mean) / skeleton_std,
         (target - stats["target_mean"]) / stats["target_std"],
     )
 
@@ -1351,7 +1667,7 @@ def validate(
             motion = motion.to(device, non_blocking=True)
             skeleton = skeleton.to(device, non_blocking=True)
             target = target.to(device, non_blocking=True)
-            motion_n, skeleton_n, target_n = normalize_batch(motion, skeleton, target, stats)
+            motion_n, skeleton_n, target_n = normalize_batch(motion, skeleton, target, stats, config)
             pred_n = model(motion_n, skeleton_n)
             _, metrics = loss_and_metrics(
                 pred_n,
@@ -1403,6 +1719,7 @@ def run_visual_validation(
     step: int,
     joint_dim: int,
     wandb_run: Any,
+    skeleton_feature_lookup: SkeletonAEFeatureLookup | None = None,
 ) -> dict[str, float]:
     cfg = config.get("visual_validation", {})
     started = time.perf_counter()
@@ -1467,6 +1784,7 @@ def run_visual_validation(
                     joint_dim=joint_dim,
                     render_deps=render_deps,
                     g1_model=g1_model,
+                    skeleton_feature_lookup=skeleton_feature_lookup,
                 )
             except Exception as exc:
                 report = {
@@ -1593,6 +1911,7 @@ def _render_visual_validation_clip(
     joint_dim: int,
     render_deps: Mapping[str, Any],
     g1_model: Any,
+    skeleton_feature_lookup: SkeletonAEFeatureLookup | None = None,
 ) -> dict[str, Any]:
     if config["input_data"].get("format") == "soma_motionlib":
         return _render_motionlib_visual_validation_clip(
@@ -1607,6 +1926,7 @@ def _render_visual_validation_clip(
             joint_dim=joint_dim,
             render_deps=render_deps,
             g1_model=g1_model,
+            skeleton_feature_lookup=skeleton_feature_lookup,
         )
 
     cfg = config.get("visual_validation", {})
@@ -1685,6 +2005,8 @@ def _render_visual_validation_clip(
         joint_dim=joint_dim,
         fallback_root_pos=arrays["body_pos_w"][:frame_count, 0],
         fallback_root_quat=arrays["body_quat_w"][:frame_count, 0],
+        row=row,
+        skeleton_feature_lookup=skeleton_feature_lookup,
     )
     inference_frames = _g1_prediction_frames(
         prediction["joint_pos"],
@@ -1759,6 +2081,7 @@ def _render_motionlib_visual_validation_clip(
     joint_dim: int,
     render_deps: Mapping[str, Any],
     g1_model: Any,
+    skeleton_feature_lookup: SkeletonAEFeatureLookup | None = None,
 ) -> dict[str, Any]:
     cfg = config.get("visual_validation", {})
     clip_name = _safe_filename(str(row.get("filename") or Path(str(row["relative_path"])).stem))
@@ -1840,6 +2163,8 @@ def _render_motionlib_visual_validation_clip(
         joint_dim=joint_dim,
         fallback_root_pos=root_pos,
         fallback_root_quat=root_quat,
+        row=row,
+        skeleton_feature_lookup=skeleton_feature_lookup,
     )
     inference_frames = _g1_prediction_frames(
         prediction["joint_pos"],
@@ -1986,6 +2311,8 @@ def _predict_visual_g1_state(
     joint_dim: int,
     fallback_root_pos: np.ndarray,
     fallback_root_quat: np.ndarray,
+    row: Mapping[str, Any] | None = None,
+    skeleton_feature_lookup: SkeletonAEFeatureLookup | None = None,
 ) -> dict[str, np.ndarray]:
     frame_indices = np.arange(frame_count, dtype=np.int64)
     motion, skeleton, _ = build_features(
@@ -1995,6 +2322,11 @@ def _predict_visual_g1_state(
         int(config["features"]["future_step"]),
         config,
     )
+    if skeleton_feature_lookup is not None:
+        if row is None:
+            raise ValueError("Skeleton AE visual prediction requires the source row")
+        embedding = skeleton_feature_lookup.embedding_for_row(row)
+        skeleton = np.repeat(embedding[None, :], motion.shape[0], axis=0).astype(np.float32, copy=False)
     return _predict_g1_state_from_features(
         model=model,
         motion=motion,
@@ -2019,6 +2351,8 @@ def _predict_motionlib_visual_g1_state(
     joint_dim: int,
     fallback_root_pos: np.ndarray,
     fallback_root_quat: np.ndarray,
+    row: Mapping[str, Any] | None = None,
+    skeleton_feature_lookup: SkeletonAEFeatureLookup | None = None,
 ) -> dict[str, np.ndarray]:
     frame_indices = np.arange(frame_count, dtype=np.int64)
     motion, skeleton, _ = build_soma_motionlib_features(
@@ -2028,6 +2362,11 @@ def _predict_motionlib_visual_g1_state(
         int(config["features"]["future_step"]),
         config,
     )
+    if skeleton_feature_lookup is not None:
+        if row is None:
+            raise ValueError("Skeleton AE visual prediction requires the source row")
+        embedding = skeleton_feature_lookup.embedding_for_row(row)
+        skeleton = np.repeat(embedding[None, :], motion.shape[0], axis=0).astype(np.float32, copy=False)
     return _predict_g1_state_from_features(
         model=model,
         motion=motion,
@@ -2057,7 +2396,8 @@ def _predict_g1_state_from_features(
         motion_t = torch.from_numpy(motion).to(device)
         skeleton_t = torch.from_numpy(skeleton).to(device)
         motion_n = (motion_t - stats["motion_mean"]) / stats["motion_std"]
-        skeleton_n = (skeleton_t - stats["skeleton_mean"]) / stats["skeleton_std"]
+        skeleton_mean, skeleton_std = skeleton_stats_pair(stats, config)
+        skeleton_n = (skeleton_t - skeleton_mean) / skeleton_std
         pred_n = model(motion_n, skeleton_n)
         pred_raw = pred_n * stats["target_std"] + stats["target_mean"]
     pred = pred_raw.detach().cpu().numpy().astype(np.float32, copy=False)
@@ -2476,6 +2816,10 @@ def save_checkpoint(
         old.unlink(missing_ok=True)
 
 
+def trainable_parameter_names(model: nn.Module) -> list[str]:
+    return [name for name, parameter in model.named_parameters() if parameter.requires_grad]
+
+
 def write_manifest(
     output_dir: Path,
     config_path: Path,
@@ -2488,6 +2832,8 @@ def write_manifest(
     skeleton_dim: int,
     target_dim: int,
     skipped_index_rows: int,
+    optimizer_parameter_names: Sequence[str],
+    skeleton_feature_lookup: SkeletonAEFeatureLookup | None = None,
     runtime: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_root = Path(config["source_repo"])
@@ -2512,6 +2858,22 @@ def write_manifest(
             "train_chunks": len(train_dataset),
             "validation_chunks": len(validation_dataset),
         }
+    if skeleton_feature_lookup is not None:
+        feature_dims = {
+            "motion": motion_dim,
+            "raw_skeleton_geometry": SKELETON_GEOMETRY_DIM,
+            "skeleton_embedding": skeleton_dim,
+            "model_input": motion_dim + skeleton_dim,
+            "target": target_dim,
+        }
+    else:
+        feature_dims = {
+            "motion": motion_dim,
+            "skeleton": skeleton_dim,
+            "model_input": motion_dim + skeleton_dim,
+            "target": target_dim,
+        }
+    optimizer_has_encoder_params = any("skeleton_encoder" in name or ".encoder" in name for name in optimizer_parameter_names)
     manifest = {
         "run_id": f"sonic-kin-skeleton-{config['variant']['name']}-{timestamp_compact()}",
         "run_group": run_group,
@@ -2528,10 +2890,10 @@ def write_manifest(
         "control_revision_actual": git_revision(control_root),
         "control_status_short": git_status_short(control_root),
         "variant": config["variant"],
-        "feature_dims": {
-            "motion": motion_dim,
-            "skeleton": skeleton_dim,
-            "target": target_dim,
+        "feature_dims": feature_dims,
+        "optimizer": {
+            "parameter_names": list(optimizer_parameter_names),
+            "contains_skeleton_encoder_params": optimizer_has_encoder_params,
         },
         "distributed": {
             "rank": int(runtime.get("rank", 0)) if runtime is not None else 0,
@@ -2543,6 +2905,15 @@ def write_manifest(
         "metrics_path": str(output_dir / "loss_curve.csv"),
         "notes": config["purpose"],
     }
+    if skeleton_feature_lookup is not None:
+        manifest["skeleton_ae"] = {
+            "enabled": True,
+            "skeleton_encoder_frozen": True,
+            "embedding_cache": skeleton_feature_lookup.cache_path,
+            "artifact_info": skeleton_feature_lookup.artifact_info,
+            "mapping_report": skeleton_feature_lookup.mapping_report,
+            "normalization_keys": list(skeleton_normalization_keys(config)),
+        }
     (output_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -2591,9 +2962,13 @@ def validate_runtime(
         forbidden_path = Path(forbidden)
         if output_dir == forbidden_path or forbidden_path in output_dir.parents:
             raise ValueError(f"output_dir must not be under {forbidden_path}: {output_dir}")
-    if not torch.cuda.is_available():
+    requested_device = str(config["runtime"].get("device", "cuda")).lower()
+    if requested_device == "cpu":
+        required_gpu_count = 0
+    elif not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
-    required_gpu_count = int(config["runtime"].get("required_gpu_count", 1))
+    else:
+        required_gpu_count = int(config["runtime"].get("required_gpu_count", 1))
     if torch.cuda.device_count() < required_gpu_count:
         raise RuntimeError(f"expected at least {required_gpu_count} visible GPU(s), found {torch.cuda.device_count()}")
     world_size = int(runtime.get("world_size", 1)) if runtime is not None else 1
@@ -2612,6 +2987,12 @@ def validate_runtime(
             raise FileNotFoundError(f"data_root is missing: {data_root}")
         if not index_path_from_config(config).exists():
             raise FileNotFoundError(f"index is missing: {index_path_from_config(config)}")
+    cfg = skeleton_ae_config(config)
+    if cfg is not None:
+        for key in ("checkpoint", "normalization", "registry_csv"):
+            path = Path(str(cfg[key]))
+            if not path.exists():
+                raise FileNotFoundError(f"skeleton_ae.{key} is missing: {path}")
     if runtime is not None and not is_main_process(runtime):
         return
     if config["runtime"].get("require_committed_code", True):
@@ -2649,6 +3030,11 @@ def main() -> None:
         action="store_true",
         help="Disable visual validation for short smoke checks.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Load data/model/artifacts, write manifest and dry-run summary, then exit before training.",
+    )
     parser.add_argument("--local-rank", "--local_rank", type=int, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.local_rank is not None and "LOCAL_RANK" not in os.environ:
@@ -2674,17 +3060,22 @@ def main() -> None:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
+        skeleton_feature_lookup = build_skeleton_ae_feature_lookup(config, device)
         data_root = Path(config["input_data"].get("data_root", config["input_data"].get("robot_motion_dir", ".")))
         rows, skipped = rows_from_index(config, data_root)
         split_rows(rows, float(config["split"]["validation_ratio"]), str(config["split"]["hash_salt"]))
-        train_dataset = KinWindowDataset(rows, "train", config)
-        validation_dataset = KinWindowDataset(rows, "validation", config)
+        if skeleton_feature_lookup is not None:
+            skeleton_feature_lookup.validate_and_annotate_rows(rows)
+            if is_main:
+                skeleton_feature_lookup.write_cache(output_dir)
+        train_dataset = KinWindowDataset(rows, "train", config, skeleton_feature_lookup)
+        validation_dataset = KinWindowDataset(rows, "validation", config, skeleton_feature_lookup)
         stats = compute_or_load_stats(output_dir, train_dataset, config, device, runtime)
 
         feature_cfg = config["features"]
         window = int(feature_cfg["future_window_frames"])
         motion_dim = int(stats["motion_mean"].numel())
-        skeleton_dim = int(stats["skeleton_mean"].numel())
+        skeleton_dim = skeleton_feature_dim(stats, config)
         target_dim = int(stats["target_mean"].numel())
         root_pose_dim = root_pose_target_dim(config, window)
         command_dim = target_command_dim(target_dim, window, config)
@@ -2706,6 +3097,7 @@ def main() -> None:
             lr=float(config["training"]["learning_rate"]),
             weight_decay=float(config["training"]["weight_decay"]),
         )
+        optimizer_parameter_names = trainable_parameter_names(raw_model)
 
         train_sampler = (
             DistributedSampler(
@@ -2763,11 +3155,50 @@ def main() -> None:
                 skeleton_dim,
                 target_dim,
                 skipped,
+                optimizer_parameter_names,
+                skeleton_feature_lookup,
                 runtime,
             )
         distributed_barrier(runtime)
         if not is_main:
             manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+        if args.dry_run:
+            val_metrics = validate(
+                model,
+                val_loader,
+                stats,
+                device,
+                config,
+                command_dim,
+                joint_dim,
+                root_pose_dim,
+            )
+            val_metrics = average_metric_dict(val_metrics, runtime, device)
+            if is_main:
+                summary = {
+                    "event": "dry_run",
+                    "variant": config["variant"],
+                    "output_dir": str(output_dir),
+                    "manifest": str(output_dir / "manifest.json"),
+                    "normalization": str(output_dir / "stats" / "normalization.pt"),
+                    "feature_dims": manifest["feature_dims"],
+                    "skeleton_encoder_frozen": bool(
+                        manifest.get("skeleton_ae", {}).get("skeleton_encoder_frozen", False)
+                    ),
+                    "optimizer_contains_skeleton_encoder_params": bool(
+                        manifest["optimizer"]["contains_skeleton_encoder_params"]
+                    ),
+                    "optimizer_parameter_count": len(manifest["optimizer"]["parameter_names"]),
+                    "mapping_report": manifest.get("skeleton_ae", {}).get("mapping_report", {}),
+                    **val_metrics,
+                }
+                (output_dir / "dry_run_summary.json").write_text(
+                    json.dumps(summary, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                print(json.dumps(summary, sort_keys=True), flush=True)
+            distributed_barrier(runtime)
+            return
         wandb_run = init_wandb(config, manifest, output_dir, run_group) if is_main else None
 
         max_steps = int(config["training"]["max_steps"])
@@ -2834,7 +3265,7 @@ def main() -> None:
                     motion = motion[select]
                     skeleton = skeleton[select]
                     target = target[select]
-                motion_n, skeleton_n, target_n = normalize_batch(motion, skeleton, target, stats)
+                motion_n, skeleton_n, target_n = normalize_batch(motion, skeleton, target, stats, config)
 
                 optimizer.zero_grad(set_to_none=True)
                 with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
@@ -2905,6 +3336,7 @@ def main() -> None:
                                 step=step,
                                 joint_dim=joint_dim,
                                 wandb_run=wandb_run,
+                                skeleton_feature_lookup=skeleton_feature_lookup,
                             )
                         except Exception as exc:
                             visual_metrics = {

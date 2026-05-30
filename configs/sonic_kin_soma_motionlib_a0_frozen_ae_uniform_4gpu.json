@@ -1,0 +1,165 @@
+{
+  "schema_version": "1.2.0",
+  "owner": "OnlineRetarget",
+  "training_lane": "soma_motionlib_kin_only",
+  "purpose": "A0 frozen Skeleton Geometry AE concat supervised uniform-SOMA baseline. Motion token plus frozen static skeleton embedding predicts G1 kin targets only.",
+  "source_repo": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training",
+  "source_rev": "remote-latest-required-before-training",
+  "input_data": {
+    "format": "soma_motionlib",
+    "soma_topology": "uniform",
+    "robot_motion_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/robot_filtered_v1",
+    "soma_motion_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/soma_uniform_filtered_v1",
+    "source_fps": 120.0,
+    "target_fps": 50.0,
+    "max_duration_delta_sec": 0.05,
+    "max_clips": 20000,
+    "robot_root_rot_format": "xyzw"
+  },
+  "skeleton_ae": {
+    "enabled": true,
+    "checkpoint": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/skeleton_geometry_ae_runs/lr177_skeleton_geometry_ae_20260530T0602Z/all_skeletons/checkpoints/latest.pt",
+    "normalization": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/skeleton_geometry_ae_runs/lr177_skeleton_geometry_ae_20260530T0602Z/all_skeletons/stats/skeleton_geometry_normalization.pt",
+    "registry_csv": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/skeleton_ae_registry/bones_sonic_all_skeleton_ae_registry_v0/skeleton_ae_registry.csv",
+    "freeze_encoder": true,
+    "expected_architecture": [104, 256, 128, 64, 128, 256, 104],
+    "x_skel_dim": 104,
+    "z_skel_dim": 64
+  },
+  "source_features": [
+    "soma_joints_multi_future_local_nonflat_plus_soma_root_ori_b_multi_future",
+    "frozen_skeleton_geometry_ae_z64_from_static_registry"
+  ],
+  "target_decoder": {
+    "primary": "g1_kin",
+    "auxiliary": []
+  },
+  "decoder_targets": [
+    "g1_kin"
+  ],
+  "target_features": [
+    "command_multi_future_nonflat",
+    "root_pos_w_mf",
+    "root_rot_w_mf"
+  ],
+  "losses": {
+    "primary": [
+      "g1_kin_joint_rmse",
+      "g1_kin_velocity_rmse",
+      "g1_kin_root_position_rmse",
+      "g1_kin_root_orientation_rmse"
+    ],
+    "auxiliary": []
+  },
+  "output_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_kin_soma_motionlib_a0_frozen_ae_runs/{run_group}/uniform",
+  "validation_command": "PYTHONPATH=src:. /workspace/isaaclab/_isaac_sim/python.sh scripts/train_sonic_kin_skeleton_ae.py --config configs/sonic_kin_soma_motionlib_a0_frozen_ae_uniform_4gpu.json --dry-run",
+  "expected_artifacts": [
+    "manifest.json",
+    "dry_run_summary.json",
+    "cache/skeleton_embedding_cache.pt",
+    "stats/normalization.pt",
+    "loss_curve.csv",
+    "checkpoints/latest.pt",
+    "logs/train.log"
+  ],
+  "variant": {
+    "name": "sonic_kin_soma_motionlib_a0_frozen_ae_uniform",
+    "family": "A0_frozen_skeleton_ae",
+    "type": "concat",
+    "soma_topology": "uniform",
+    "gpu_topology": "single_4gpu_ddp_job"
+  },
+  "features": {
+    "future_window_frames": 10,
+    "future_step": 5,
+    "motion_feature": "soma_joints_multi_future_local_nonflat_plus_soma_root_ori_b_multi_future",
+    "skeleton_feature": "frozen_skeleton_geometry_ae_z64_from_static_registry",
+    "target_feature": "command_multi_future_nonflat_plus_root_pos_w_mf_plus_root_rot_w_mf",
+    "include_root_pos_target": true,
+    "expected_dims": {
+      "motion_token": 840,
+      "x_skel": 104,
+      "z_skel": 64,
+      "model_input": 904,
+      "target": 670
+    }
+  },
+  "split": {
+    "validation_ratio": 0.005,
+    "hash_salt": "sonic-kin-soma-motionlib-a0-frozen-ae-20260530"
+  },
+  "normalization": {
+    "max_frames": 200000,
+    "frames_per_chunk": 1024
+  },
+  "model": {
+    "hidden_dim": 512,
+    "num_layers": 3,
+    "dropout": 0.0
+  },
+  "training": {
+    "seed": 2026053003,
+    "max_steps": 1000000,
+    "required_gpu_count": 4,
+    "batch_frames": 4096,
+    "frame_stride": 1,
+    "loader_chunk_frames": 2048,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.00001,
+    "grad_clip_norm": 1.0,
+    "precision": "bf16",
+    "num_workers": 2,
+    "log_every": 20,
+    "validate_every": 200,
+    "validation_batches": 16,
+    "checkpoint_every": 500,
+    "keep_last_checkpoints": 5,
+    "command_loss_weight": 1.0,
+    "root_pos_loss_weight": 0.25,
+    "root_rot_loss_weight": 0.5
+  },
+  "visual_validation": {
+    "enabled": true,
+    "every_steps": 20000,
+    "every_minutes": 60,
+    "num_videos": 8,
+    "duration_sec": 4.0,
+    "wandb_upload": true,
+    "width": 640,
+    "height": 360,
+    "source_position_scale": 0.01,
+    "source_bvh_roots": [
+      "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/source_bvh_cache"
+    ],
+    "source_bvh_cache": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/source_bvh_cache",
+    "source_bvh_tar": "/mnt/data_oss/online_retarget/lr147_delta_bvh_vis_data_20260525/back_data/soma_proportional.tar",
+    "g1_model_xml": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training/gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml"
+  },
+  "runtime": {
+    "required_gpu_count": 4,
+    "write_root": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs",
+    "forbid_write_roots": [
+      "/home/user/data/motion_data",
+      "/mnt/data_oss"
+    ],
+    "require_committed_code": true,
+    "require_latest_code": true
+  },
+  "wandb": {
+    "enabled": true,
+    "project": "OnlineRetarget",
+    "entity": null,
+    "group": "sonic_kin_soma_motionlib_a0_frozen_ae_{run_group}",
+    "name": "sonic_kin_soma_motionlib_a0_frozen_ae_uniform_{run_group}",
+    "dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/wandb",
+    "tags": [
+      "sonic-kin-only",
+      "soma-motionlib",
+      "supervised",
+      "A0",
+      "frozen-skeleton-ae",
+      "uniform",
+      "4gpu"
+    ]
+  }
+}
