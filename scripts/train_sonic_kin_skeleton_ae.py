@@ -4060,7 +4060,9 @@ def main() -> None:
             json.dumps(summary, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        stage_trace.log("index_only_preflight", "details", **summary)
+        trace_summary = dict(summary)
+        trace_summary["summary_event"] = trace_summary.pop("event")
+        stage_trace.log("index_only_preflight", "details", **trace_summary)
         print(json.dumps(summary, sort_keys=True), flush=True)
         return
     with stage_trace.span("distributed_runtime_setup"):

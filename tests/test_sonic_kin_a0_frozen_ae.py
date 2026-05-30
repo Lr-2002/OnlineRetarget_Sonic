@@ -85,6 +85,7 @@ class A0FrozenAEConfigTests(unittest.TestCase):
             "first_batch_collation",
             "index_only_preflight",
             "index_only_summary.json",
+            "summary_event",
             "rows_from_index_cache",
             "rows_from_index_cache_path",
             "cache/rows_from_index",
@@ -151,6 +152,7 @@ class A0FrozenAEConfigTests(unittest.TestCase):
         self.assertIn("expected torchrun WORLD_SIZE", text)
         self.assertIn("skipped_count=int(skipped)", text)
         self.assertNotIn("skipped_count=len(skipped)", text)
+        self.assertNotIn('stage_trace.log("index_only_preflight", "details", **summary)', text)
 
 
 @unittest.skipIf(torch is None, "torch is required for A0 frozen AE tests")
