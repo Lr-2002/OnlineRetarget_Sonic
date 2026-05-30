@@ -43,6 +43,7 @@ from online_retarget.data.sonic_windowed_builder import (
     SonicWindowedBuildConfig,
     build_sonic_windowed_jsonl,
 )
+from online_retarget.data.skeleton_ae_registry import build_all_skeleton_ae_registry
 from online_retarget.data.skeleton_registry import build_skeleton_registry
 from online_retarget.data.source_fk_quality import (
     SourceFKQualityConfig,
@@ -101,6 +102,24 @@ def main() -> None:
         default=[],
         help="Allowed row action. Repeat for multiple values. Defaults to keep/downweight.",
     )
+
+    skeleton_ae_registry = subparsers.add_parser(
+        "build-skeleton-ae-registry",
+        help="Build all-identity 104D skeleton geometry rows for Skeleton AE pretraining",
+    )
+    skeleton_ae_registry.add_argument("--index-csv", type=Path, required=True)
+    skeleton_ae_registry.add_argument("--data-root", type=Path, default=Paths.from_env().data_root)
+    skeleton_ae_registry.add_argument("--output-root", type=Path, default=Paths.from_env().output_root)
+    skeleton_ae_registry.add_argument(
+        "--run-name",
+        default="bones_sonic_all_skeleton_ae_registry_v0",
+    )
+    skeleton_ae_registry.add_argument("--source-tar", type=Path)
+    skeleton_ae_registry.add_argument("--skeleton-id-column", default="actor_uid")
+    skeleton_ae_registry.add_argument("--validation-ratio", type=float, default=0.1)
+    skeleton_ae_registry.add_argument("--seed", type=int, default=2026053001)
+    skeleton_ae_registry.add_argument("--position-scale", type=float, default=0.01)
+    skeleton_ae_registry.add_argument("--limit", type=int)
 
     sonic_quality = subparsers.add_parser(
         "scan-sonic-quality",
@@ -782,6 +801,8 @@ def main() -> None:
         _build_sonic_index(args)
     elif args.command == "build-skeleton-registry":
         _build_skeleton_registry(args)
+    elif args.command == "build-skeleton-ae-registry":
+        _build_skeleton_ae_registry(args)
     elif args.command == "scan-sonic-quality":
         _scan_sonic_quality(args)
     elif args.command == "export-sonic-review-clips":
@@ -863,6 +884,22 @@ def _build_skeleton_registry(args: argparse.Namespace) -> None:
         run_name=args.run_name,
         action_column=args.action_column,
         allowed_actions=tuple(args.allowed_action or ["keep", "downweight"]),
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _build_skeleton_ae_registry(args: argparse.Namespace) -> None:
+    result = build_all_skeleton_ae_registry(
+        index_csv=args.index_csv,
+        data_root=args.data_root,
+        output_root=args.output_root,
+        run_name=args.run_name,
+        skeleton_id_column=args.skeleton_id_column,
+        validation_ratio=args.validation_ratio,
+        seed=args.seed,
+        position_scale=args.position_scale,
+        source_tar=args.source_tar,
+        limit=args.limit,
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
 

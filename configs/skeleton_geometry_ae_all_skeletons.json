@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "training_lane": "skeleton_geometry_ae_only",
+  "purpose": "AE-only continuous SOMA skeleton geometry pretraining across all available skeleton identities.",
+  "input_data": {
+    "registry_csv": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/skeleton_ae_registry/bones_sonic_all_skeleton_ae_registry_v0/skeleton_ae_registry.csv",
+    "expected_geometry_shape": [104],
+    "skeleton_id_field": "encoder_id",
+    "geometry_field": "geometry_json"
+  },
+  "output_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/skeleton_geometry_ae_runs/{run_group}/all_skeletons",
+  "model": {
+    "input_dim": 104,
+    "hidden_dims": [256, 128],
+    "latent_dim": 64,
+    "decoder_hidden_dims": [128, 256],
+    "output_dim": 104,
+    "dropout": 0.0
+  },
+  "training": {
+    "seed": 2026053001,
+    "batch_size": 128,
+    "validation_batch_size": 256,
+    "max_steps": 20000,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "grad_clip_norm": 1.0,
+    "log_every": 100,
+    "validate_every": 500
+  },
+  "normalization": {
+    "fit_split": "train",
+    "stats_file": "stats/skeleton_geometry_normalization.pt"
+  },
+  "expected_artifacts": [
+    "manifest.json",
+    "stats/skeleton_geometry_normalization.pt",
+    "loss_curve.csv",
+    "checkpoints/latest.pt"
+  ],
+  "runtime": {
+    "write_root": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs",
+    "device": "auto",
+    "require_committed_code": false
+  }
+}
