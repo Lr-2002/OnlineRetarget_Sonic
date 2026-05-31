@@ -160,6 +160,13 @@ class A0FrozenAEConfigTests(unittest.TestCase):
         self.assertNotIn("skipped_count=len(skipped)", text)
         self.assertNotIn('stage_trace.log("index_only_preflight", "details", **summary)', text)
 
+    def test_soma_prediction_recomposes_root_local_xy_for_visualization(self) -> None:
+        text = (REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py").read_text(encoding="utf-8")
+        self.assertIn('input_data.get("format") == "soma_motionlib"', text)
+        self.assertIn("pred_root[:, :2] += fallback_root_pos[:, :2]", text)
+        self.assertIn('"root_pos": pred_root', text)
+        self.assertIn('"root_euler": _rot6d_to_euler_xyz_batch(root_rot6d[:, 0])', text)
+
 
 @unittest.skipIf(torch is None, "torch is required for A0 frozen AE tests")
 class A0FrozenAEFeatureTests(unittest.TestCase):

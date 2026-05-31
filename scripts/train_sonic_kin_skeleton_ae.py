@@ -3417,9 +3417,13 @@ def _predict_g1_state_from_features(
             window,
             6,
         )
+        pred_root = root_pos[:, 0].astype(np.float32, copy=True)
+        input_data = config.get("input_data", {}) if isinstance(config, Mapping) else {}
+        if isinstance(input_data, Mapping) and input_data.get("format") == "soma_motionlib":
+            pred_root[:, :2] += fallback_root_pos[:, :2]
         state = {
             "joint_pos": pred[:, :joint_dim],
-            "root_pos": root_pos[:, 0].astype(np.float32, copy=False),
+            "root_pos": pred_root,
             "root_euler": _rot6d_to_euler_xyz_batch(root_rot6d[:, 0]),
         }
     return state

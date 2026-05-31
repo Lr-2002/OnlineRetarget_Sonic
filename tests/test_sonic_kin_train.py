@@ -2,10 +2,83 @@ import unittest
 
 import numpy as np
 
-import scripts.train_sonic_kin_skeleton_ae as sonic_train
+try:
+    import scripts.train_sonic_kin_skeleton_ae as sonic_train
+except ModuleNotFoundError as exc:
+    if exc.name != "torch":
+        raise
+    sonic_train = None
 
 
+if sonic_train is not None:
+    class _FixedPredictionModel(sonic_train.nn.Module):
+        def __init__(self, output: np.ndarray):
+            super().__init__()
+            self.register_buffer(
+                "_output",
+                sonic_train.torch.as_tensor(output, dtype=sonic_train.torch.float32),
+            )
+
+        def forward(self, motion, skeleton):
+            return self._output[: motion.shape[0]].to(motion.device)
+
+
+@unittest.skipIf(sonic_train is None, "torch is required for sonic kin trainer tests")
 class SonicKinTrainTimingTests(unittest.TestCase):
+    def _predict_state(
+        self,
+        config,
+        pred,
+        *,
+        joint_dim=2,
+        fallback_root_pos=None,
+        fallback_root_quat=None,
+    ):
+        pred = np.asarray(pred, dtype=np.float32)[None, :]
+        fallback_root_pos = (
+            np.asarray(fallback_root_pos, dtype=np.float32)
+            if fallback_root_pos is not None
+            else np.zeros((1, 3), dtype=np.float32)
+        )
+        fallback_root_quat = (
+            np.asarray(fallback_root_quat, dtype=np.float32)
+            if fallback_root_quat is not None
+            else np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+        )
+        torch = sonic_train.torch
+        stats = {
+            "motion_mean": torch.zeros(4, dtype=torch.float32),
+            "motion_std": torch.ones(4, dtype=torch.float32),
+            "skeleton_mean": torch.zeros(2, dtype=torch.float32),
+            "skeleton_std": torch.ones(2, dtype=torch.float32),
+            "target_mean": torch.zeros(pred.shape[1], dtype=torch.float32),
+            "target_std": torch.ones(pred.shape[1], dtype=torch.float32),
+        }
+        return sonic_train._predict_g1_state_from_features(
+            model=_FixedPredictionModel(pred),
+            motion=np.zeros((1, 4), dtype=np.float32),
+            skeleton=np.zeros((1, 2), dtype=np.float32),
+            stats=stats,
+            device=torch.device("cpu"),
+            config=config,
+            joint_dim=joint_dim,
+            fallback_root_pos=fallback_root_pos,
+            fallback_root_quat=fallback_root_quat,
+        )
+
+    @staticmethod
+    def _prediction_with_root_target(root_pos):
+        joint_dim = 2
+        window = 1
+        command_dim = window * joint_dim * 2
+        pred = np.zeros(command_dim + window * 3 + window * 6, dtype=np.float32)
+        pred[command_dim : command_dim + 3] = np.asarray(root_pos, dtype=np.float32)
+        pred[command_dim + 3 : command_dim + 9] = np.asarray(
+            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            dtype=np.float32,
+        )
+        return pred
+
     def test_robot_root_rot_to_wxyz_converts_gmr_xyzw_motionlib_quat(self):
         root_rot_xyzw = np.asarray([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
 
@@ -136,6 +209,60 @@ class SonicKinTrainTimingTests(unittest.TestCase):
             target[0, root_rot_start : root_rot_start + 6],
             np.asarray([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32),
         )
+
+    def test_predict_soma_root_target_composes_local_xy_to_world(self):
+        config = {
+            "input_data": {"format": "soma_motionlib"},
+            "features": {"future_window_frames": 1, "include_root_pos_target": True},
+        }
+
+        state = self._predict_state(
+            config,
+            self._prediction_with_root_target([0.25, -0.5, 1.2]),
+            fallback_root_pos=[[10.0, 20.0, 0.3]],
+        )
+
+        np.testing.assert_allclose(
+            state["root_pos"],
+            np.asarray([[10.25, 19.5, 1.2]], dtype=np.float32),
+            atol=1e-6,
+        )
+
+    def test_predict_non_soma_root_target_keeps_predicted_root(self):
+        config = {
+            "input_data": {"format": "npz"},
+            "features": {"future_window_frames": 1, "include_root_pos_target": True},
+        }
+
+        state = self._predict_state(
+            config,
+            self._prediction_with_root_target([0.25, -0.5, 1.2]),
+            fallback_root_pos=[[10.0, 20.0, 0.3]],
+        )
+
+        np.testing.assert_allclose(
+            state["root_pos"],
+            np.asarray([[0.25, -0.5, 1.2]], dtype=np.float32),
+            atol=1e-6,
+        )
+
+    def test_predict_soma_without_root_target_keeps_fallback_root(self):
+        config = {
+            "input_data": {"format": "soma_motionlib"},
+            "features": {"include_root_pos_target": False},
+        }
+        fallback_root_pos = np.asarray([[10.0, 20.0, 0.3]], dtype=np.float32)
+        fallback_root_quat = np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+
+        state = self._predict_state(
+            config,
+            [0.25, -0.5],
+            fallback_root_pos=fallback_root_pos,
+            fallback_root_quat=fallback_root_quat,
+        )
+
+        np.testing.assert_allclose(state["root_pos"], fallback_root_pos)
+        np.testing.assert_allclose(state["root_quat"], fallback_root_quat)
 
     def test_kin_visual_validation_due_accepts_wall_clock_cadence(self):
         config = {
