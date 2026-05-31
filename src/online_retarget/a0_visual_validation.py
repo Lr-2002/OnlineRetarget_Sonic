@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -18,13 +19,141 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 
-DEFAULT_G1_USD = Path("/home/user/project/OnlineRetarget/runs/isaaclab_urdf_cache/g1_main/main.usd")
+G1_USD_RELATIVE_PATH = Path("runs/isaaclab_urdf_cache/g1_main/main.usd")
+DEFAULT_G1_USD = Path.cwd() / G1_USD_RELATIVE_PATH
+ONLINE_RETARGET_ROOT_ENV_KEYS = (
+    "ONLINE_RETARGET_RUNTIME_ROOT",
+    "ONLINERETARGET_RUNTIME_ROOT",
+    "ONLINE_RETARGET_ROOT",
+)
 PRIMARY_VISUAL_BACKEND = "somamesh_global_soma_plus_isaaclab_g1_kinematic_playback"
 ACCEPTANCE_SOURCE_BACKEND = "accepted_somamesh_global_soma_display"
 ACCEPTANCE_G1_BACKEND = "isaaclab_usd_g1_kinematic_playback"
 DEBUG_CAPSULE_BACKEND = "software_capsule_debug_fallback"
 SOMA_DISPLAY_TRANSFORM = "(x,y,z)_display=(x,-z,y)_soma"
 ACCEPTANCE_OVERLAYS = ("world_axes", "root_axes", "semantic_left_right")
+
+
+def resolve_g1_usd_path(
+    config: Mapping[str, Any],
+    explicit_path: Path | str | None = None,
+    *,
+    explicit_source: str = "",
+) -> tuple[Path, dict[str, Any]]:
+    """Resolve the acceptance G1 USD without assuming a fixed host checkout."""
+
+    if explicit_path:
+        path = Path(str(explicit_path)).expanduser()
+        exists = path.exists()
+        return path, {
+            "status": "ok" if exists else "missing_explicit",
+            "source": explicit_source or "explicit",
+            "path": str(path),
+            "exists": bool(exists),
+            "failure_reasons": [] if exists else ["robot_usd_missing"],
+        }
+
+    roots = _online_retarget_runtime_roots(config)
+    candidate_records: list[dict[str, str]] = []
+    for source, root in roots:
+        candidate = root / G1_USD_RELATIVE_PATH
+        candidate_records.append({"source": source, "path": str(candidate)})
+        if candidate.exists():
+            return candidate, {
+                "status": "ok",
+                "source": source,
+                "runtime_root": str(root),
+                "path": str(candidate),
+                "exists": True,
+                "candidate_paths": candidate_records,
+                "failure_reasons": [],
+            }
+
+    if candidate_records:
+        path = Path(candidate_records[0]["path"])
+        return path, {
+            "status": "missing_derived",
+            "source": candidate_records[0]["source"],
+            "runtime_root": str(roots[0][1]),
+            "path": str(path),
+            "exists": False,
+            "candidate_paths": candidate_records,
+            "failure_reasons": ["robot_usd_missing"],
+        }
+
+    return DEFAULT_G1_USD, {
+        "status": "missing_runtime_root",
+        "source": "cwd",
+        "runtime_root": str(Path.cwd()),
+        "path": str(DEFAULT_G1_USD),
+        "exists": bool(DEFAULT_G1_USD.exists()),
+        "candidate_paths": [{"source": "cwd", "path": str(DEFAULT_G1_USD)}],
+        "failure_reasons": [] if DEFAULT_G1_USD.exists() else ["robot_usd_missing"],
+    }
+
+
+def _online_retarget_runtime_roots(config: Mapping[str, Any]) -> list[tuple[str, Path]]:
+    candidates: list[tuple[str, Path]] = []
+    visual_cfg = config.get("visual_validation", {})
+    if isinstance(visual_cfg, Mapping):
+        for key in ("online_retarget_root", "runtime_root"):
+            if visual_cfg.get(key):
+                candidates.append((f"visual_validation.{key}", Path(str(visual_cfg[key])).expanduser()))
+
+    for key in ONLINE_RETARGET_ROOT_ENV_KEYS:
+        value = os.environ.get(key)
+        if value:
+            candidates.append((f"env.{key}", Path(value).expanduser()))
+
+    runtime_cfg = config.get("runtime", {})
+    if isinstance(runtime_cfg, Mapping) and runtime_cfg.get("write_root"):
+        write_root = Path(str(runtime_cfg["write_root"])).expanduser()
+        candidates.append(("runtime.write_root", write_root.parent if write_root.name == "outputs" else write_root))
+
+    for source, value in _config_path_values(config):
+        root = _path_before_outputs(Path(str(value)).expanduser())
+        if root is not None:
+            candidates.append((source, root))
+
+    candidates.append(("cwd", Path.cwd()))
+    return _dedupe_paths(candidates)
+
+
+def _config_path_values(config: Mapping[str, Any]) -> list[tuple[str, object]]:
+    values: list[tuple[str, object]] = []
+    for key in ("output_dir",):
+        if config.get(key):
+            values.append((key, config[key]))
+    for section_name in ("input_data", "wandb"):
+        section = config.get(section_name, {})
+        if not isinstance(section, Mapping):
+            continue
+        for key, value in section.items():
+            if value and ("dir" in key or "root" in key or "cache" in key):
+                values.append((f"{section_name}.{key}", value))
+    return values
+
+
+def _path_before_outputs(path: Path) -> Path | None:
+    parts = path.parts
+    if "outputs" not in parts:
+        return None
+    index = parts.index("outputs")
+    if index <= 0:
+        return None
+    return Path(*parts[:index])
+
+
+def _dedupe_paths(candidates: Sequence[tuple[str, Path]]) -> list[tuple[str, Path]]:
+    deduped: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+    for source, path in candidates:
+        key = str(path)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append((source, path))
+    return deduped
 
 
 class A0VisualValidationRenderer:
@@ -45,8 +174,22 @@ class A0VisualValidationRenderer:
         visual_cfg = config.get("visual_validation", {})
         if not isinstance(visual_cfg, Mapping):
             visual_cfg = {}
-        configured_usd = visual_cfg.get("g1_robot_usd") or visual_cfg.get("g1_usd") or g1_usd_path
-        self.g1_usd_path = Path(str(configured_usd)) if configured_usd else DEFAULT_G1_USD
+        configured_usd: Path | str | None = None
+        configured_source = ""
+        for key in ("g1_robot_usd", "g1_usd"):
+            value = visual_cfg.get(key)
+            if value:
+                configured_usd = value
+                configured_source = f"visual_validation.{key}"
+                break
+        if configured_usd is None and g1_usd_path is not None:
+            configured_usd = g1_usd_path
+            configured_source = "constructor.g1_usd_path"
+        self.g1_usd_path, self.g1_usd_resolution = resolve_g1_usd_path(
+            config,
+            configured_usd,
+            explicit_source=configured_source,
+        )
 
     def compose_prediction_root(
         self,
@@ -101,6 +244,7 @@ class A0VisualValidationRenderer:
             "source_display_transform": SOMA_DISPLAY_TRANSFORM,
             "g1_backend": ACCEPTANCE_G1_BACKEND,
             "g1_asset_usd": str(self.g1_usd_path),
+            "g1_asset_usd_resolution": self.g1_usd_resolution,
             "required_overlays": list(ACCEPTANCE_OVERLAYS),
             "active_backend_is_acceptance_backend": active_is_acceptance,
             "debug_fallback_is_acceptance_backend": False,
@@ -146,6 +290,7 @@ class A0VisualValidationRenderer:
             command.extend(["--step", str(int(step))])
         if count is not None:
             command.extend(["--num-videos", str(int(count))])
+        command.extend(["--g1-robot-usd", str(self.g1_usd_path)])
         return command
 
     def isaaclab_g1_render_command(
@@ -258,6 +403,7 @@ class A0VisualValidationRenderer:
             "backend": ACCEPTANCE_G1_BACKEND,
             "command": command,
             "robot_usd": str(self.g1_usd_path),
+            "robot_usd_resolution": self.g1_usd_resolution,
             "motion_path": str(motion_path),
             "output_path": str(output),
             "expected_output_path": str(output),
@@ -273,6 +419,7 @@ class A0VisualValidationRenderer:
                 "command": command,
                 "command_record": str(command_record),
                 "robot_usd": str(self.g1_usd_path),
+                "robot_usd_resolution": self.g1_usd_resolution,
                 "output": str(output),
                 "expected_output_path": str(output),
                 "overlays": list(ACCEPTANCE_OVERLAYS),
@@ -310,6 +457,7 @@ class A0VisualValidationRenderer:
             "command": command,
             "command_record": str(command_record),
             "robot_usd": str(self.g1_usd_path),
+            "robot_usd_resolution": self.g1_usd_resolution,
             "output": str(output),
             "expected_output_path": str(output),
             "output_exists": bool(output_exists),

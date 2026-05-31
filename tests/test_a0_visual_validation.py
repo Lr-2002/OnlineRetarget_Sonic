@@ -82,7 +82,8 @@ class A0VisualValidationRendererTests(unittest.TestCase):
         self.assertEqual(manifest["primary_backend"], PRIMARY_VISUAL_BACKEND)
         self.assertEqual(manifest["active_backend"], DEBUG_CAPSULE_BACKEND)
         self.assertEqual(manifest["source_display_transform"], SOMA_DISPLAY_TRANSFORM)
-        self.assertEqual(manifest["g1_asset_usd"], str(DEFAULT_G1_USD))
+        self.assertEqual(manifest["g1_asset_usd"], str(renderer.g1_usd_path))
+        self.assertEqual(manifest["g1_asset_usd_resolution"]["path"], str(renderer.g1_usd_path))
         self.assertFalse(manifest["active_backend_is_acceptance_backend"])
         self.assertFalse(manifest["debug_fallback_is_acceptance_backend"])
 
@@ -91,6 +92,31 @@ class A0VisualValidationRendererTests(unittest.TestCase):
         self.assertEqual(acceptance["source_human_backend"], ACCEPTANCE_SOURCE_BACKEND)
         self.assertEqual(acceptance["g1_backend"], ACCEPTANCE_G1_BACKEND)
         self.assertTrue(acceptance["active_backend_is_acceptance_backend"])
+
+    def test_g1_usd_derives_from_online_retarget_output_root(self) -> None:
+        renderer = A0VisualValidationRenderer(
+            {
+                "output_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/"
+                "sonic_kin_soma_motionlib_a0_frozen_ae_runs/{run_group}/uniform"
+            }
+        )
+
+        expected = Path("/mnt/data_cpfs/code/wxh/OnlineRetarget/runs/isaaclab_urdf_cache/g1_main/main.usd")
+        self.assertEqual(renderer.g1_usd_path, expected)
+        self.assertEqual(renderer.g1_usd_resolution["source"], "output_dir")
+        self.assertEqual(renderer.g1_usd_resolution["path"], str(expected))
+
+    def test_explicit_g1_robot_usd_wins_over_runtime_root(self) -> None:
+        explicit = Path("/tmp/explicit_g1/main.usd")
+        renderer = A0VisualValidationRenderer(
+            {
+                "output_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/run",
+                "visual_validation": {"g1_robot_usd": str(explicit)},
+            }
+        )
+
+        self.assertEqual(renderer.g1_usd_path, explicit)
+        self.assertEqual(renderer.g1_usd_resolution["source"], "visual_validation.g1_robot_usd")
 
     def test_isaaclab_g1_render_command_preserves_world_root_and_asset(self) -> None:
         renderer = A0VisualValidationRenderer({"visual_validation": {}})
@@ -113,7 +139,7 @@ class A0VisualValidationRendererTests(unittest.TestCase):
         self.assertEqual(command[command.index("--format") + 1], "npz")
 
     def test_rerender_cli_command_requests_acceptance_backend(self) -> None:
-        command = A0VisualValidationRenderer({}).rerender_cli_command(
+        command = A0VisualValidationRenderer({"visual_validation": {"g1_robot_usd": "/tmp/g1/main.usd"}}).rerender_cli_command(
             config_path="config.json",
             checkpoint_path="step.pt",
             output_dir="rerender",
@@ -130,6 +156,7 @@ class A0VisualValidationRendererTests(unittest.TestCase):
         self.assertEqual(command[command.index("--checkpoint") + 1], "step.pt")
         self.assertEqual(command[command.index("--rows-cache") + 1], "rows.json")
         self.assertEqual(command[command.index("--step") + 1], "119500")
+        self.assertEqual(command[command.index("--g1-robot-usd") + 1], "/tmp/g1/main.usd")
 
     def test_g1_motion_npz_and_fake_isaaclab_playback_record_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

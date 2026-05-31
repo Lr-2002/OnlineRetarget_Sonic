@@ -12,6 +12,37 @@ import sys
 from isaaclab.app import AppLauncher
 
 
+simulation_app = None
+
+
+def _write_preflight_failure(args: argparse.Namespace, failure_reasons: list[str]) -> None:
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    output_exists = args.output.exists()
+    output_bytes = args.output.stat().st_size if output_exists else 0
+    report = {
+        "status": "failed",
+        "backend": "isaaclab_usd_g1_kinematic_playback",
+        "preflight_stage": "before_app_launcher",
+        "app_launcher_started": False,
+        "output": str(args.output),
+        "expected_output_path": str(args.output),
+        "output_exists": bool(output_exists),
+        "output_bytes": int(output_bytes),
+        "missing_output": bool(not output_exists or output_bytes <= 0),
+        "robot_usd": str(args.robot_usd) if args.robot_usd is not None else "",
+        "failure_reasons": failure_reasons,
+        "message": "; ".join(failure_reasons),
+    }
+    args.output.with_suffix(".json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
+def _preflight_before_app_launcher(args: argparse.Namespace) -> None:
+    if args.robot_usd is not None and not args.robot_usd.exists():
+        _write_preflight_failure(args, ["robot_usd_missing"])
+        raise SystemExit(2)
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--npz", type=Path, default=None, help="Legacy BONES-SONIC NPZ input.")
@@ -59,6 +90,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 args_cli = _parse_args()
+_preflight_before_app_launcher(args_cli)
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
@@ -279,15 +311,57 @@ def main() -> None:
         "failure_reasons": failure_reasons,
         "message": "" if status == "ok" else "; ".join(failure_reasons),
     }
-    args_cli.output.with_suffix(".json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    report_path = args_cli.output.with_suffix(".json")
+    report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2, sort_keys=True))
-    rep.vp_manager.destroy_hydra_textures("Replicator")
-    sim.stop()
-    sim.clear_all_callbacks()
-    sim.clear_instance()
-    simulation_app.close()
+    _cleanup_after_report(sim, report_path)
     if status != "ok":
         raise SystemExit(2)
+
+
+def _cleanup_after_report(sim: sim_utils.SimulationContext, report_path: Path) -> None:
+    warnings = []
+    for step_name, callback in (
+        ("destroy_hydra_textures", lambda: rep.vp_manager.destroy_hydra_textures("Replicator")),
+        ("sim_stop", sim.stop),
+        ("sim_clear_all_callbacks", sim.clear_all_callbacks),
+        ("sim_clear_instance", sim.clear_instance),
+    ):
+        try:
+            callback()
+        except Exception as exc:  # pragma: no cover - depends on IsaacSim shutdown timing.
+            warnings.append(_cleanup_warning(step_name, exc, report_path))
+    shutdown = _shutdown_simulation_app(phase="main_post_report", report_path=report_path)
+    if shutdown.get("status") == "warning":
+        warnings.append(shutdown)
+    if warnings:
+        shutdown_path = report_path.with_suffix(".shutdown.json")
+        shutdown_path.write_text(json.dumps({"warnings": warnings}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _cleanup_warning(step_name: str, exc: Exception, report_path: Path) -> dict[str, object]:
+    warning = {
+        "event": "isaacsim_shutdown_linger",
+        "status": "warning",
+        "stage": step_name,
+        "report_path": str(report_path),
+        "message": str(exc),
+        "exception_type": type(exc).__name__,
+    }
+    print(json.dumps(warning, sort_keys=True), file=sys.stderr, flush=True)
+    return warning
+
+
+def _shutdown_simulation_app(*, phase: str, report_path: Path | None = None) -> dict[str, object]:
+    app = globals().get("simulation_app")
+    if app is None:
+        return {"status": "skipped", "phase": phase, "reason": "app_launcher_not_started"}
+    try:
+        if app.is_running():
+            app.close()
+        return {"status": "ok", "phase": phase}
+    except Exception as exc:  # pragma: no cover - depends on IsaacSim shutdown timing.
+        return _cleanup_warning(phase, exc, report_path or Path(""))
 
 
 def _read_json(path: Path | None) -> dict[str, object]:
@@ -469,5 +543,4 @@ if __name__ == "__main__":
     try:
         main()
     finally:
-        if simulation_app.is_running():
-            simulation_app.close()
+        _shutdown_simulation_app(phase="finalizer", report_path=args_cli.output.with_suffix(".json"))

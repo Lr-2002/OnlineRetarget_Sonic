@@ -41,6 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--acceptance-backend", action="store_true")
+    parser.add_argument("--g1-robot-usd", type=Path, default=None)
     parser.add_argument("--isaac-python-bin", default="/workspace/isaaclab/_isaac_sim/python.sh")
     parser.add_argument("--isaac-render-script", type=Path, default=ROOT / "scripts" / "render_g1_isaac_pair.py")
     parser.add_argument("--no-execute-isaaclab", action="store_true")
@@ -59,6 +60,8 @@ def main() -> None:
         visual_cfg["width"] = int(args.width)
     if args.height is not None:
         visual_cfg["height"] = int(args.height)
+    if args.g1_robot_usd is not None:
+        visual_cfg["g1_robot_usd"] = str(args.g1_robot_usd)
 
     training_output_dir = args.checkpoint.parent.parent
     rows_cache = args.rows_cache or kin.rows_from_index_cache_path(training_output_dir)
@@ -125,6 +128,7 @@ def main() -> None:
         "rows_cache_repair": rows_cache_report,
         "stats": str(stats_path),
         "checkpoint": str(args.checkpoint),
+        "g1_robot_usd": str(visual_cfg.get("g1_robot_usd", "")),
     }
     _annotate_summary(summary_path, rerender_inputs=rerender_inputs)
     result: dict[str, Any] = {
@@ -140,6 +144,7 @@ def main() -> None:
         "output_dir": str(args.output_dir),
         "summary": str(summary_path),
         "acceptance_backend": bool(args.acceptance_backend),
+        "g1_robot_usd": str(visual_cfg.get("g1_robot_usd", "")),
         "metrics": metrics,
     }
     print(json.dumps(result, sort_keys=True), flush=True)
