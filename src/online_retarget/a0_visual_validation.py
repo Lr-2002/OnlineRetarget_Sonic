@@ -11,9 +11,12 @@ import json
 import math
 import os
 from pathlib import Path
+import signal
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -21,6 +24,9 @@ import numpy as np
 
 G1_USD_RELATIVE_PATH = Path("runs/isaaclab_urdf_cache/g1_main/main.usd")
 DEFAULT_G1_USD = Path.cwd() / G1_USD_RELATIVE_PATH
+DEFAULT_ISAACLAB_RENDER_TIMEOUT_SEC = 900.0
+DEFAULT_ISAACLAB_SUCCESS_ARTIFACT_GRACE_SEC = 2.0
+DEFAULT_ISAACLAB_TERMINATE_GRACE_SEC = 10.0
 ONLINE_RETARGET_ROOT_ENV_KEYS = (
     "ONLINE_RETARGET_RUNTIME_ROOT",
     "ONLINERETARGET_RUNTIME_ROOT",
@@ -384,6 +390,9 @@ class A0VisualValidationRenderer:
         height: int,
         execute: bool = True,
         cwd: Path | str | None = None,
+        timeout_sec: float | None = None,
+        success_artifact_grace_sec: float | None = None,
+        terminate_grace_sec: float | None = None,
     ) -> dict[str, Any]:
         """Run or record the real IsaacLab USD kinematic playback command."""
 
@@ -425,32 +434,52 @@ class A0VisualValidationRenderer:
                 "overlays": list(ACCEPTANCE_OVERLAYS),
                 "preserve_world_root": True,
             }
-        result = subprocess.run(command, cwd=str(cwd) if cwd is not None else None, capture_output=True, text=True)
         report_path = output.with_suffix(".json")
-        report: dict[str, Any] = {}
-        if report_path.exists():
-            try:
-                report = json.loads(report_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                report = {"report_parse_status": "failed"}
+        timeout = _positive_float(
+            timeout_sec,
+            self._visual_validation_float("isaaclab_render_timeout_sec", DEFAULT_ISAACLAB_RENDER_TIMEOUT_SEC),
+        )
+        success_grace = _positive_float(
+            success_artifact_grace_sec,
+            self._visual_validation_float(
+                "isaaclab_success_artifact_grace_sec",
+                DEFAULT_ISAACLAB_SUCCESS_ARTIFACT_GRACE_SEC,
+            ),
+        )
+        terminate_grace = _positive_float(
+            terminate_grace_sec,
+            self._visual_validation_float("isaaclab_terminate_grace_sec", DEFAULT_ISAACLAB_TERMINATE_GRACE_SEC),
+        )
+        result = _run_isaaclab_renderer_bounded(
+            command,
+            cwd=Path(cwd) if cwd is not None else None,
+            output_path=output,
+            report_path=report_path,
+            timeout_sec=timeout,
+            success_artifact_grace_sec=success_grace,
+            terminate_grace_sec=terminate_grace,
+        )
+        report, artifact_failure_reasons = _load_isaaclab_success_report(
+            report_path,
+            output,
+            min_mtime=float(result["started_wall_time"]),
+        )
         output_exists = output.exists()
         output_bytes = output.stat().st_size if output_exists else 0
-        report_status = report.get("status")
-        status = (
-            "ok"
-            if result.returncode == 0
-            and output_exists
-            and output_bytes > 0
-            and (report_status in (None, "ok"))
-            else "failed"
+        artifacts_ok = not artifact_failure_reasons
+        lifecycle_ok = (
+            result["returncode"] == 0
+            or (artifacts_ok and bool(result["terminated_after_success_artifacts"]))
+            or (artifacts_ok and bool(result["timed_out"]))
         )
+        status = "ok" if artifacts_ok and lifecycle_ok else "failed"
         failure_reasons: list[str] = []
-        if result.returncode != 0:
-            failure_reasons.append(f"subprocess_returncode={result.returncode}")
-        if not output_exists or output_bytes <= 0:
-            failure_reasons.append("expected_output_mp4_missing")
-        if report_status not in (None, "ok"):
-            failure_reasons.append(f"renderer_report_status={report_status}")
+        if not lifecycle_ok:
+            if result["timed_out"]:
+                failure_reasons.append("subprocess_timeout")
+            else:
+                failure_reasons.append(f"subprocess_returncode={result['returncode']}")
+        failure_reasons.extend(artifact_failure_reasons)
         return {
             "status": status,
             "backend": ACCEPTANCE_G1_BACKEND,
@@ -464,15 +493,28 @@ class A0VisualValidationRenderer:
             "output_bytes": int(output_bytes),
             "missing_output": bool(not output_exists or output_bytes <= 0),
             "report": str(report_path) if report_path.exists() else "",
-            "returncode": int(result.returncode),
-            "stdout_tail": result.stdout[-1000:],
-            "stderr_tail": result.stderr[-1000:],
+            "returncode": int(result["returncode"]),
+            "stdout_tail": str(result["stdout_tail"])[-1000:],
+            "stderr_tail": str(result["stderr_tail"])[-1000:],
+            "subprocess_timed_out": bool(result["timed_out"]),
+            "subprocess_elapsed_sec": float(result["elapsed_sec"]),
+            "subprocess_timeout_sec": float(timeout),
+            "terminated_after_success_artifacts": bool(result["terminated_after_success_artifacts"]),
             "overlays": list(ACCEPTANCE_OVERLAYS),
             "preserve_world_root": True,
             "isaaclab_report": report,
             "failure_reasons": failure_reasons,
             "message": "" if status == "ok" else "; ".join(failure_reasons),
         }
+
+    def _visual_validation_float(self, key: str, default: float) -> float:
+        visual_cfg = self._config.get("visual_validation", {})
+        if not isinstance(visual_cfg, Mapping):
+            return float(default)
+        try:
+            return float(visual_cfg.get(key, default))
+        except (TypeError, ValueError):
+            return float(default)
 
     def render_somamesh_global_source_video(
         self,
@@ -608,6 +650,146 @@ class A0VisualValidationRenderer:
             }
             for frame in joints
         ]
+
+
+def _positive_float(value: float | None, default: float) -> float:
+    try:
+        parsed = float(default if value is None else value)
+    except (TypeError, ValueError):
+        parsed = float(default)
+    return parsed if parsed > 0 else float(default)
+
+
+def _run_isaaclab_renderer_bounded(
+    command: Sequence[str],
+    *,
+    cwd: Path | None,
+    output_path: Path,
+    report_path: Path,
+    timeout_sec: float,
+    success_artifact_grace_sec: float,
+    terminate_grace_sec: float,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    started_wall = time.time()
+    success_artifacts_seen_at: float | None = None
+    timed_out = False
+    terminated_after_success_artifacts = False
+    returncode = -1
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stdout_file, tempfile.TemporaryFile(
+        mode="w+",
+        encoding="utf-8",
+        errors="replace",
+    ) as stderr_file:
+        process = subprocess.Popen(
+            list(command),
+            cwd=str(cwd) if cwd is not None else None,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            text=True,
+            start_new_session=True,
+        )
+        while True:
+            polled = process.poll()
+            if polled is not None:
+                returncode = int(polled)
+                break
+
+            now = time.monotonic()
+            if _isaaclab_success_artifacts_exist(report_path, output_path, min_mtime=started_wall):
+                if success_artifacts_seen_at is None:
+                    success_artifacts_seen_at = now
+                elif now - success_artifacts_seen_at >= success_artifact_grace_sec:
+                    terminated_after_success_artifacts = True
+                    returncode = _terminate_process_group(process, terminate_grace_sec)
+                    break
+
+            if now - started >= timeout_sec:
+                timed_out = True
+                returncode = _terminate_process_group(process, terminate_grace_sec)
+                break
+            time.sleep(min(0.25, max(0.01, timeout_sec - (now - started))))
+
+        elapsed = time.monotonic() - started
+        stdout_tail = _text_file_tail(stdout_file, limit=1000)
+        stderr_tail = _text_file_tail(stderr_file, limit=1000)
+    return {
+        "returncode": int(returncode),
+        "timed_out": bool(timed_out),
+        "terminated_after_success_artifacts": bool(terminated_after_success_artifacts),
+        "elapsed_sec": float(elapsed),
+        "started_wall_time": float(started_wall),
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
+    }
+
+
+def _terminate_process_group(process: subprocess.Popen[str], terminate_grace_sec: float) -> int:
+    if process.poll() is not None:
+        return int(process.returncode)
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return int(process.wait())
+    except OSError:
+        process.terminate()
+    try:
+        return int(process.wait(timeout=terminate_grace_sec))
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            process.kill()
+        return int(process.wait(timeout=terminate_grace_sec))
+
+
+def _text_file_tail(handle: Any, *, limit: int) -> str:
+    handle.flush()
+    handle.seek(0)
+    return str(handle.read())[-limit:]
+
+
+def _isaaclab_success_artifacts_exist(report_path: Path, output_path: Path, *, min_mtime: float | None = None) -> bool:
+    _, failure_reasons = _load_isaaclab_success_report(report_path, output_path, min_mtime=min_mtime)
+    return not failure_reasons
+
+
+def _load_isaaclab_success_report(
+    report_path: Path,
+    output_path: Path,
+    *,
+    min_mtime: float | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    output_exists = output_path.exists()
+    output_stat = output_path.stat() if output_exists else None
+    output_bytes = output_stat.st_size if output_stat is not None else 0
+    failure_reasons: list[str] = []
+    if not output_exists or output_bytes <= 0:
+        failure_reasons.append("expected_output_mp4_missing")
+    elif min_mtime is not None and output_stat is not None and output_stat.st_mtime < min_mtime - 1.0:
+        failure_reasons.append("expected_output_mp4_stale")
+    if not report_path.exists():
+        failure_reasons.append("renderer_report_missing")
+        return {}, failure_reasons
+    report_stat = report_path.stat()
+    if min_mtime is not None and report_stat.st_mtime < min_mtime - 1.0:
+        failure_reasons.append("renderer_report_stale")
+    try:
+        raw_report = json.loads(report_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return {"report_parse_status": "failed", "message": str(exc)}, failure_reasons + ["renderer_report_bad_json"]
+    if not isinstance(raw_report, dict):
+        return {"report_parse_status": "failed"}, failure_reasons + ["renderer_report_bad_json"]
+    report: dict[str, Any] = raw_report
+    report_status = report.get("status")
+    if report_status != "ok":
+        failure_reasons.append(f"renderer_report_status={report_status}")
+    renderer_failure_reasons = report.get("failure_reasons")
+    if renderer_failure_reasons:
+        failure_reasons.append("renderer_report_failure_reasons_present")
+    return report, failure_reasons
 
 
 def _include_root_pos_target(config: Mapping[str, Any]) -> bool:

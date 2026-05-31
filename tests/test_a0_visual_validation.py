@@ -1,7 +1,10 @@
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 import numpy as np
@@ -252,6 +255,148 @@ class A0VisualValidationRendererTests(unittest.TestCase):
             self.assertEqual(report["output_bytes"], 0)
             self.assertIn("expected_output_mp4_missing", report["failure_reasons"])
             self.assertEqual(report["expected_output_path"], str(root / "missing.mp4"))
+
+    def test_fake_isaaclab_linger_after_valid_artifacts_is_terminated_and_ok(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            renderer = A0VisualValidationRenderer({})
+            motion_path = root / "g1_input.npz"
+            renderer.write_g1_motion_npz(
+                path=motion_path,
+                joint_pos=np.zeros((2, 29), dtype=np.float32),
+                root_pos=np.asarray([[0.0, 0.0, 0.8], [0.1, 0.0, 0.8]], dtype=np.float32),
+                root_quat=np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (2, 1)),
+                fps=50.0,
+            )
+            fake_script = root / "fake_isaac_linger.py"
+            fake_script.write_text(
+                "import argparse, json, time\n"
+                "p=argparse.ArgumentParser(); p.add_argument('--g1-motion'); p.add_argument('--format'); "
+                "p.add_argument('--output'); p.add_argument('--duration-sec'); p.add_argument('--robot-usd'); "
+                "p.add_argument('--preserve-world-root', action='store_true'); p.add_argument('--width'); "
+                "p.add_argument('--height'); p.add_argument('--overlay-world-root-axes', action='store_true'); "
+                "p.add_argument('--overlay-semantic-lr', action='store_true'); a=p.parse_args()\n"
+                "open(a.output, 'wb').write(b'mp4')\n"
+                "open(a.output.rsplit('.',1)[0]+'.json', 'w').write(json.dumps({"
+                "'status':'ok','backend':'isaaclab_usd_g1_kinematic_playback','failure_reasons':[]}))\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+
+            started = time.monotonic()
+            report = renderer.render_g1_isaaclab_playback(
+                python_bin=sys.executable,
+                script_path=fake_script,
+                motion_path=motion_path,
+                output_path=root / "linger.mp4",
+                duration_sec=1.0,
+                width=160,
+                height=90,
+                execute=True,
+                timeout_sec=5.0,
+                success_artifact_grace_sec=0.1,
+                terminate_grace_sec=1.0,
+            )
+
+            self.assertLess(time.monotonic() - started, 3.0)
+            self.assertEqual(report["status"], "ok")
+            self.assertTrue(report["output_exists"])
+            self.assertGreater(report["output_bytes"], 0)
+            self.assertTrue(report["terminated_after_success_artifacts"])
+            self.assertEqual(report["failure_reasons"], [])
+            self.assertEqual(report["isaaclab_report"]["status"], "ok")
+
+    def test_fake_isaaclab_bad_json_is_failed_even_with_mp4(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            renderer = A0VisualValidationRenderer({})
+            motion_path = root / "g1_input.npz"
+            renderer.write_g1_motion_npz(
+                path=motion_path,
+                joint_pos=np.zeros((2, 29), dtype=np.float32),
+                root_pos=np.asarray([[0.0, 0.0, 0.8], [0.1, 0.0, 0.8]], dtype=np.float32),
+                root_quat=np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (2, 1)),
+                fps=50.0,
+            )
+            fake_script = root / "fake_isaac_bad_json.py"
+            fake_script.write_text(
+                "import argparse\n"
+                "p=argparse.ArgumentParser(); p.add_argument('--g1-motion'); p.add_argument('--format'); "
+                "p.add_argument('--output'); p.add_argument('--duration-sec'); p.add_argument('--robot-usd'); "
+                "p.add_argument('--preserve-world-root', action='store_true'); p.add_argument('--width'); "
+                "p.add_argument('--height'); p.add_argument('--overlay-world-root-axes', action='store_true'); "
+                "p.add_argument('--overlay-semantic-lr', action='store_true'); a=p.parse_args()\n"
+                "open(a.output, 'wb').write(b'mp4')\n"
+                "open(a.output.rsplit('.',1)[0]+'.json', 'w').write('{bad json')\n",
+                encoding="utf-8",
+            )
+
+            report = renderer.render_g1_isaaclab_playback(
+                python_bin=sys.executable,
+                script_path=fake_script,
+                motion_path=motion_path,
+                output_path=root / "bad_json.mp4",
+                duration_sec=1.0,
+                width=160,
+                height=90,
+                execute=True,
+            )
+
+            self.assertEqual(report["returncode"], 0)
+            self.assertEqual(report["status"], "failed")
+            self.assertIn("renderer_report_bad_json", report["failure_reasons"])
+
+    def test_render_g1_missing_usd_fails_before_app_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_package = root / "fake_modules" / "isaaclab"
+            fake_package.mkdir(parents=True)
+            (fake_package / "__init__.py").write_text("", encoding="utf-8")
+            (fake_package / "app.py").write_text(
+                "import os\n"
+                "from pathlib import Path\n"
+                "class AppLauncher:\n"
+                "    @staticmethod\n"
+                "    def add_app_launcher_args(parser):\n"
+                "        parser.add_argument('--fake-app-arg', default='')\n"
+                "    def __init__(self, args):\n"
+                "        Path(os.environ['APP_LAUNCHER_SENTINEL']).write_text('started', encoding='utf-8')\n"
+                "        self.app = object()\n",
+                encoding="utf-8",
+            )
+            output = root / "out.mp4"
+            sentinel = root / "app_launcher_started.txt"
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(root / "fake_modules")
+            env["APP_LAUNCHER_SENTINEL"] = str(sentinel)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/render_g1_isaac_pair.py",
+                    "--g1-motion",
+                    str(root / "motion.npz"),
+                    "--format",
+                    "npz",
+                    "--output",
+                    str(output),
+                    "--robot-usd",
+                    str(root / "missing.usd"),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertFalse(sentinel.exists())
+            report = json.loads(output.with_suffix(".json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "failed")
+            self.assertEqual(report["preflight_stage"], "before_app_launcher")
+            self.assertFalse(report["app_launcher_started"])
+            self.assertIn("robot_usd_missing", report["failure_reasons"])
 
 
 if __name__ == "__main__":

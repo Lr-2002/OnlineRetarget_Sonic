@@ -313,10 +313,20 @@ def main() -> None:
     }
     report_path = args_cli.output.with_suffix(".json")
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps(report, indent=2, sort_keys=True))
+    print(json.dumps(report, indent=2, sort_keys=True), flush=True)
+    if status == "ok":
+        _exit_after_success_report()
     _cleanup_after_report(sim, report_path)
     if status != "ok":
         raise SystemExit(2)
+
+
+def _exit_after_success_report() -> None:
+    # IsaacSim shutdown may linger after artifacts are complete. The caller
+    # validates MP4/JSON success and owns process-group cleanup if needed.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 def _cleanup_after_report(sim: sim_utils.SimulationContext, report_path: Path) -> None:
