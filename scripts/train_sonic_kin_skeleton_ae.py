@@ -46,6 +46,11 @@ SRC_ROOT = ROOT / "src"
 if SRC_ROOT.exists() and str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from online_retarget.a0_visual_validation import (  # noqa: E402
+    DEBUG_CAPSULE_BACKEND,
+    A0VisualValidationRenderer,
+    SOMA_DISPLAY_TRANSFORM,
+)
 from online_retarget.data.skeleton_ae_registry import SKELETON_GEOMETRY_DIM  # noqa: E402
 from online_retarget.models.skeleton_geometry_ae import (  # noqa: E402
     SKELETON_GEOMETRY_AE_ARCHITECTURE,
@@ -2940,6 +2945,7 @@ def _render_visual_validation_clip(
     inference_video = clip_dir / "inference_g1_capsules.mp4"
     combined_video = clip_dir / "source_dataset_inference.mp4"
     metadata_path = clip_dir / "metadata.json"
+    visual_renderer = A0VisualValidationRenderer(config)
 
     arrays, fps = _load_visual_npz(Path(config["input_data"]["data_root"]) / str(row["relative_path"]))
     total_frames = min(
@@ -3048,9 +3054,11 @@ def _render_visual_validation_clip(
         "inference_render": inference_report,
         "combine": combine_report,
         "combined_video": str(combined_video),
+        "visual_backend": visual_renderer.backend_manifest(active_backend=DEBUG_CAPSULE_BACKEND),
+        "root_composition": visual_renderer.root_composition_metadata(),
         "note": (
-            "Panels are source SOMA proportional BVH capsules, paired dataset G1 body_pos_w capsules, "
-            "and model inference rendered by G1 MJCF FK from predicted joint_pos."
+            "Panels are debug fallback capsules. Primary acceptance backend is SomaMesh/global-SOMA source "
+            "plus IsaacLab G1 kinematic playback."
         ),
     }
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -3094,6 +3102,7 @@ def _render_motionlib_visual_validation_clip(
     inference_video = clip_dir / "inference_g1_capsules.mp4"
     combined_video = clip_dir / "source_dataset_inference.mp4"
     metadata_path = clip_dir / "metadata.json"
+    visual_renderer = A0VisualValidationRenderer(config)
 
     arrays = load_soma_motionlib_arrays(row, config)
     robot_root = _load_motionlib_robot_root(row, config)
@@ -3123,15 +3132,22 @@ def _render_motionlib_visual_validation_clip(
             render_deps=render_deps,
         )
     else:
+        joint_names = list(arrays.get("joint_names", SOMA_JOINT_NAMES))
         source_report = render_deps["_render_capsule_3d_video"](
-            frames=_soma_motionlib_source_frames(arrays["soma_joints"][:frame_count], arrays.get("joint_names")),
+            frames=visual_renderer.soma_motionlib_source_frames(arrays["soma_joints"][:frame_count], joint_names),
             edges=_soma_edges(arrays.get("joint_names")),
             video_path=source_video,
             config=render_config,
-            label="source soma motionlib",
+            label="source soma global display capsules debug fallback",
             up_axis=2,
             capsule_color=(48, 132, 83),
             key_color=(132, 103, 34),
+        )
+        source_report.update(
+            {
+                "source_display_transform": SOMA_DISPLAY_TRANSFORM,
+                "debug_fallback_backend": DEBUG_CAPSULE_BACKEND,
+            }
         )
 
     root_pos = robot_root["root_pos"][:frame_count]
@@ -3205,9 +3221,11 @@ def _render_motionlib_visual_validation_clip(
         "inference_render": inference_report,
         "combine": combine_report,
         "combined_video": str(combined_video),
+        "visual_backend": visual_renderer.backend_manifest(active_backend=DEBUG_CAPSULE_BACKEND),
+        "root_composition": visual_renderer.root_composition_metadata(),
         "note": (
-            "Panels are source SOMA proportional BVH capsules, paired dataset G1 FK from robot motionlib, "
-            "and model inference rendered by G1 MJCF FK from predicted joint_pos."
+            "Panels are debug fallback capsules. Primary acceptance backend is SomaMesh/global-SOMA source "
+            "plus IsaacLab G1 kinematic playback."
         ),
     }
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -3252,16 +3270,17 @@ def _render_time_aligned_source_bvh(
             target_fps=target_fps,
             frame_count=frame_count,
         )
+        display_frames = A0VisualValidationRenderer.soma_frame_maps_to_display(aligned_frames)
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         return {"status": "failed", "message": f"Could not load BVH source motion: {exc}"}
 
     report = render_deps["_render_capsule_3d_video"](
-        frames=aligned_frames,
+        frames=display_frames,
         edges=edges,
         video_path=video_path,
         config=render_config,
-        label="source bvh 3d capsules",
-        up_axis=1,
+        label="source soma global display capsules debug fallback",
+        up_axis=2,
         capsule_color=(48, 132, 83),
         key_color=(132, 103, 34),
     )
@@ -3276,6 +3295,8 @@ def _render_time_aligned_source_bvh(
             "source_index_last": int(source_indices[-1]) if source_indices else "",
             "source_time_span_sec": (source_indices[-1] / source_fps) if source_indices and source_fps > 0 else 0.0,
             "target_time_span_sec": ((frame_count - 1) / target_fps) if frame_count > 0 and target_fps > 0 else 0.0,
+            "source_display_transform": SOMA_DISPLAY_TRANSFORM,
+            "debug_fallback_backend": DEBUG_CAPSULE_BACKEND,
         }
     )
     return report
@@ -3417,10 +3438,7 @@ def _predict_g1_state_from_features(
             window,
             6,
         )
-        pred_root = root_pos[:, 0].astype(np.float32, copy=True)
-        input_data = config.get("input_data", {}) if isinstance(config, Mapping) else {}
-        if isinstance(input_data, Mapping) and input_data.get("format") == "soma_motionlib":
-            pred_root[:, :2] += fallback_root_pos[:, :2]
+        pred_root = A0VisualValidationRenderer(config).compose_prediction_root(root_pos[:, 0], fallback_root_pos)
         state = {
             "joint_pos": pred[:, :joint_dim],
             "root_pos": pred_root,

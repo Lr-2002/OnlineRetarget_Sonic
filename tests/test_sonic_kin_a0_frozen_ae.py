@@ -161,11 +161,13 @@ class A0FrozenAEConfigTests(unittest.TestCase):
         self.assertNotIn('stage_trace.log("index_only_preflight", "details", **summary)', text)
 
     def test_soma_prediction_recomposes_root_local_xy_for_visualization(self) -> None:
-        text = (REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py").read_text(encoding="utf-8")
-        self.assertIn('input_data.get("format") == "soma_motionlib"', text)
-        self.assertIn("pred_root[:, :2] += fallback_root_pos[:, :2]", text)
-        self.assertIn('"root_pos": pred_root', text)
-        self.assertIn('"root_euler": _rot6d_to_euler_xyz_batch(root_rot6d[:, 0])', text)
+        script_text = (REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py").read_text(encoding="utf-8")
+        module_text = (REPO_ROOT / "src" / "online_retarget" / "a0_visual_validation.py").read_text(encoding="utf-8")
+        self.assertIn("A0VisualValidationRenderer(config).compose_prediction_root", script_text)
+        self.assertIn('input_data.get("format") == "soma_motionlib"', module_text)
+        self.assertIn("root[:, :2] += np.asarray(fallback_root_pos, dtype=np.float32)[:, :2]", module_text)
+        self.assertIn('"root_pos": pred_root', script_text)
+        self.assertIn('"root_euler": _rot6d_to_euler_xyz_batch(root_rot6d[:, 0])', script_text)
 
 
 @unittest.skipIf(torch is None, "torch is required for A0 frozen AE tests")
