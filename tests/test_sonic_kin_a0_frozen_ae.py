@@ -188,12 +188,20 @@ class A0FrozenAEConfigTests(unittest.TestCase):
         ):
             self.assertIn(token, module_text)
         self.assertIn("--acceptance-backend", cli_text)
+        self.assertIn("_load_or_repair_rows_cache_split", cli_text)
+        self.assertIn("rows_cache_effective", cli_text)
+        self.assertIn("rows_cache_repair", cli_text)
+        self.assertIn("rerender_inputs", cli_text)
+        self.assertIn("kin.split_rows", cli_text)
         self.assertIn("run_visual_validation(", cli_text)
         self.assertIn("acceptance_backend=bool(args.acceptance_backend)", cli_text)
         self.assertIn("_render_motionlib_acceptance_visual_validation_clip", script_text)
         self.assertIn("visual_renderer.backend_manifest(active_backend=active_backend)", script_text)
         self.assertIn("--overlay-world-root-axes", isaac_text)
         self.assertIn("--overlay-semantic-lr", isaac_text)
+        self.assertIn("expected_output_mp4_missing", isaac_text)
+        self.assertIn("raise SystemExit(2)", isaac_text)
+        self.assertIn("expected_output_path", module_text)
 
 
 @unittest.skipIf(torch is None, "torch is required for A0 frozen AE tests")

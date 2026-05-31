@@ -260,6 +260,7 @@ class A0VisualValidationRenderer:
             "robot_usd": str(self.g1_usd_path),
             "motion_path": str(motion_path),
             "output_path": str(output),
+            "expected_output_path": str(output),
             "overlays": list(ACCEPTANCE_OVERLAYS),
             "preserve_world_root": True,
             "execute": bool(execute),
@@ -273,6 +274,7 @@ class A0VisualValidationRenderer:
                 "command_record": str(command_record),
                 "robot_usd": str(self.g1_usd_path),
                 "output": str(output),
+                "expected_output_path": str(output),
                 "overlays": list(ACCEPTANCE_OVERLAYS),
                 "preserve_world_root": True,
             }
@@ -284,15 +286,24 @@ class A0VisualValidationRenderer:
                 report = json.loads(report_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 report = {"report_parse_status": "failed"}
+        output_exists = output.exists()
+        output_bytes = output.stat().st_size if output_exists else 0
         report_status = report.get("status")
         status = (
             "ok"
             if result.returncode == 0
-            and output.exists()
-            and output.stat().st_size > 0
+            and output_exists
+            and output_bytes > 0
             and (report_status in (None, "ok"))
             else "failed"
         )
+        failure_reasons: list[str] = []
+        if result.returncode != 0:
+            failure_reasons.append(f"subprocess_returncode={result.returncode}")
+        if not output_exists or output_bytes <= 0:
+            failure_reasons.append("expected_output_mp4_missing")
+        if report_status not in (None, "ok"):
+            failure_reasons.append(f"renderer_report_status={report_status}")
         return {
             "status": status,
             "backend": ACCEPTANCE_G1_BACKEND,
@@ -300,6 +311,10 @@ class A0VisualValidationRenderer:
             "command_record": str(command_record),
             "robot_usd": str(self.g1_usd_path),
             "output": str(output),
+            "expected_output_path": str(output),
+            "output_exists": bool(output_exists),
+            "output_bytes": int(output_bytes),
+            "missing_output": bool(not output_exists or output_bytes <= 0),
             "report": str(report_path) if report_path.exists() else "",
             "returncode": int(result.returncode),
             "stdout_tail": result.stdout[-1000:],
@@ -307,6 +322,8 @@ class A0VisualValidationRenderer:
             "overlays": list(ACCEPTANCE_OVERLAYS),
             "preserve_world_root": True,
             "isaaclab_report": report,
+            "failure_reasons": failure_reasons,
+            "message": "" if status == "ok" else "; ".join(failure_reasons),
         }
 
     def render_somamesh_global_source_video(

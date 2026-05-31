@@ -159,7 +159,7 @@ class A0VisualValidationRendererTests(unittest.TestCase):
                 "p.add_argument('--height'); p.add_argument('--overlay-world-root-axes', action='store_true'); "
                 "p.add_argument('--overlay-semantic-lr', action='store_true'); a=p.parse_args()\n"
                 "open(a.output, 'wb').write(b'mp4')\n"
-                "open(a.output.rsplit('.',1)[0]+'.json', 'w').write(json.dumps({'backend':'isaaclab_kinematic_playback'}))\n",
+                "open(a.output.rsplit('.',1)[0]+'.json', 'w').write(json.dumps({'status':'ok','backend':'isaaclab_usd_g1_kinematic_playback'}))\n",
                 encoding="utf-8",
             )
 
@@ -176,10 +176,55 @@ class A0VisualValidationRendererTests(unittest.TestCase):
 
             self.assertEqual(report["status"], "ok")
             self.assertEqual(report["backend"], ACCEPTANCE_G1_BACKEND)
+            self.assertTrue(report["output_exists"])
+            self.assertGreater(report["output_bytes"], 0)
             self.assertTrue((root / "g1.mp4.command.json").exists())
             command_record = json.loads((root / "g1.mp4.command.json").read_text(encoding="utf-8"))
+            self.assertEqual(command_record["expected_output_path"], str(root / "g1.mp4"))
             self.assertTrue(command_record["preserve_world_root"])
             self.assertIn("semantic_left_right", command_record["overlays"])
+
+    def test_fake_isaaclab_returncode_zero_without_mp4_is_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            renderer = A0VisualValidationRenderer({})
+            motion_path = root / "g1_input.npz"
+            renderer.write_g1_motion_npz(
+                path=motion_path,
+                joint_pos=np.zeros((2, 29), dtype=np.float32),
+                root_pos=np.asarray([[0.0, 0.0, 0.8], [0.1, 0.0, 0.8]], dtype=np.float32),
+                root_quat=np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (2, 1)),
+                fps=50.0,
+            )
+            fake_script = root / "fake_isaac_no_video.py"
+            fake_script.write_text(
+                "import argparse, json\n"
+                "p=argparse.ArgumentParser(); p.add_argument('--g1-motion'); p.add_argument('--format'); "
+                "p.add_argument('--output'); p.add_argument('--duration-sec'); p.add_argument('--robot-usd'); "
+                "p.add_argument('--preserve-world-root', action='store_true'); p.add_argument('--width'); "
+                "p.add_argument('--height'); p.add_argument('--overlay-world-root-axes', action='store_true'); "
+                "p.add_argument('--overlay-semantic-lr', action='store_true'); a=p.parse_args()\n"
+                "open(a.output.rsplit('.',1)[0]+'.json', 'w').write(json.dumps({'status':'ok'}))\n",
+                encoding="utf-8",
+            )
+
+            report = renderer.render_g1_isaaclab_playback(
+                python_bin=sys.executable,
+                script_path=fake_script,
+                motion_path=motion_path,
+                output_path=root / "missing.mp4",
+                duration_sec=1.0,
+                width=160,
+                height=90,
+                execute=True,
+            )
+
+            self.assertEqual(report["returncode"], 0)
+            self.assertEqual(report["status"], "failed")
+            self.assertFalse(report["output_exists"])
+            self.assertEqual(report["output_bytes"], 0)
+            self.assertIn("expected_output_mp4_missing", report["failure_reasons"])
+            self.assertEqual(report["expected_output_path"], str(root / "missing.mp4"))
 
 
 if __name__ == "__main__":

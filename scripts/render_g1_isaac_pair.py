@@ -227,14 +227,32 @@ def main() -> None:
     if args_cli.bvh is not None:
         combine_report = combine_two_videos((source_video, target_video), args_cli.output, fps=int(round(float(motion["fps"]))))
 
+    target_video_exists = target_video.exists()
+    target_video_bytes = target_video.stat().st_size if target_video_exists else 0
+    output_exists = args_cli.output.exists()
+    output_bytes = args_cli.output.stat().st_size if output_exists else 0
     status = "ok" if combine_report is None or combine_report.get("status") == "ok" else "failed"
+    failure_reasons: list[str] = []
+    if not target_video_exists or target_video_bytes <= 0:
+        failure_reasons.append("target_video_missing")
+    if not output_exists or output_bytes <= 0:
+        failure_reasons.append("expected_output_mp4_missing")
+    if combine_report is not None and combine_report.get("status") != "ok":
+        failure_reasons.append(f"combine_status={combine_report.get('status')}")
+    if failure_reasons:
+        status = "failed"
     report = {
         "status": status,
         "backend": "isaaclab_usd_g1_kinematic_playback",
         "g1_motion": str(motion_path),
         "bvh": str(args_cli.bvh) if args_cli.bvh is not None else "",
         "output": str(args_cli.output),
+        "expected_output_path": str(args_cli.output),
+        "output_exists": bool(output_exists),
+        "output_bytes": int(output_bytes),
         "target_video": str(target_video),
+        "target_video_exists": bool(target_video_exists),
+        "target_video_bytes": int(target_video_bytes),
         "fps": motion["fps"],
         "frames": frames_written,
         "changed_frames": changed_frames,
@@ -258,6 +276,8 @@ def main() -> None:
         "motion_joint_names": list(motion["joint_names"]),
         "frame_sum_min": min(frame_sums) if frame_sums else None,
         "frame_sum_max": max(frame_sums) if frame_sums else None,
+        "failure_reasons": failure_reasons,
+        "message": "" if status == "ok" else "; ".join(failure_reasons),
     }
     args_cli.output.with_suffix(".json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2, sort_keys=True))
@@ -266,6 +286,8 @@ def main() -> None:
     sim.clear_all_callbacks()
     sim.clear_instance()
     simulation_app.close()
+    if status != "ok":
+        raise SystemExit(2)
 
 
 def _read_json(path: Path | None) -> dict[str, object]:

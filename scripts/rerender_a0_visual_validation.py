@@ -69,10 +69,15 @@ def main() -> None:
         raise FileNotFoundError(f"normalization stats are required for read-only rerender: {stats_path}")
     if not args.checkpoint.exists():
         raise FileNotFoundError(f"checkpoint is missing: {args.checkpoint}")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
 
     requested_device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(requested_device)
-    rows, skipped = kin.read_rows_from_index_cache(rows_cache)
+    rows, skipped, rows_cache_report = _load_or_repair_rows_cache_split(
+        rows_cache,
+        output_dir=args.output_dir,
+        config=config,
+    )
     skeleton_lookup = kin.build_skeleton_ae_feature_lookup(config, device)
     if skeleton_lookup is not None:
         skeleton_lookup.validate_and_annotate_rows(rows)
@@ -97,7 +102,6 @@ def main() -> None:
     model.load_state_dict(state)
     step = int(args.step if args.step is not None else checkpoint.get("step", 0))
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     metrics = kin.run_visual_validation(
         model=model,
         validation_rows=validation_dataset.rows,
@@ -115,12 +119,22 @@ def main() -> None:
         execute_isaaclab=not bool(args.no_execute_isaaclab),
     )
     summary_path = args.output_dir / "visual_validation" / f"step_{step:08d}" / "summary.json"
+    rerender_inputs = {
+        "rows_cache_original": str(rows_cache),
+        "rows_cache_effective": str(rows_cache_report["effective_path"]),
+        "rows_cache_repair": rows_cache_report,
+        "stats": str(stats_path),
+        "checkpoint": str(args.checkpoint),
+    }
+    _annotate_summary(summary_path, rerender_inputs=rerender_inputs)
     result: dict[str, Any] = {
         "event": "a0_visual_rerender",
         "config": str(args.config),
         "checkpoint": str(args.checkpoint),
         "checkpoint_step": step,
-        "rows_cache": str(rows_cache),
+        "rows_cache": str(rows_cache_report["effective_path"]),
+        "rows_cache_original": str(rows_cache),
+        "rows_cache_repair": rows_cache_report,
         "rows_cache_skipped": int(skipped),
         "stats": str(stats_path),
         "output_dir": str(args.output_dir),
@@ -129,6 +143,76 @@ def main() -> None:
         "metrics": metrics,
     }
     print(json.dumps(result, sort_keys=True), flush=True)
+
+
+def _load_or_repair_rows_cache_split(
+    rows_cache: Path,
+    *,
+    output_dir: Path,
+    config: dict[str, Any],
+) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
+    rows, skipped = kin.read_rows_from_index_cache(rows_cache)
+    missing_split = sum(1 for row in rows if "split" not in row)
+    counts_before = _split_counts(rows)
+    if missing_split == 0:
+        return rows, skipped, {
+            "status": "unchanged",
+            "original_path": str(rows_cache),
+            "effective_path": str(rows_cache),
+            "row_count": len(rows),
+            "skipped_count": int(skipped),
+            "missing_split_count": 0,
+            "split_counts": counts_before,
+        }
+
+    split_cfg = config.get("split", {})
+    repaired_rows = [dict(row) for row in rows]
+    kin.split_rows(
+        repaired_rows,
+        float(split_cfg["validation_ratio"]),
+        str(split_cfg["hash_salt"]),
+    )
+    repaired_path = output_dir / "rerender_inputs" / "rows_from_index_cache.with_split.json"
+    payload = json.loads(rows_cache.read_text(encoding="utf-8"))
+    payload["rows"] = repaired_rows
+    payload["row_count"] = len(repaired_rows)
+    payload["skipped_count"] = int(skipped)
+    payload["split_repair"] = {
+        "source_cache": str(rows_cache),
+        "validation_ratio": float(split_cfg["validation_ratio"]),
+        "hash_salt": str(split_cfg["hash_salt"]),
+        "missing_split_count": int(missing_split),
+    }
+    kin.write_rows_from_index_cache(repaired_path, payload)
+    report = {
+        "status": "repaired",
+        "original_path": str(rows_cache),
+        "effective_path": str(repaired_path),
+        "row_count": len(repaired_rows),
+        "skipped_count": int(skipped),
+        "missing_split_count": int(missing_split),
+        "split_counts_before": counts_before,
+        "split_counts": _split_counts(repaired_rows),
+        "validation_ratio": float(split_cfg["validation_ratio"]),
+        "hash_salt": str(split_cfg["hash_salt"]),
+    }
+    return repaired_rows, skipped, report
+
+
+def _split_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = str(row.get("split", "missing"))
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _annotate_summary(summary_path: Path, *, rerender_inputs: dict[str, Any]) -> None:
+    if not summary_path.exists():
+        return
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["rerender_inputs"] = rerender_inputs
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
