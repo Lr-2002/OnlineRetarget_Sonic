@@ -169,6 +169,32 @@ class A0FrozenAEConfigTests(unittest.TestCase):
         self.assertIn('"root_pos": pred_root', script_text)
         self.assertIn('"root_euler": _rot6d_to_euler_xyz_batch(root_rot6d[:, 0])', script_text)
 
+    def test_a0_visual_acceptance_backend_has_cli_and_real_backend_markers(self) -> None:
+        script_text = (REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py").read_text(encoding="utf-8")
+        module_text = (REPO_ROOT / "src" / "online_retarget" / "a0_visual_validation.py").read_text(encoding="utf-8")
+        cli_text = (REPO_ROOT / "scripts" / "rerender_a0_visual_validation.py").read_text(encoding="utf-8")
+        isaac_text = (REPO_ROOT / "scripts" / "render_g1_isaac_pair.py").read_text(encoding="utf-8")
+
+        for token in (
+            "PRIMARY_VISUAL_BACKEND",
+            "ACCEPTANCE_SOURCE_BACKEND",
+            "accepted_somamesh_global_soma_display",
+            "isaaclab_usd_g1_kinematic_playback",
+            "active_backend_is_acceptance_backend",
+            "render_somamesh_global_source_video",
+            "render_g1_isaaclab_playback",
+            "write_g1_motion_npz",
+            "rerender_cli_command",
+        ):
+            self.assertIn(token, module_text)
+        self.assertIn("--acceptance-backend", cli_text)
+        self.assertIn("run_visual_validation(", cli_text)
+        self.assertIn("acceptance_backend=bool(args.acceptance_backend)", cli_text)
+        self.assertIn("_render_motionlib_acceptance_visual_validation_clip", script_text)
+        self.assertIn("visual_renderer.backend_manifest(active_backend=active_backend)", script_text)
+        self.assertIn("--overlay-world-root-axes", isaac_text)
+        self.assertIn("--overlay-semantic-lr", isaac_text)
+
 
 @unittest.skipIf(torch is None, "torch is required for A0 frozen AE tests")
 class A0FrozenAEFeatureTests(unittest.TestCase):

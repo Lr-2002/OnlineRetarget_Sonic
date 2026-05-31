@@ -47,6 +47,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--preserve-world-root", action="store_true")
     parser.add_argument("--camera-mode", choices=("trajectory", "follow", "fixed"), default="trajectory")
     parser.add_argument("--camera-offset", type=float, nargs=3, default=(2.5, -3.0, 1.6))
+    parser.add_argument("--overlay-world-root-axes", action="store_true")
+    parser.add_argument("--overlay-semantic-lr", action="store_true")
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     if args.g1_motion is None and args.npz is None:
@@ -196,6 +198,14 @@ def main() -> None:
             camera.update(dt=0.0, force_recompute=True)
             frame = camera.data.output["rgb"][0].detach().cpu().numpy()
             frame = np.asarray(frame[..., :3], dtype=np.uint8)
+            if args_cli.overlay_world_root_axes or args_cli.overlay_semantic_lr:
+                frame = _draw_acceptance_overlays(
+                    frame,
+                    root_pos=root_pos,
+                    frame_index=frame_index,
+                    show_axes=args_cli.overlay_world_root_axes,
+                    show_semantic_lr=args_cli.overlay_semantic_lr,
+                )
             frame = cv2.putText(
                 frame.copy(),
                 f"IsaacLab G1 kinematic playback frame {frame_index:04d}",
@@ -220,7 +230,7 @@ def main() -> None:
     status = "ok" if combine_report is None or combine_report.get("status") == "ok" else "failed"
     report = {
         "status": status,
-        "backend": "isaaclab_kinematic_playback",
+        "backend": "isaaclab_usd_g1_kinematic_playback",
         "g1_motion": str(motion_path),
         "bvh": str(args_cli.bvh) if args_cli.bvh is not None else "",
         "output": str(args_cli.output),
@@ -239,6 +249,11 @@ def main() -> None:
         "source_render": source_report,
         "combine": combine_report,
         "robot_asset": str(_robot_asset(args_cli.asset_root, args_cli.robot_urdf, args_cli.robot_usd)),
+        "preserved_overlays": {
+            "world_axes": bool(args_cli.overlay_world_root_axes),
+            "root_axes": bool(args_cli.overlay_world_root_axes),
+            "semantic_left_right": bool(args_cli.overlay_semantic_lr),
+        },
         "robot_joint_names": robot.joint_names,
         "motion_joint_names": list(motion["joint_names"]),
         "frame_sum_min": min(frame_sums) if frame_sums else None,
@@ -392,6 +407,40 @@ def _write_robot_state(
         torch.as_tensor(joint_pos[None, :], dtype=torch.float32, device=device),
         torch.as_tensor(joint_vel[None, :], dtype=torch.float32, device=device),
     )
+
+
+def _draw_acceptance_overlays(
+    frame: np.ndarray,
+    *,
+    root_pos: np.ndarray,
+    frame_index: int,
+    show_axes: bool,
+    show_semantic_lr: bool,
+) -> np.ndarray:
+    image = frame.copy()
+    if show_axes:
+        origin = (22, image.shape[0] - 28)
+        cv2.arrowedLine(image, origin, (origin[0] + 58, origin[1]), (40, 45, 210), 3, tipLength=0.18)
+        cv2.arrowedLine(image, origin, (origin[0], origin[1] - 58), (45, 145, 65), 3, tipLength=0.18)
+        cv2.arrowedLine(image, origin, (origin[0] + 40, origin[1] - 40), (190, 80, 40), 3, tipLength=0.18)
+        cv2.putText(image, "world/root axes preserved", (16, image.shape[0] - 92), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (28, 38, 42), 1, cv2.LINE_AA)
+        cv2.putText(
+            image,
+            f"root=({root_pos[0]:.2f},{root_pos[1]:.2f},{root_pos[2]:.2f})",
+            (16, image.shape[0] - 72),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (28, 38, 42),
+            1,
+            cv2.LINE_AA,
+        )
+    if show_semantic_lr:
+        cv2.rectangle(image, (image.shape[1] - 140, 14), (image.shape[1] - 82, 34), (48, 132, 83), -1)
+        cv2.rectangle(image, (image.shape[1] - 72, 14), (image.shape[1] - 14, 34), (154, 66, 91), -1)
+        cv2.putText(image, "L", (image.shape[1] - 121, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (245, 247, 242), 2, cv2.LINE_AA)
+        cv2.putText(image, "R", (image.shape[1] - 53, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (245, 247, 242), 2, cv2.LINE_AA)
+    cv2.putText(image, f"acceptance overlay {frame_index:04d}", (16, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (28, 38, 42), 1, cv2.LINE_AA)
+    return image
 
 
 if __name__ == "__main__":

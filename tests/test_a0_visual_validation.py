@@ -1,8 +1,14 @@
+import json
+from pathlib import Path
+import sys
+import tempfile
 import unittest
 
 import numpy as np
 
 from online_retarget.a0_visual_validation import (
+    ACCEPTANCE_G1_BACKEND,
+    ACCEPTANCE_SOURCE_BACKEND,
     DEBUG_CAPSULE_BACKEND,
     DEFAULT_G1_USD,
     PRIMARY_VISUAL_BACKEND,
@@ -80,6 +86,12 @@ class A0VisualValidationRendererTests(unittest.TestCase):
         self.assertFalse(manifest["active_backend_is_acceptance_backend"])
         self.assertFalse(manifest["debug_fallback_is_acceptance_backend"])
 
+        acceptance = renderer.acceptance_backend_manifest()
+        self.assertEqual(acceptance["active_backend"], PRIMARY_VISUAL_BACKEND)
+        self.assertEqual(acceptance["source_human_backend"], ACCEPTANCE_SOURCE_BACKEND)
+        self.assertEqual(acceptance["g1_backend"], ACCEPTANCE_G1_BACKEND)
+        self.assertTrue(acceptance["active_backend_is_acceptance_backend"])
+
     def test_isaaclab_g1_render_command_preserves_world_root_and_asset(self) -> None:
         renderer = A0VisualValidationRenderer({"visual_validation": {}})
 
@@ -94,9 +106,80 @@ class A0VisualValidationRendererTests(unittest.TestCase):
         )
 
         self.assertIn("--preserve-world-root", command)
+        self.assertIn("--overlay-world-root-axes", command)
+        self.assertIn("--overlay-semantic-lr", command)
         self.assertIn("--robot-usd", command)
         self.assertIn(str(DEFAULT_G1_USD), command)
         self.assertEqual(command[command.index("--format") + 1], "npz")
+
+    def test_rerender_cli_command_requests_acceptance_backend(self) -> None:
+        command = A0VisualValidationRenderer({}).rerender_cli_command(
+            config_path="config.json",
+            checkpoint_path="step.pt",
+            output_dir="rerender",
+            rows_cache="rows.json",
+            stats_path="normalization.pt",
+            step=119500,
+            count=8,
+            python_bin="python",
+            script_path="scripts/rerender_a0_visual_validation.py",
+            isaac_python_bin="/workspace/isaaclab/_isaac_sim/python.sh",
+        )
+
+        self.assertIn("--acceptance-backend", command)
+        self.assertEqual(command[command.index("--checkpoint") + 1], "step.pt")
+        self.assertEqual(command[command.index("--rows-cache") + 1], "rows.json")
+        self.assertEqual(command[command.index("--step") + 1], "119500")
+
+    def test_g1_motion_npz_and_fake_isaaclab_playback_record_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            renderer = A0VisualValidationRenderer({})
+            motion_path = root / "clip" / "g1_input.npz"
+            motion_report = renderer.write_g1_motion_npz(
+                path=motion_path,
+                joint_pos=np.zeros((3, 29), dtype=np.float32),
+                root_pos=np.asarray([[0.0, 0.0, 0.8], [1.0, 0.0, 0.8], [2.0, 0.0, 0.8]], dtype=np.float32),
+                root_quat=np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (3, 1)),
+                fps=50.0,
+                joint_names=[f"joint_{index}" for index in range(29)],
+            )
+            self.assertEqual(motion_report["status"], "ok")
+            self.assertTrue(motion_path.exists())
+            with np.load(motion_path) as loaded:
+                self.assertEqual(tuple(loaded["joint_pos"].shape), (3, 29))
+                self.assertEqual(tuple(loaded["root_quat"].shape), (3, 4))
+
+            fake_script = root / "fake_isaac.py"
+            fake_script.write_text(
+                "import argparse, json\n"
+                "p=argparse.ArgumentParser(); p.add_argument('--g1-motion'); p.add_argument('--format'); "
+                "p.add_argument('--output'); p.add_argument('--duration-sec'); p.add_argument('--robot-usd'); "
+                "p.add_argument('--preserve-world-root', action='store_true'); p.add_argument('--width'); "
+                "p.add_argument('--height'); p.add_argument('--overlay-world-root-axes', action='store_true'); "
+                "p.add_argument('--overlay-semantic-lr', action='store_true'); a=p.parse_args()\n"
+                "open(a.output, 'wb').write(b'mp4')\n"
+                "open(a.output.rsplit('.',1)[0]+'.json', 'w').write(json.dumps({'backend':'isaaclab_kinematic_playback'}))\n",
+                encoding="utf-8",
+            )
+
+            report = renderer.render_g1_isaaclab_playback(
+                python_bin=sys.executable,
+                script_path=fake_script,
+                motion_path=motion_path,
+                output_path=root / "g1.mp4",
+                duration_sec=4.0,
+                width=320,
+                height=180,
+                execute=True,
+            )
+
+            self.assertEqual(report["status"], "ok")
+            self.assertEqual(report["backend"], ACCEPTANCE_G1_BACKEND)
+            self.assertTrue((root / "g1.mp4.command.json").exists())
+            command_record = json.loads((root / "g1.mp4.command.json").read_text(encoding="utf-8"))
+            self.assertTrue(command_record["preserve_world_root"])
+            self.assertIn("semantic_left_right", command_record["overlays"])
 
 
 if __name__ == "__main__":
