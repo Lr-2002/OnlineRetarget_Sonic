@@ -1817,10 +1817,103 @@ def rows_from_csv_index(config: dict[str, Any], data_root: Path) -> tuple[list[d
 
 
 ROWS_FROM_INDEX_CACHE_SUBDIR = "cache/rows_from_index"
+ROWS_FROM_INDEX_CACHE_WAIT_TIMEOUT_SEC = 7200.0
+ROWS_FROM_INDEX_CACHE_POLL_SEC = 2.0
 
 
 def rows_from_index_cache_path(output_dir: Path) -> Path:
     return output_dir / ROWS_FROM_INDEX_CACHE_SUBDIR / "rows_from_index_cache.json"
+
+
+def rows_from_index_cache_payload(
+    config: Mapping[str, Any],
+    data_root: Path,
+    rows: list[dict[str, Any]],
+    skipped: int,
+) -> dict[str, Any]:
+    return {
+        "cache_version": 1,
+        "created_at": utc_now(),
+        "config": {
+            "format": config["input_data"].get("format"),
+            "robot_motion_dir": config["input_data"].get("robot_motion_dir"),
+            "soma_motion_dir": config["input_data"].get("soma_motion_dir"),
+            "data_root": str(data_root),
+            "max_clips": int(config["input_data"].get("max_clips", 0)),
+            "max_duration_delta_sec": float(config["input_data"].get("max_duration_delta_sec", 0.05)),
+        },
+        "rows": rows,
+        "row_count": len(rows),
+        "skipped_count": int(skipped),
+    }
+
+
+def write_rows_from_index_cache(cache_path: Path, payload: Mapping[str, Any]) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = cache_path.with_name(f"{cache_path.name}.tmp.{os.getpid()}")
+    tmp_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(cache_path)
+
+
+def read_rows_from_index_cache(cache_path: Path) -> tuple[list[dict[str, Any]], int]:
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    rows = payload["rows"]
+    skipped = int(payload["skipped_count"])
+    if len(rows) != int(payload["row_count"]):
+        raise ValueError(
+            f"rows_from_index cache row_count mismatch: payload={payload['row_count']} rows={len(rows)}"
+        )
+    return rows, skipped
+
+
+def wait_for_rows_from_index_cache(
+    cache_path: Path,
+    *,
+    stage_trace: StageTracer | None = None,
+    timeout_sec: float = ROWS_FROM_INDEX_CACHE_WAIT_TIMEOUT_SEC,
+    poll_sec: float = ROWS_FROM_INDEX_CACHE_POLL_SEC,
+) -> tuple[list[dict[str, Any]], int]:
+    deadline = time.monotonic() + timeout_sec
+    next_log = time.monotonic()
+    last_error = ""
+    if stage_trace:
+        stage_trace.log(
+            "rows_from_index_cache_wait",
+            "start",
+            cache_path=str(cache_path),
+            timeout_sec=timeout_sec,
+            poll_sec=poll_sec,
+        )
+    while True:
+        try:
+            if cache_path.exists():
+                rows, skipped = read_rows_from_index_cache(cache_path)
+                if stage_trace:
+                    stage_trace.log(
+                        "rows_from_index_cache_wait",
+                        "read",
+                        cache_path=str(cache_path),
+                        row_count=len(rows),
+                        skipped_count=skipped,
+                    )
+                return rows, skipped
+        except (json.JSONDecodeError, OSError, KeyError, ValueError) as exc:
+            last_error = repr(exc)
+        now = time.monotonic()
+        if now >= deadline:
+            raise TimeoutError(
+                f"timed out waiting for rows_from_index cache at {cache_path}; last_error={last_error}"
+            )
+        if stage_trace and now >= next_log:
+            stage_trace.log(
+                "rows_from_index_cache_wait",
+                "progress",
+                cache_path=str(cache_path),
+                remaining_sec=round(deadline - now, 3),
+                last_error=last_error,
+            )
+            next_log = now + max(30.0, poll_sec)
+        time.sleep(poll_sec)
 
 
 def rows_from_soma_motionlib_pair(
@@ -2068,39 +2161,32 @@ def rows_from_index(
     if config["input_data"].get("format") == "soma_motionlib":
         if use_cache and runtime is not None and runtime.get("distributed"):
             if is_main_process(runtime):
-                rows, skipped = rows_from_soma_motionlib_pair(config, stage_trace=stage_trace)
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                payload = {
-                    "cache_version": 1,
-                    "created_at": utc_now(),
-                    "config": {
-                        "format": config["input_data"].get("format"),
-                        "robot_motion_dir": config["input_data"].get("robot_motion_dir"),
-                        "soma_motion_dir": config["input_data"].get("soma_motion_dir"),
-                        "data_root": str(data_root),
-                        "max_clips": int(config["input_data"].get("max_clips", 0)),
-                        "max_duration_delta_sec": float(config["input_data"].get("max_duration_delta_sec", 0.05)),
-                    },
-                    "rows": rows,
-                    "row_count": len(rows),
-                    "skipped_count": int(skipped),
-                }
-                cache_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
-                if stage_trace:
-                    stage_trace.log(
-                        "rows_from_index_cache",
-                        "written",
-                        cache_path=str(cache_path),
-                        row_count=len(rows),
-                        skipped_count=int(skipped),
-                    )
-            distributed_barrier(runtime)
+                if cache_path.exists():
+                    rows, skipped = read_rows_from_index_cache(cache_path)
+                    if stage_trace:
+                        stage_trace.log(
+                            "rows_from_index_cache",
+                            "reused",
+                            cache_path=str(cache_path),
+                            row_count=len(rows),
+                            skipped_count=int(skipped),
+                        )
+                else:
+                    rows, skipped = rows_from_soma_motionlib_pair(config, stage_trace=stage_trace)
+                    payload = rows_from_index_cache_payload(config, data_root, rows, skipped)
+                    write_rows_from_index_cache(cache_path, payload)
+                    if stage_trace:
+                        stage_trace.log(
+                            "rows_from_index_cache",
+                            "written",
+                            cache_path=str(cache_path),
+                            row_count=len(rows),
+                            skipped_count=int(skipped),
+                        )
             if not is_main_process(runtime):
                 if stage_trace:
-                    stage_trace.log("rows_from_index_cache", "before_read", cache_path=str(cache_path))
-                payload = json.loads(cache_path.read_text(encoding="utf-8"))
-                rows = payload["rows"]
-                skipped = int(payload["skipped_count"])
+                    stage_trace.log("rows_from_index_cache", "wait_before_read", cache_path=str(cache_path))
+                rows, skipped = wait_for_rows_from_index_cache(cache_path, stage_trace=stage_trace)
                 if stage_trace:
                     stage_trace.log(
                         "rows_from_index_cache",
@@ -2113,23 +2199,8 @@ def rows_from_index(
             return rows, skipped
         rows, skipped = rows_from_soma_motionlib_pair(config, stage_trace=stage_trace)
         if use_cache:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "cache_version": 1,
-                "created_at": utc_now(),
-                "config": {
-                    "format": config["input_data"].get("format"),
-                    "robot_motion_dir": config["input_data"].get("robot_motion_dir"),
-                    "soma_motion_dir": config["input_data"].get("soma_motion_dir"),
-                    "data_root": str(data_root),
-                    "max_clips": int(config["input_data"].get("max_clips", 0)),
-                    "max_duration_delta_sec": float(config["input_data"].get("max_duration_delta_sec", 0.05)),
-                },
-                "rows": rows,
-                "row_count": len(rows),
-                "skipped_count": int(skipped),
-            }
-            cache_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+            payload = rows_from_index_cache_payload(config, data_root, rows, skipped)
+            write_rows_from_index_cache(cache_path, payload)
             if stage_trace:
                 stage_trace.log(
                     "rows_from_index_cache",
