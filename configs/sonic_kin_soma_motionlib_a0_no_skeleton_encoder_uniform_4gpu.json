@@ -40,6 +40,19 @@
     ],
     "auxiliary": []
   },
+  "evaluation_metrics": {
+    "primary": "g1_joint_pos_rmse_rad",
+    "aliases": [
+      "joint_pos_rmse_raw",
+      "mpjpe_like_g1_joint_pos_rmse_rad"
+    ],
+    "metric_family": "MPJPE-like joint-space RMSE",
+    "unit": "radian",
+    "joint_set": "G1 29-DoF joint position command targets over the future window",
+    "root_align": false,
+    "scale_align": false,
+    "loss_usage": "eval_metric_only_not_training_objective"
+  },
   "output_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_kin_soma_motionlib_a0_no_skeleton_encoder_runs/{run_group}/uniform",
   "validation_command": "PYTHONPATH=src:. /workspace/isaaclab/_isaac_sim/python.sh scripts/train_sonic_kin_skeleton_ae.py --config configs/sonic_kin_soma_motionlib_a0_no_skeleton_encoder_uniform_4gpu.json --dry-run",
   "expected_artifacts": [

@@ -21,6 +21,19 @@ NO_ENCODER_CONFIGS = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_uniform_4gpu.json",
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_proportional_4gpu.json",
 )
+EXPECTED_EVAL_METRICS = {
+    "primary": "g1_joint_pos_rmse_rad",
+    "aliases": [
+        "joint_pos_rmse_raw",
+        "mpjpe_like_g1_joint_pos_rmse_rad",
+    ],
+    "metric_family": "MPJPE-like joint-space RMSE",
+    "unit": "radian",
+    "joint_set": "G1 29-DoF joint position command targets over the future window",
+    "root_align": False,
+    "scale_align": False,
+    "loss_usage": "eval_metric_only_not_training_objective",
+}
 
 try:
     import torch
@@ -55,6 +68,7 @@ class A0FrozenAEConfigTests(unittest.TestCase):
                 self.assertEqual(config["features"]["expected_dims"]["motion_token"], 840)
                 self.assertEqual(config["features"]["expected_dims"]["model_input"], 904)
                 self.assertEqual(config["features"]["expected_dims"]["target"], 670)
+                self.assertEqual(config["evaluation_metrics"], EXPECTED_EVAL_METRICS)
                 self.assertFalse(config["ddp"]["init_sync"])
                 self.assertIn(f"soma_{topology}_filtered_v1", config["input_data"]["soma_motion_dir"])
                 self.assertEqual(config["variant"]["family"], "A0_frozen_skeleton_ae")
@@ -90,6 +104,8 @@ class A0FrozenAEConfigTests(unittest.TestCase):
                 self.assertEqual(config["decoder_targets"], frozen["decoder_targets"])
                 self.assertEqual(config["target_features"], frozen["target_features"])
                 self.assertEqual(config["losses"], frozen["losses"])
+                self.assertEqual(config["evaluation_metrics"], frozen["evaluation_metrics"])
+                self.assertEqual(config["evaluation_metrics"], EXPECTED_EVAL_METRICS)
                 self.assertEqual(config["input_data"], frozen["input_data"])
                 self.assertEqual(config["split"], frozen["split"])
                 self.assertEqual(config["normalization"], frozen["normalization"])
@@ -119,6 +135,30 @@ class A0FrozenAEConfigTests(unittest.TestCase):
                     "classification_head",
                 ):
                     self.assertNotIn(token, text)
+
+    def test_a0_explicit_eval_metric_logger_is_objective_neutral(self) -> None:
+        text = (REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py").read_text(encoding="utf-8")
+        for token in (
+            "EVAL_METRIC_CONTRACT",
+            "g1_joint_pos_rmse_rad",
+            "mpjpe_like_g1_joint_pos_rmse_rad",
+            "joint_pos_rmse_raw",
+            "MPJPE-like joint-space RMSE",
+            "unit",
+            "radian",
+            "G1 29-DoF joint position command targets",
+            "root_align",
+            "scale_align",
+            "eval_metric_only_not_training_objective",
+            "train/g1_joint_pos_rmse_rad",
+            "validation/g1_joint_pos_rmse_rad",
+            "eval_metrics",
+        ):
+            self.assertIn(token, text)
+        for path in (*A0_CONFIGS, *NO_ENCODER_CONFIGS):
+            config = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("mpjpe", " ".join(config["losses"]["primary"]).lower())
+            self.assertNotIn("joint_pos_rmse", " ".join(config["losses"]["primary"]).lower())
 
     def test_a0_stage_trace_covers_requested_dry_run_boundaries(self) -> None:
         text = (REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py").read_text(encoding="utf-8")
@@ -366,10 +406,14 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
             self.assertEqual(manifest["feature_dims"]["skeleton_embedding"], 64)
             self.assertEqual(manifest["feature_dims"]["model_input"], 904)
             self.assertEqual(manifest["feature_dims"]["target"], 670)
+            self.assertEqual(manifest["eval_metrics"]["primary"], "g1_joint_pos_rmse_rad")
             self.assertTrue(manifest["skeleton_ae"]["skeleton_encoder_frozen"])
             self.assertFalse(manifest["optimizer"]["contains_skeleton_encoder_params"])
             self.assertFalse(manifest["ddp"]["init_sync"])
             self.assertEqual(manifest["ddp"]["init_sync_source"], "config.ddp.init_sync")
+            self.assertEqual(summary["eval_metrics"]["primary"], "g1_joint_pos_rmse_rad")
+            self.assertIn("validation/g1_joint_pos_rmse_rad", summary)
+            self.assertIn("validation/mpjpe_like_g1_joint_pos_rmse_rad", summary)
             self.assertEqual(summary["mapping_report"]["missing_skeleton_geometry_count"], 0)
             self.assertIn("skeleton_embedding_mean", norm)
             self.assertIn("skeleton_embedding_std", norm)
@@ -449,7 +493,11 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
             self.assertEqual(manifest["feature_dims"]["skeleton"], 0)
             self.assertEqual(manifest["feature_dims"]["model_input"], 840)
             self.assertEqual(manifest["feature_dims"]["target"], 670)
+            self.assertEqual(manifest["eval_metrics"]["primary"], "g1_joint_pos_rmse_rad")
             self.assertNotIn("skeleton_ae", manifest)
+            self.assertEqual(summary["eval_metrics"]["primary"], "g1_joint_pos_rmse_rad")
+            self.assertIn("validation/g1_joint_pos_rmse_rad", summary)
+            self.assertIn("validation/mpjpe_like_g1_joint_pos_rmse_rad", summary)
             self.assertFalse(summary["skeleton_encoder_frozen"])
             self.assertFalse(summary["optimizer_contains_skeleton_encoder_params"])
             self.assertEqual(summary["mapping_report"], {})

@@ -138,6 +138,26 @@ REQUIRED_CONFIG_KEYS = {
     "runtime",
 }
 NO_SKELETON_ENCODER_FEATURE = "no_skeleton_encoder_zero_dim"
+EVAL_METRIC_CONTRACT: dict[str, Any] = {
+    "primary": "g1_joint_pos_rmse_rad",
+    "aliases": [
+        "joint_pos_rmse_raw",
+        "mpjpe_like_g1_joint_pos_rmse_rad",
+    ],
+    "metric_family": "MPJPE-like joint-space RMSE",
+    "unit": "radian",
+    "joint_set": "G1 29-DoF joint position command targets over the future window",
+    "space": "joint_angle_command",
+    "root_align": False,
+    "scale_align": False,
+    "loss_usage": "eval_metric_only_not_training_objective",
+    "logged_keys": [
+        "train/g1_joint_pos_rmse_rad",
+        "train/mpjpe_like_g1_joint_pos_rmse_rad",
+        "validation/g1_joint_pos_rmse_rad",
+        "validation/mpjpe_like_g1_joint_pos_rmse_rad",
+    ],
+}
 
 
 def utc_now() -> str:
@@ -1439,6 +1459,10 @@ def maybe_zero_skeleton_feature(
     return skeleton
 
 
+def eval_metric_contract() -> dict[str, Any]:
+    return copy.deepcopy(EVAL_METRIC_CONTRACT)
+
+
 def root_pose_target_dim(config: Mapping[str, Any], window: int) -> int:
     per_frame = 9 if include_root_pos_target(config) else 6
     return int(window) * per_frame
@@ -2650,13 +2674,16 @@ def loss_and_metrics(
             root_pose = anchor_raw.reshape(anchor_raw.shape[0], window, 9)
             root_pos_rmse = float(torch.sqrt(torch.mean(root_pose[..., :3] ** 2)).item())
             root_rot6d_error = root_pose[..., 3:]
+        joint_pos_rmse = float(torch.sqrt(torch.mean(joint_pos_error**2)).item())
         metrics = {
             "loss": float(loss.detach().item()),
             "command_mse_norm": float(command_loss.detach().item()),
             "anchor_mse_norm": float(anchor_loss.detach().item()),
             "root_pos_mse_norm": float(root_pos_loss.detach().item()),
             "root_rot_mse_norm": float(root_rot_loss.detach().item()),
-            "joint_pos_rmse_raw": float(torch.sqrt(torch.mean(joint_pos_error**2)).item()),
+            "joint_pos_rmse_raw": joint_pos_rmse,
+            "g1_joint_pos_rmse_rad": joint_pos_rmse,
+            "mpjpe_like_g1_joint_pos_rmse_rad": joint_pos_rmse,
             "joint_vel_rmse_raw": float(torch.sqrt(torch.mean(joint_vel_error**2)).item()),
             "anchor_rmse_raw": float(torch.sqrt(torch.mean(anchor_raw**2)).item()),
             "root_pos_rmse_raw": root_pos_rmse,
@@ -4041,6 +4068,8 @@ def write_loss_header(path: Path) -> None:
                 "train_root_pos_mse_norm",
                 "train_root_rot_mse_norm",
                 "train_joint_pos_rmse_raw",
+                "train_g1_joint_pos_rmse_rad",
+                "train_mpjpe_like_g1_joint_pos_rmse_rad",
                 "train_joint_vel_rmse_raw",
                 "train_anchor_rmse_raw",
                 "train_root_pos_rmse_raw",
@@ -4062,6 +4091,8 @@ def append_loss_row(path: Path, step: int, elapsed: float, metrics: dict[str, fl
                 f"{metrics.get('root_pos_mse_norm', float('nan')):.10f}",
                 f"{metrics.get('root_rot_mse_norm', float('nan')):.10f}",
                 f"{metrics['joint_pos_rmse_raw']:.10f}",
+                f"{metrics['g1_joint_pos_rmse_rad']:.10f}",
+                f"{metrics['mpjpe_like_g1_joint_pos_rmse_rad']:.10f}",
                 f"{metrics['joint_vel_rmse_raw']:.10f}",
                 f"{metrics['anchor_rmse_raw']:.10f}",
                 f"{metrics.get('root_pos_rmse_raw', float('nan')):.10f}",
@@ -4188,6 +4219,7 @@ def write_manifest(
         },
         "ddp": ddp_settings,
         "data_snapshot": data_snapshot,
+        "eval_metrics": eval_metric_contract(),
         "metrics_path": str(output_dir / "loss_curve.csv"),
         "notes": config["purpose"],
     }
@@ -4756,6 +4788,7 @@ def main() -> None:
                     ),
                     "optimizer_parameter_count": len(manifest["optimizer"]["parameter_names"]),
                     "mapping_report": manifest.get("skeleton_ae", {}).get("mapping_report", {}),
+                    "eval_metrics": manifest["eval_metrics"],
                     **val_metrics,
                 }
                 (output_dir / "dry_run_summary.json").write_text(
