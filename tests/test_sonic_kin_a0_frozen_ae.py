@@ -17,6 +17,10 @@ A0_CONFIGS = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_frozen_ae_uniform_4gpu.json",
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_frozen_ae_proportional_4gpu.json",
 )
+NO_ENCODER_CONFIGS = (
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_uniform_4gpu.json",
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_proportional_4gpu.json",
+)
 
 try:
     import torch
@@ -55,6 +59,54 @@ class A0FrozenAEConfigTests(unittest.TestCase):
                 self.assertIn(f"soma_{topology}_filtered_v1", config["input_data"]["soma_motion_dir"])
                 self.assertEqual(config["variant"]["family"], "A0_frozen_skeleton_ae")
                 text = path.read_text(encoding="utf-8")
+                for token in (
+                    "reward",
+                    "PPO",
+                    "g1_dyn",
+                    "g1_target_action",
+                    "action_loss",
+                    "dynamics_loss",
+                    "NumClasses",
+                    "skeleton_cluster_id",
+                    "classification_head",
+                ):
+                    self.assertNotIn(token, text)
+
+    def test_no_skeleton_encoder_configs_are_matched_motion_only_ablations(self) -> None:
+        frozen_by_topology = {}
+        for path in A0_CONFIGS:
+            config = json.loads(path.read_text(encoding="utf-8"))
+            frozen_by_topology[config["input_data"]["soma_topology"]] = config
+
+        for path in NO_ENCODER_CONFIGS:
+            with self.subTest(path=path.name):
+                config = json.loads(path.read_text(encoding="utf-8"))
+                topology = config["input_data"]["soma_topology"]
+                frozen = frozen_by_topology[topology]
+                self.assertEqual(config["training_lane"], "soma_motionlib_kin_only")
+                self.assertNotIn("skeleton_ae", config)
+                self.assertEqual(config["source_features"], [frozen["source_features"][0]])
+                self.assertEqual(config["target_decoder"], frozen["target_decoder"])
+                self.assertEqual(config["decoder_targets"], frozen["decoder_targets"])
+                self.assertEqual(config["target_features"], frozen["target_features"])
+                self.assertEqual(config["losses"], frozen["losses"])
+                self.assertEqual(config["input_data"], frozen["input_data"])
+                self.assertEqual(config["split"], frozen["split"])
+                self.assertEqual(config["normalization"], frozen["normalization"])
+                self.assertEqual(config["model"], frozen["model"])
+                self.assertEqual(config["training"], frozen["training"])
+                self.assertEqual(config["runtime"], frozen["runtime"])
+                self.assertEqual(config["ddp"], frozen["ddp"])
+                self.assertEqual(config["features"]["skeleton_feature"], "no_skeleton_encoder_zero_dim")
+                self.assertEqual(config["features"]["expected_dims"]["motion_token"], 840)
+                self.assertEqual(config["features"]["expected_dims"]["x_skel"], 0)
+                self.assertEqual(config["features"]["expected_dims"]["z_skel"], 0)
+                self.assertEqual(config["features"]["expected_dims"]["model_input"], 840)
+                self.assertEqual(config["features"]["expected_dims"]["target"], 670)
+                self.assertEqual(config["variant"]["family"], "A0_no_skeleton_encoder")
+                self.assertNotIn("cache/skeleton_embedding_cache.pt", config["expected_artifacts"])
+                text = path.read_text(encoding="utf-8")
+                self.assertNotIn("frozen_skeleton_geometry_ae_z64_from_static_registry", text)
                 for token in (
                     "reward",
                     "PPO",
@@ -323,6 +375,92 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
             self.assertIn("skeleton_embedding_std", norm)
             self.assertTrue((output_dir / "cache" / "skeleton_embedding_cache.pt").exists())
 
+    def test_no_skeleton_encoder_feature_is_zero_width_and_motion_only_model_runs(self) -> None:
+        frames = 12
+        arrays = {
+            "soma_joints": np.zeros((frames, 26, 3), dtype=np.float32),
+            "soma_root_quat": np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (frames, 1)),
+            "joint_pos": np.zeros((frames, 29), dtype=np.float32),
+            "joint_vel": np.zeros((frames, 29), dtype=np.float32),
+            "root_pos": np.zeros((frames, 3), dtype=np.float32),
+            "root_rot": np.tile(np.asarray([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32), (frames, 1)),
+        }
+        config = {
+            "features": {
+                "future_window_frames": 10,
+                "future_step": 1,
+                "include_root_pos_target": True,
+                "skeleton_feature": "no_skeleton_encoder_zero_dim",
+            },
+            "variant": {"type": "concat", "name": "A0_no_encoder_test"},
+            "model": {"hidden_dim": 32, "num_layers": 1, "dropout": 0.0},
+        }
+
+        motion, skeleton, target = sonic_train.build_soma_motionlib_features(
+            arrays,
+            np.arange(2, dtype=np.int64),
+            10,
+            1,
+            config,
+        )
+        model = sonic_train.make_model(840, 0, 670, config)
+        pred = model(torch.zeros(3, 840), torch.zeros(3, 0))
+
+        self.assertEqual(tuple(motion.shape), (2, 840))
+        self.assertEqual(tuple(skeleton.shape), (2, 0))
+        self.assertEqual(tuple(target.shape), (2, 670))
+        self.assertEqual(tuple(pred.shape), (3, 670))
+
+    def test_no_skeleton_encoder_dry_run_writes_motion_only_manifest(self) -> None:
+        try:
+            import joblib  # noqa: F401
+        except ModuleNotFoundError:
+            self.skipTest("joblib is required for soma_motionlib dry-run fixture")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checkpoint, stats, registry = _write_ae_artifacts(root)
+            config_path = _write_dry_run_config(root, checkpoint, stats, registry, no_skeleton_encoder=True)
+            env = dict(os.environ)
+            env["KIN_RUN_GROUP"] = "a0_no_encoder_dry_run_test"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py"),
+                    "--config",
+                    str(config_path),
+                    "--dry-run",
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            output_dir = root / "runs" / "a0_no_encoder_dry_run_test"
+            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+            summary = json.loads((output_dir / "dry_run_summary.json").read_text(encoding="utf-8"))
+            norm = torch.load(output_dir / "stats" / "normalization.pt", map_location="cpu", weights_only=False)
+
+            self.assertEqual(manifest["feature_dims"]["motion"], 840)
+            self.assertEqual(manifest["feature_dims"]["skeleton"], 0)
+            self.assertEqual(manifest["feature_dims"]["model_input"], 840)
+            self.assertEqual(manifest["feature_dims"]["target"], 670)
+            self.assertNotIn("skeleton_ae", manifest)
+            self.assertFalse(summary["skeleton_encoder_frozen"])
+            self.assertFalse(summary["optimizer_contains_skeleton_encoder_params"])
+            self.assertEqual(summary["mapping_report"], {})
+            self.assertIn("skeleton_mean", norm)
+            self.assertIn("skeleton_std", norm)
+            self.assertEqual(tuple(norm["skeleton_mean"].shape), (0,))
+            self.assertEqual(tuple(norm["skeleton_std"].shape), (0,))
+            self.assertNotIn("skeleton_embedding_mean", norm)
+            self.assertNotIn("skeleton_embedding_std", norm)
+            self.assertFalse((output_dir / "cache" / "skeleton_embedding_cache.pt").exists())
+
     def test_index_only_preflight_writes_rows_cache_and_trace(self) -> None:
         try:
             import joblib  # noqa: F401
@@ -473,7 +611,14 @@ def _minimal_a0_config(root: Path, checkpoint: Path, stats: Path, registry: Path
     }
 
 
-def _write_dry_run_config(root: Path, checkpoint: Path, stats: Path, registry: Path) -> Path:
+def _write_dry_run_config(
+    root: Path,
+    checkpoint: Path,
+    stats: Path,
+    registry: Path,
+    *,
+    no_skeleton_encoder: bool = False,
+) -> Path:
     import joblib
 
     robot_dir = root / "robot"
@@ -573,6 +718,18 @@ def _write_dry_run_config(root: Path, checkpoint: Path, stats: Path, registry: P
         "ddp": {"init_sync": False},
         "wandb": {"enabled": False},
     }
+    if no_skeleton_encoder:
+        config.pop("skeleton_ae")
+        config["purpose"] = "A0 no-skeleton-encoder dry-run fixture"
+        config["variant"] = {"name": "A0_no_encoder_dry_run_test", "type": "concat"}
+        config["features"]["skeleton_feature"] = "no_skeleton_encoder_zero_dim"
+        config["features"]["expected_dims"] = {
+            "motion_token": 840,
+            "x_skel": 0,
+            "z_skel": 0,
+            "model_input": 840,
+            "target": 670,
+        }
     config_path = root / "a0_dry_run_config.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")
     return config_path

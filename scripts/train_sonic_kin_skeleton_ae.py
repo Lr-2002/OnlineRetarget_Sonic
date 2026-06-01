@@ -137,6 +137,7 @@ REQUIRED_CONFIG_KEYS = {
     "training",
     "runtime",
 }
+NO_SKELETON_ENCODER_FEATURE = "no_skeleton_encoder_zero_dim"
 
 
 def utc_now() -> str:
@@ -1419,6 +1420,25 @@ def include_root_pos_target(config: Mapping[str, Any]) -> bool:
     return "root_pos" in target_text
 
 
+def no_skeleton_encoder_feature_enabled(config: Mapping[str, Any] | None) -> bool:
+    if config is None:
+        return False
+    features = config.get("features", {})
+    if not isinstance(features, Mapping):
+        return False
+    return str(features.get("skeleton_feature", "")).strip() == NO_SKELETON_ENCODER_FEATURE
+
+
+def maybe_zero_skeleton_feature(
+    skeleton: np.ndarray,
+    frame_count: int,
+    config: Mapping[str, Any] | None,
+) -> np.ndarray:
+    if no_skeleton_encoder_feature_enabled(config):
+        return np.zeros((int(frame_count), 0), dtype=np.float32)
+    return skeleton
+
+
 def root_pose_target_dim(config: Mapping[str, Any], window: int) -> int:
     per_frame = 9 if include_root_pos_target(config) else 6
     return int(window) * per_frame
@@ -1479,6 +1499,7 @@ def build_features(
         [skeleton_anchor.reshape(frame_indices.shape[0], -1), skeleton_lengths],
         axis=-1,
     )
+    skeleton = maybe_zero_skeleton_feature(skeleton, frame_indices.shape[0], config)
 
     command = np.concatenate([joint_pos[idx], joint_vel[idx]], axis=-1)
     if config is not None and include_root_pos_target(config):
@@ -1593,6 +1614,7 @@ def build_soma_motionlib_features(
         [skeleton_anchor.reshape(frame_indices.shape[0], -1), skeleton_lengths],
         axis=-1,
     )
+    skeleton = maybe_zero_skeleton_feature(skeleton, frame_indices.shape[0], config)
 
     command = np.concatenate([dof[idx], joint_vel[idx]], axis=-1)
     if config is not None and include_root_pos_target(config):
