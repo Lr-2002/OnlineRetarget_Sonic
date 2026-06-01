@@ -150,6 +150,15 @@ fi
 if [[ "${DISABLE_VISUAL_VALIDATION:-0}" == "1" ]]; then
   TRAIN_ARGS+=(--disable-visual-validation)
 fi
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  TRAIN_ARGS+=(--dry-run)
+fi
+if [[ "${REMOTE_LOGGING_PROBE:-0}" == "1" ]]; then
+  TRAIN_ARGS+=(--remote-logging-probe)
+fi
+if [[ "${STAGE_TRACE:-0}" == "1" ]]; then
+  TRAIN_ARGS+=(--stage-trace)
+fi
 TRAIN_COMMAND="$(printf '%q ' "${PYTHON_BIN}" -m torch.distributed.run --standalone "--nproc-per-node=${NPROC_PER_NODE}" "${TRAIN_ARGS[@]}")"
 LOG_PATH_QUOTED="$(printf '%q' "${LOG_PATH}")"
 
@@ -169,7 +178,7 @@ ${TRAIN_COMMAND} 2>&1 | tee -a ${LOG_PATH_QUOTED}
 EOF
 )
 
-"${PYTHON_BIN}" - "${LAUNCH_ROOT}/launch_manifest.json" "${RUN_GROUP}" "${CONFIG}" "${VARIANT}" "${NPROC_PER_NODE}" "${CUDA_VISIBLE_DEVICES}" "${CONTROL_COMMIT}" "${EXTERNAL_SOURCE_COMMIT}" "${WANDB_MODE:-online}" "${DISABLE_VISUAL_VALIDATION:-0}" "${MAX_STEPS:-}" "${SESSION}" <<'PY'
+"${PYTHON_BIN}" - "${LAUNCH_ROOT}/launch_manifest.json" "${RUN_GROUP}" "${CONFIG}" "${VARIANT}" "${NPROC_PER_NODE}" "${CUDA_VISIBLE_DEVICES}" "${CONTROL_COMMIT}" "${EXTERNAL_SOURCE_COMMIT}" "${WANDB_MODE:-online}" "${DISABLE_VISUAL_VALIDATION:-0}" "${MAX_STEPS:-}" "${SESSION}" "${DRY_RUN:-0}" "${REMOTE_LOGGING_PROBE:-0}" "${STAGE_TRACE:-0}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -188,6 +197,9 @@ manifest = {
     "disable_visual_validation": sys.argv[10] == "1",
     "max_steps_override": sys.argv[11],
     "tmux_session": sys.argv[12],
+    "dry_run": sys.argv[13] == "1",
+    "remote_logging_probe": sys.argv[14] == "1",
+    "stage_trace": sys.argv[15] == "1",
     "entrypoint": "scripts/train_sonic_kin_skeleton_ae.py",
     "distributed_launcher": "python -m torch.distributed.run",
     "contract": "strict_supervised_soma_motionlib_kin_only_no_ppo_no_isaac_no_reward_episode_length",

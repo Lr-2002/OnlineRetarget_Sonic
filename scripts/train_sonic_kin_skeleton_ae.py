@@ -61,6 +61,17 @@ from online_retarget.models.skeleton_geometry_ae import (  # noqa: E402
     load_skeleton_geometry_ae_checkpoint,
     load_skeleton_geometry_ae_stats,
 )
+from online_retarget.training_time_logging import (  # noqa: E402
+    a0_metric_registry_results,
+    apply_remote_logging_visual_overrides,
+    build_remote_logging_probe_payload,
+    build_remote_logging_contract,
+    log_visual_artifact_specs,
+    remote_logging_settings,
+    remote_logging_summary,
+    visual_wandb_artifact_specs,
+    wandb_registry_payload,
+)
 
 
 REQUIRED_NPZ_KEYS = ("joint_pos", "joint_vel", "body_pos_w", "body_quat_w")
@@ -1395,7 +1406,14 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dic
             wandb_cfg["mode"] = args.wandb_mode
             os.environ.setdefault("WANDB_MODE", args.wandb_mode)
         updated["wandb"] = wandb_cfg
-    return updated
+    if getattr(args, "remote_logging_probe", False):
+        remote_cfg = dict(updated.get("remote_logging", {}))
+        remote_cfg["enabled"] = True
+        remote_cfg["probe"] = True
+        remote_cfg.setdefault("log_scalars", True)
+        remote_cfg.setdefault("write_probe_summary", True)
+        updated["remote_logging"] = remote_cfg
+    return apply_remote_logging_visual_overrides(updated)
 
 
 def quat_normalize(q: np.ndarray) -> np.ndarray:
@@ -2837,6 +2855,8 @@ def run_visual_validation(
     step: int,
     joint_dim: int,
     wandb_run: Any,
+    manifest: Mapping[str, Any] | None = None,
+    checkpoint_path: Path | str | None = None,
     skeleton_feature_lookup: SkeletonAEFeatureLookup | None = None,
     acceptance_backend: bool = False,
     isaac_python_bin: Path | str | None = None,
@@ -2904,6 +2924,9 @@ def run_visual_validation(
     model.eval()
     reports: list[dict[str, Any]] = []
     wandb_payload: dict[str, Any] = {}
+    wandb_upload_enabled = bool(
+        remote_logging_settings(config)["visual_wandb_upload_enabled"]
+    )
     try:
         for index, row in enumerate(rows):
             try:
@@ -2934,23 +2957,52 @@ def run_visual_validation(
                     "message": str(exc),
                 }
             reports.append(report)
-            if wandb_run is not None and report.get("combined_status") == "ok":
+            if (
+                wandb_run is not None
+                and wandb_upload_enabled
+                and report.get("combined_status") == "ok"
+            ):
                 try:
                     import wandb
 
                     video_path = Path(str(report["combined_video"]))
                     fps = float(report.get("fps") or cfg.get("fps") or 50.0)
-                    key = f"visual_validation/{index:02d}_{_safe_metric_name(str(report.get('filename', index)))}"
-                    wandb_payload[key] = wandb.Video(str(video_path), fps=int(round(fps)), format="mp4")
+                    key = (
+                        f"visual_validation/{index:02d}_"
+                        f"{_safe_metric_name(str(report.get('filename', index)))}"
+                    )
+                    wandb_payload[key] = wandb.Video(
+                        str(video_path),
+                        fps=int(round(fps)),
+                        format="mp4",
+                    )
                 except Exception as exc:
                     report["wandb_video_status"] = "failed"
                     report["wandb_video_message"] = str(exc)
+            elif report.get("combined_status") == "ok":
+                report["wandb_video_status"] = "disabled"
     finally:
         if was_training:
             model.train()
 
     if wandb_run is not None and wandb_payload:
         wandb_run.log(wandb_payload, step=step)
+    artifact_specs = visual_wandb_artifact_specs(
+        reports,
+        config=config,
+        manifest=manifest,
+        step=step,
+        checkpoint_path=checkpoint_path,
+    )
+    artifact_log_status: dict[str, Any] = {"status": "disabled", "logged": []}
+    if wandb_run is not None and artifact_specs:
+        try:
+            artifact_log_status = {
+                "status": "ok",
+                "logged": log_visual_artifact_specs(wandb_run, artifact_specs),
+            }
+        except Exception as exc:
+            artifact_log_status = {"status": "failed", "message": str(exc), "logged": []}
 
     ok_count = sum(1 for report in reports if report.get("combined_status") == "ok")
     failed_count = len(reports) - ok_count
@@ -2963,6 +3015,10 @@ def run_visual_validation(
         "videos_ok": ok_count,
         "videos_failed": failed_count,
         "elapsed_sec": time.perf_counter() - started,
+        "wandb_upload_enabled": wandb_upload_enabled,
+        "wandb_video_keys": sorted(wandb_payload),
+        "wandb_artifacts": artifact_specs,
+        "wandb_artifact_log": artifact_log_status,
         "reports": reports,
     }
     report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -3215,6 +3271,7 @@ def _render_visual_validation_clip(
         "combined_status": combine_report.get("status"),
         "combined_video": str(combined_video),
         "metadata": str(metadata_path),
+        "active_backend_is_acceptance_backend": False,
     }
 
 
@@ -3405,6 +3462,7 @@ def _render_motionlib_visual_validation_clip(
         "combined_status": combine_report.get("status"),
         "combined_video": str(combined_video),
         "metadata": str(metadata_path),
+        "active_backend_is_acceptance_backend": False,
     }
 
 
@@ -4278,6 +4336,12 @@ def write_manifest(
         "ddp": ddp_settings,
         "data_snapshot": data_snapshot,
         "eval_metrics": eval_metric_contract(),
+        "remote_logging": build_remote_logging_contract(
+            config,
+            output_dir=output_dir,
+            run_group=run_group,
+            config_path=config_path,
+        ),
         "metrics_path": str(output_dir / "loss_curve.csv"),
         "notes": config["purpose"],
     }
@@ -4323,7 +4387,69 @@ def init_wandb(config: dict[str, Any], manifest: dict[str, Any], output_dir: Pat
     if run is not None:
         run.summary["git_commit"] = manifest["control_revision_actual"]
         run.summary["source_repo_git_commit"] = manifest["source_revision_actual"]
+        remote_logging = manifest.get("remote_logging", {})
+        if isinstance(remote_logging, Mapping):
+            run.summary["remote_logging/schema_version"] = remote_logging.get("schema_version", "")
+            run.summary["remote_logging/visual_wandb_upload_enabled"] = (
+                remote_logging.get("visuals", {}).get("wandb_upload_enabled", False)
+                if isinstance(remote_logging.get("visuals", {}), Mapping)
+                else False
+            )
+            run.summary["remote_logging/metric_registry_schema"] = (
+                remote_logging.get("scalars", {}).get("metric_registry_schema", "")
+                if isinstance(remote_logging.get("scalars", {}), Mapping)
+                else ""
+            )
     return run
+
+
+def log_remote_logging_probe_wandb(
+    *,
+    config: dict[str, Any],
+    manifest: Mapping[str, Any],
+    output_dir: Path,
+    run_group: str,
+    summary_path: Path,
+    metric_results: Sequence[Any],
+) -> dict[str, Any]:
+    try:
+        probe_run = init_wandb(config, dict(manifest), output_dir, run_group)
+    except Exception as exc:
+        return {"status": "failed", "message": str(exc)}
+    if probe_run is None:
+        return {"status": "disabled"}
+
+    status: dict[str, Any] = {"status": "ok", "artifact": "disabled"}
+    try:
+        payload = build_remote_logging_probe_payload(config, metric_results)
+        probe_run.log(payload, step=0)
+        probe_run.summary["remote_logging_probe"] = True
+        probe_run.summary["remote_logging_probe_summary"] = str(summary_path)
+        try:
+            import wandb
+
+            artifact_name = "remote-logging-probe-" + _safe_metric_name(
+                str(manifest.get("run_id", "run"))
+            )
+            artifact = wandb.Artifact(
+                name=artifact_name,
+                type="online_retarget_remote_logging_probe",
+                metadata={
+                    "schema_version": manifest.get("remote_logging", {}).get("schema_version", ""),
+                    "run_id": manifest.get("run_id", ""),
+                    "run_group": manifest.get("run_group", ""),
+                    "control_revision_actual": manifest.get("control_revision_actual", ""),
+                },
+            )
+            artifact.add_file(str(summary_path), name="dry_run_summary.json")
+            probe_run.log_artifact(artifact)
+            status["artifact"] = "ok"
+        except Exception as exc:
+            status["artifact"] = "failed"
+            status["artifact_message"] = str(exc)
+    finally:
+        probe_run.finish()
+    return status
 
 
 def validate_runtime(
@@ -4434,6 +4560,14 @@ def main() -> None:
         "--stage-trace",
         action="store_true",
         help="Write per-rank A0 dry-run stage diagnostics under logs/a0_stage_trace.",
+    )
+    parser.add_argument(
+        "--remote-logging-probe",
+        action="store_true",
+        help=(
+            "Mark the run as a remote metric/visual W&B logging probe in manifest "
+            "and dry-run output."
+        ),
     )
     parser.add_argument("--local-rank", "--local_rank", type=int, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -4582,11 +4716,35 @@ def main() -> None:
                     "probe_only_source": probe_only_source,
                     "probe_backward_enabled": probe_backward_enabled,
                     "probe_backward_source": probe_backward_source,
+                    "remote_logging": remote_logging_summary(
+                        config,
+                        output_dir=output_dir,
+                        run_group=run_group,
+                        config_path=args.config,
+                    ),
+                    "remote_logging_probe": bool(args.remote_logging_probe),
                 }
-                (output_dir / "dry_run_summary.json").write_text(
+                if args.remote_logging_probe:
+                    summary["remote_logging_probe_wandb"] = {
+                        "status": "skipped",
+                        "reason": "ddp_probe_only_has_no_metric_results",
+                    }
+                dry_run_summary_path = output_dir / "dry_run_summary.json"
+                dry_run_summary_path.write_text(
                     json.dumps(summary, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",
                 )
+                if args.remote_logging_probe:
+                    print(
+                        json.dumps(
+                            {
+                                "event": "remote_logging_probe_wandb",
+                                **summary["remote_logging_probe_wandb"],
+                            },
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
                 print(json.dumps(summary, sort_keys=True), flush=True)
             with stage_trace.span("ddp_probe_only_barrier"):
                 distributed_barrier(runtime)
@@ -4839,6 +4997,12 @@ def main() -> None:
             with stage_trace.span("dry_run_metric_all_reduce"):
                 val_metrics = average_metric_dict(val_metrics, runtime, device)
             if is_main:
+                metric_results = a0_metric_registry_results(
+                    val_metrics,
+                    source="validation",
+                    step=0,
+                    sequence_id="dry_run_validation",
+                )
                 summary = {
                     "event": "dry_run",
                     "variant": config["variant"],
@@ -4855,12 +5019,42 @@ def main() -> None:
                     "optimizer_parameter_count": len(manifest["optimizer"]["parameter_names"]),
                     "mapping_report": manifest.get("skeleton_ae", {}).get("mapping_report", {}),
                     "eval_metrics": manifest["eval_metrics"],
+                    "remote_logging": remote_logging_summary(
+                        config,
+                        output_dir=output_dir,
+                        run_group=run_group,
+                        config_path=args.config,
+                        metric_results=metric_results,
+                    ),
+                    "remote_logging_probe": bool(args.remote_logging_probe),
                     **val_metrics,
                 }
-                (output_dir / "dry_run_summary.json").write_text(
+                dry_run_summary_path = output_dir / "dry_run_summary.json"
+                dry_run_summary_path.write_text(
                     json.dumps(summary, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",
                 )
+                if args.remote_logging_probe:
+                    probe_status = log_remote_logging_probe_wandb(
+                        config=config,
+                        manifest=manifest,
+                        output_dir=output_dir,
+                        run_group=run_group,
+                        summary_path=dry_run_summary_path,
+                        metric_results=metric_results,
+                    )
+                    summary["remote_logging_probe_wandb"] = probe_status
+                    dry_run_summary_path.write_text(
+                        json.dumps(summary, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                    print(
+                        json.dumps(
+                            {"event": "remote_logging_probe_wandb", **probe_status},
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
                 print(json.dumps(summary, sort_keys=True), flush=True)
             with stage_trace.span("dry_run_summary_barrier"):
                 distributed_barrier(runtime)
@@ -4966,7 +5160,21 @@ def main() -> None:
                     log_payload["step"] = step
                     print(json.dumps({"event": "train", **log_payload}, sort_keys=True), flush=True)
                     if wandb_run is not None:
-                        wandb_run.log(log_payload, step=step)
+                        wandb_payload = dict(log_payload)
+                        remote_settings = remote_logging_settings(config)
+                        if (
+                            remote_settings["enabled"]
+                            and remote_settings["log_scalars"]
+                            and not remote_settings["scalar_eval_only"]
+                        ):
+                            registry_results = a0_metric_registry_results(avg, source="train", step=step)
+                            wandb_payload.update(
+                                wandb_registry_payload(
+                                    registry_results,
+                                    namespace=remote_settings["wandb_metric_namespace"],
+                                )
+                            )
+                        wandb_run.log(wandb_payload, step=step)
 
                 if step % validate_every == 0 or step == 1:
                     if val_sampler is not None:
@@ -4985,7 +5193,21 @@ def main() -> None:
                     if is_main and val_metrics:
                         print(json.dumps({"event": "validation", "step": step, **val_metrics}, sort_keys=True), flush=True)
                         if wandb_run is not None:
-                            wandb_run.log(val_metrics, step=step)
+                            wandb_payload = dict(val_metrics)
+                            remote_settings = remote_logging_settings(config)
+                            if remote_settings["enabled"] and remote_settings["log_scalars"]:
+                                registry_results = a0_metric_registry_results(
+                                    val_metrics,
+                                    source="validation",
+                                    step=step,
+                                )
+                                wandb_payload.update(
+                                    wandb_registry_payload(
+                                        registry_results,
+                                        namespace=remote_settings["wandb_metric_namespace"],
+                                    )
+                                )
+                            wandb_run.log(wandb_payload, step=step)
 
                 now = time.perf_counter()
                 if visual_validation_due(config, step, now=now, last_time=last_visual_validation_time):
@@ -5002,6 +5224,8 @@ def main() -> None:
                                 step=step,
                                 joint_dim=joint_dim,
                                 wandb_run=wandb_run,
+                                manifest=manifest,
+                                checkpoint_path=output_dir / "checkpoints" / "latest.pt",
                                 skeleton_feature_lookup=skeleton_feature_lookup,
                             )
                         except Exception as exc:

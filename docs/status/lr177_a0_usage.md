@@ -124,6 +124,92 @@ The supplemental artifact should record the evaluator command, control-repo SHA,
 position source, sample split/count, units, and the resulting body-position MPJPE values. Do not
 rename or treat `g1_joint_pos_rmse_rad` as MPJPE.
 
+## Training-Time W&B Metric And Visual Logging
+
+New LR-177 A0 launches expose a `remote_logging` contract in `manifest.json` and
+`dry_run_summary.json`. This contract is non-invasive to training:
+
+- it does not change the loss, objective, optimizer, checkpoint selection, or DDP collectives;
+- only rank 0 initializes W&B and uploads visual artifacts;
+- `g1_joint_pos_rmse_rad` is logged as joint-angle RMSE in radians under the registry schema
+  `humanoid_retarget_eval.v1`;
+- `body_position_mpjpe` is emitted as `missing` until a separate
+  `body_position_mpjpe_supplemental.json` evaluator artifact exists;
+- simulator policy metrics such as `policy_success` are `not_applicable` for this kin-only
+  supervised training lane.
+
+Expected scalar keys include:
+
+- `train/g1_joint_pos_rmse_rad`
+- `validation/g1_joint_pos_rmse_rad`
+- `metric_registry/train/g1_joint_pos_rmse_rad`
+- `metric_registry/validation/g1_joint_pos_rmse_rad`
+
+Visual upload is controlled by both `visual_validation` and `remote_logging`:
+
+- `visual_validation.enabled`
+- `visual_validation.every_steps` or `visual_validation.every_minutes`
+- `visual_validation.num_videos`
+- `visual_validation.duration_sec`
+- `visual_validation.wandb_upload`
+- `remote_logging.enabled`
+- `remote_logging.visual_upload`
+- `remote_logging.visual_every_n_steps`
+- `remote_logging.num_visual_samples`
+- `remote_logging.max_video_sec`
+- `--wandb-mode online|offline|disabled`
+
+When the same visual knobs are present in both blocks, `remote_logging` is the override surface and
+is applied to the effective `visual_validation` runtime config before cadence checks, sample
+selection, duration selection, and W&B upload gating. The manifest records this mapping under
+`remote_logging.visuals.controls_apply_to` so a probe cannot report one visual cadence while the
+trainer runs another.
+
+When visual validation runs, `visual_validation/step_*/summary.json` records W&B video keys and
+artifact specs. Artifact metadata includes run id, run group, variant, step, checkpoint path,
+control/source commits, sequence id, local clip metadata path, and whether the render was the
+acceptance backend. If SomaMesh or IsaacLab assets are absent and the capsule fallback is used, the
+metadata is labeled `fallback_not_final_somamesh`; that fallback is not acceptable as a final
+SomaMesh render.
+
+## Remote Logging Probe Contract
+
+MLOps can validate the W&B metric/visual contract without launching optimization or a heavy render
+job by using the launcher dry-run probe:
+
+```bash
+CONFIG=configs/sonic_kin_soma_motionlib_a0_no_skeleton_encoder_uniform_4gpu.json \
+KIN_RUN_GROUP=lr177_a0_remote_logging_probe_$(date -u +%Y%m%dT%H%M%SZ) \
+DRY_RUN=1 \
+REMOTE_LOGGING_PROBE=1 \
+WANDB_MODE=offline \
+DISABLE_VISUAL_VALIDATION=0 \
+STAGE_TRACE=1 \
+NO_TMUX=1 \
+scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
+```
+
+The probe should produce `manifest.json` and `dry_run_summary.json` under the configured
+`output_dir`. With `REMOTE_LOGGING_PROBE=1` and effective W&B mode not disabled, rank 0 also logs
+the registry scalar probe payload and uploads `dry_run_summary.json` as an
+`online_retarget_remote_logging_probe` artifact. Reviewers should check:
+
+- `dry_run_summary.json.remote_logging.schema_version == online_retarget.remote_training_logging.v1`
+- `remote_logging.non_invasive.changes_training_loss == false`
+- `remote_logging.non_invasive.changes_ddp_collectives == false`
+- `remote_logging.metric_registry_results` contains measured `g1_joint_pos_rmse_rad`, missing
+  `body_position_mpjpe`, and not-applicable `policy_success`
+- `remote_logging.visuals.wandb_upload_enabled` matches the effective W&B mode and config flags
+- `remote_logging.visuals.expected_artifact_template` matches the W&B artifact naming contract
+
+For an online W&B upload probe after code review, set `WANDB_MODE=online` and keep
+`REMOTE_LOGGING_PROBE=1`. That validates scalar logging and manifest/dry-run W&B config. It still
+does not prove final SomaMesh visual upload unless the SomaMesh source assets, IsaacLab renderer,
+and `visual_validation` cadence are available and a real visual validation step is executed.
+If `A0_DDP_PROBE_ONLY=1` is used with `REMOTE_LOGGING_PROBE=1`, W&B upload is intentionally skipped
+and `dry_run_summary.json.remote_logging_probe_wandb.reason` is
+`ddp_probe_only_has_no_metric_results`; that DDP-only path has no validation metrics to upload.
+
 ## Skeleton Geometry AE Pretraining
 
 The frozen-AE configs consume an existing AE checkpoint and normalization stats. To rebuild that

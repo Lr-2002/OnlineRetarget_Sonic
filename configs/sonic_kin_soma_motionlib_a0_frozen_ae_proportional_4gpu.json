@@ -166,6 +166,18 @@
     "source_bvh_tar": "/mnt/data_oss/online_retarget/lr147_delta_bvh_vis_data_20260525/back_data/soma_proportional.tar",
     "g1_model_xml": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training/gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml"
   },
+  "remote_logging": {
+    "enabled": true,
+    "log_scalars": true,
+    "scalar_eval_only": false,
+    "metric_registry_schema": "humanoid_retarget_eval.v1",
+    "visual_upload": true,
+    "visual_every_n_steps": 20000,
+    "num_visual_samples": 8,
+    "max_video_sec": 4.0,
+    "wandb_artifact_prefix": "lr177-a0-visual-validation",
+    "write_probe_summary": true
+  },
   "runtime": {
     "required_gpu_count": 4,
     "write_root": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs",
