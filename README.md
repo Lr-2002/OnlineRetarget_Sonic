@@ -2,7 +2,10 @@
 
 Learning-based online retargeting from BONES-SEED SOMA human motion to Unitree G1 robot motion.
 
-The current LR-185 execution surface is exactly two kin-only SONIC SOMA encoder baselines: **SOMA uniform -> G1** and **SOMA proportional -> G1**. Each baseline launches as one 4-GPU run with SONIC `g1_kin` as the only active decoder. See `goal.md` and `docs/status/sonic_native_retarget_contract_2026-05-20.md`.
+The current execution surface has two active supervised SONIC/SOMA run families:
+
+- LR-185 kin-only SONIC SOMA encoder baselines: **SOMA uniform -> G1** and **SOMA proportional -> G1**. Each baseline launches as one 4-GPU run with SONIC `g1_kin` as the only active decoder. See `goal.md` and `docs/status/sonic_native_retarget_contract_2026-05-20.md`.
+- LR-177 A0 SOMA motionlib ablations: frozen Skeleton Geometry AE conditioning versus no skeleton encoder, each run on uniform and proportional SOMA topology. See `docs/status/lr177_a0_usage.md`.
 
 ## Repository Status
 
@@ -259,6 +262,37 @@ PYTHONPATH=src python3 scripts/train.py \
   --batch-size 8
 ```
 
+### LR-177 A0 SOMA Motionlib Runs
+
+Detailed usage, config matrix, dimensions, and metric limitations are documented in
+`docs/status/lr177_a0_usage.md`.
+
+Dry-run one A0 config with the same 4-rank shape as formal training:
+
+```bash
+export CONFIG=configs/sonic_kin_soma_motionlib_a0_frozen_ae_uniform_4gpu.json
+export KIN_RUN_GROUP=lr177_a0_frozen_ae_uniform_dryrun_$(date -u +%Y%m%dT%H%M%SZ)
+PYTHONPATH=src:. /workspace/isaaclab/_isaac_sim/python.sh -m torch.distributed.run \
+  --standalone --nproc-per-node=4 \
+  scripts/train_sonic_kin_skeleton_ae.py \
+  --config "${CONFIG}" \
+  --dry-run \
+  --wandb-mode disabled
+```
+
+Launch a formal 4-GPU run through the guarded tmux launcher:
+
+```bash
+CONFIG=configs/sonic_kin_soma_motionlib_a0_frozen_ae_uniform_4gpu.json \
+KIN_RUN_GROUP=lr177_a0_frozen_ae_uniform_$(date -u +%Y%m%dT%H%M%SZ) \
+scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
+```
+
+Use the same command shape for the proportional frozen-AE config and both no-skeleton-encoder
+configs by changing `CONFIG`. The launcher refuses uncommitted or stale control-repo code before
+starting formal training; do not restart or modify already-running remote jobs that were launched
+from an earlier committed SHA.
+
 Dry-run the latency benchmark contract:
 
 ```bash
@@ -298,3 +332,4 @@ body-model decoding still requires the SMPL-X dependencies; generic `.npz` files
 - `docs/architecture.md` - training and inference pipeline.
 - `docs/milestones.md` - checkable gates.
 - `docs/experiment_tracking.md` - WandB, git, DDP, and tmux rules.
+- `docs/status/lr177_a0_usage.md` - LR-177 frozen-AE/no-skeleton-encoder config usage.

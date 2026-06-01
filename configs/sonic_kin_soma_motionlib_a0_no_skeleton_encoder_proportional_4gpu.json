@@ -71,7 +71,7 @@
     }
   },
   "output_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_kin_soma_motionlib_a0_no_skeleton_encoder_runs/{run_group}/proportional",
-  "validation_command": "PYTHONPATH=src:. /workspace/isaaclab/_isaac_sim/python.sh scripts/train_sonic_kin_skeleton_ae.py --config configs/sonic_kin_soma_motionlib_a0_no_skeleton_encoder_proportional_4gpu.json --dry-run",
+  "validation_command": "PYTHONPATH=src:. /workspace/isaaclab/_isaac_sim/python.sh -m torch.distributed.run --standalone --nproc-per-node=4 scripts/train_sonic_kin_skeleton_ae.py --config configs/sonic_kin_soma_motionlib_a0_no_skeleton_encoder_proportional_4gpu.json --dry-run --wandb-mode disabled",
   "expected_artifacts": [
     "manifest.json",
     "dry_run_summary.json",

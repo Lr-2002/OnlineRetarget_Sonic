@@ -89,6 +89,11 @@ class A0FrozenAEConfigTests(unittest.TestCase):
                 self.assertFalse(config["ddp"]["init_sync"])
                 self.assertIn(f"soma_{topology}_filtered_v1", config["input_data"]["soma_motion_dir"])
                 self.assertEqual(config["variant"]["family"], "A0_frozen_skeleton_ae")
+                validation_command = config["validation_command"]
+                self.assertIn("torch.distributed.run", validation_command)
+                self.assertIn("--nproc-per-node=4", validation_command)
+                self.assertIn(path.name, validation_command)
+                self.assertIn("--dry-run", validation_command)
                 text = path.read_text(encoding="utf-8")
                 for token in (
                     "reward",
@@ -138,6 +143,11 @@ class A0FrozenAEConfigTests(unittest.TestCase):
                 self.assertEqual(config["features"]["expected_dims"]["target"], 670)
                 self.assertEqual(config["variant"]["family"], "A0_no_skeleton_encoder")
                 self.assertNotIn("cache/skeleton_embedding_cache.pt", config["expected_artifacts"])
+                validation_command = config["validation_command"]
+                self.assertIn("torch.distributed.run", validation_command)
+                self.assertIn("--nproc-per-node=4", validation_command)
+                self.assertIn(path.name, validation_command)
+                self.assertIn("--dry-run", validation_command)
                 text = path.read_text(encoding="utf-8")
                 self.assertNotIn("frozen_skeleton_geometry_ae_z64_from_static_registry", text)
                 for token in (
