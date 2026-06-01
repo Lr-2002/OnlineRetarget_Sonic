@@ -142,9 +142,8 @@ EVAL_METRIC_CONTRACT: dict[str, Any] = {
     "primary": "g1_joint_pos_rmse_rad",
     "aliases": [
         "joint_pos_rmse_raw",
-        "mpjpe_like_g1_joint_pos_rmse_rad",
     ],
-    "metric_family": "MPJPE-like joint-space RMSE",
+    "metric_family": "G1 joint-angle command RMSE",
     "unit": "radian",
     "joint_set": "G1 29-DoF joint position command targets over the future window",
     "space": "joint_angle_command",
@@ -153,10 +152,21 @@ EVAL_METRIC_CONTRACT: dict[str, Any] = {
     "loss_usage": "eval_metric_only_not_training_objective",
     "logged_keys": [
         "train/g1_joint_pos_rmse_rad",
-        "train/mpjpe_like_g1_joint_pos_rmse_rad",
         "validation/g1_joint_pos_rmse_rad",
-        "validation/mpjpe_like_g1_joint_pos_rmse_rad",
     ],
+    "body_position_mpjpe": {
+        "status": "not_available_from_a0_joint_angle_target",
+        "reason": "A0 targets are G1 joint-angle command windows and do not contain FK/body-position targets.",
+        "requires_supplemental_evaluator_artifact": True,
+        "supplemental_evaluator_artifact": "body_position_mpjpe_supplemental.json",
+        "required_run_families": [
+            "A0_frozen_skeleton_ae_uniform",
+            "A0_frozen_skeleton_ae_proportional",
+            "A0_no_skeleton_encoder_uniform",
+            "A0_no_skeleton_encoder_proportional",
+        ],
+        "training_objective_changed": False,
+    },
 }
 
 
@@ -735,13 +745,64 @@ def ddp_probe_constructor_kwargs(
 
 
 def a0_probe_expected_dims(config: Mapping[str, Any]) -> tuple[int, int, int]:
-    expected_dims = config.get("features", {}).get("expected_dims", {})
-    if not isinstance(expected_dims, Mapping):
+    expected_dims = expected_feature_dims(config, required=True)
+    if expected_dims is None:
         raise ValueError("features.expected_dims is required for A0 DDP probe-only mode")
     motion_dim = int(expected_dims["motion_token"])
     skeleton_dim = int(expected_dims["z_skel"])
     target_dim = int(expected_dims["target"])
     return motion_dim, skeleton_dim, target_dim
+
+
+def expected_feature_dims(
+    config: Mapping[str, Any],
+    *,
+    required: bool = False,
+) -> dict[str, int] | None:
+    features = config.get("features", {})
+    expected_dims = features.get("expected_dims") if isinstance(features, Mapping) else None
+    if expected_dims is None:
+        if required:
+            raise ValueError("features.expected_dims is required for this A0 path")
+        return None
+    if not isinstance(expected_dims, Mapping):
+        raise ValueError("features.expected_dims must be a mapping")
+    required_keys = ("motion_token", "z_skel", "model_input", "target")
+    missing = [key for key in required_keys if key not in expected_dims]
+    if missing:
+        raise ValueError(f"features.expected_dims missing required key(s): {', '.join(missing)}")
+    parsed = {key: int(expected_dims[key]) for key in required_keys}
+    if "x_skel" in expected_dims:
+        parsed["x_skel"] = int(expected_dims["x_skel"])
+    return parsed
+
+
+def assert_expected_feature_dims(
+    config: Mapping[str, Any],
+    *,
+    motion_dim: int,
+    skeleton_dim: int,
+    target_dim: int,
+    skeleton_feature_lookup: Any | None,
+) -> None:
+    expected = expected_feature_dims(config)
+    if expected is None:
+        return
+    actual = {
+        "motion_token": int(motion_dim),
+        "z_skel": int(skeleton_dim),
+        "model_input": int(motion_dim + skeleton_dim),
+        "target": int(target_dim),
+    }
+    if "x_skel" in expected:
+        actual["x_skel"] = SKELETON_GEOMETRY_DIM if skeleton_feature_lookup is not None else int(skeleton_dim)
+    mismatches = [
+        f"{key}: expected {expected[key]}, got {actual.get(key)}"
+        for key in expected
+        if actual.get(key) != expected[key]
+    ]
+    if mismatches:
+        raise ValueError("features.expected_dims mismatch: " + "; ".join(mismatches))
 
 
 def run_ddp_probe_model(
@@ -2683,7 +2744,6 @@ def loss_and_metrics(
             "root_rot_mse_norm": float(root_rot_loss.detach().item()),
             "joint_pos_rmse_raw": joint_pos_rmse,
             "g1_joint_pos_rmse_rad": joint_pos_rmse,
-            "mpjpe_like_g1_joint_pos_rmse_rad": joint_pos_rmse,
             "joint_vel_rmse_raw": float(torch.sqrt(torch.mean(joint_vel_error**2)).item()),
             "anchor_rmse_raw": float(torch.sqrt(torch.mean(anchor_raw**2)).item()),
             "root_pos_rmse_raw": root_pos_rmse,
@@ -4069,7 +4129,6 @@ def write_loss_header(path: Path) -> None:
                 "train_root_rot_mse_norm",
                 "train_joint_pos_rmse_raw",
                 "train_g1_joint_pos_rmse_rad",
-                "train_mpjpe_like_g1_joint_pos_rmse_rad",
                 "train_joint_vel_rmse_raw",
                 "train_anchor_rmse_raw",
                 "train_root_pos_rmse_raw",
@@ -4092,7 +4151,6 @@ def append_loss_row(path: Path, step: int, elapsed: float, metrics: dict[str, fl
                 f"{metrics.get('root_rot_mse_norm', float('nan')):.10f}",
                 f"{metrics['joint_pos_rmse_raw']:.10f}",
                 f"{metrics['g1_joint_pos_rmse_rad']:.10f}",
-                f"{metrics['mpjpe_like_g1_joint_pos_rmse_rad']:.10f}",
                 f"{metrics['joint_vel_rmse_raw']:.10f}",
                 f"{metrics['anchor_rmse_raw']:.10f}",
                 f"{metrics.get('root_pos_rmse_raw', float('nan')):.10f}",
@@ -4575,6 +4633,14 @@ def main() -> None:
         motion_dim = int(stats["motion_mean"].numel())
         skeleton_dim = skeleton_feature_dim(stats, config)
         target_dim = int(stats["target_mean"].numel())
+        with stage_trace.span("features_expected_dims_validate"):
+            assert_expected_feature_dims(
+                config,
+                motion_dim=motion_dim,
+                skeleton_dim=skeleton_dim,
+                target_dim=target_dim,
+                skeleton_feature_lookup=skeleton_feature_lookup,
+            )
         stage_trace.log(
             "normalization_stats_motion_z",
             "details",

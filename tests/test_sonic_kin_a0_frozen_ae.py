@@ -25,14 +25,31 @@ EXPECTED_EVAL_METRICS = {
     "primary": "g1_joint_pos_rmse_rad",
     "aliases": [
         "joint_pos_rmse_raw",
-        "mpjpe_like_g1_joint_pos_rmse_rad",
     ],
-    "metric_family": "MPJPE-like joint-space RMSE",
+    "metric_family": "G1 joint-angle command RMSE",
     "unit": "radian",
     "joint_set": "G1 29-DoF joint position command targets over the future window",
+    "space": "joint_angle_command",
     "root_align": False,
     "scale_align": False,
     "loss_usage": "eval_metric_only_not_training_objective",
+    "logged_keys": [
+        "train/g1_joint_pos_rmse_rad",
+        "validation/g1_joint_pos_rmse_rad",
+    ],
+    "body_position_mpjpe": {
+        "status": "not_available_from_a0_joint_angle_target",
+        "reason": "A0 targets are G1 joint-angle command windows and do not contain FK/body-position targets.",
+        "requires_supplemental_evaluator_artifact": True,
+        "supplemental_evaluator_artifact": "body_position_mpjpe_supplemental.json",
+        "required_run_families": [
+            "A0_frozen_skeleton_ae_uniform",
+            "A0_frozen_skeleton_ae_proportional",
+            "A0_no_skeleton_encoder_uniform",
+            "A0_no_skeleton_encoder_proportional",
+        ],
+        "training_objective_changed": False,
+    },
 }
 
 try:
@@ -141,24 +158,60 @@ class A0FrozenAEConfigTests(unittest.TestCase):
         for token in (
             "EVAL_METRIC_CONTRACT",
             "g1_joint_pos_rmse_rad",
-            "mpjpe_like_g1_joint_pos_rmse_rad",
             "joint_pos_rmse_raw",
-            "MPJPE-like joint-space RMSE",
+            "G1 joint-angle command RMSE",
             "unit",
             "radian",
             "G1 29-DoF joint position command targets",
+            "joint_angle_command",
             "root_align",
             "scale_align",
             "eval_metric_only_not_training_objective",
             "train/g1_joint_pos_rmse_rad",
             "validation/g1_joint_pos_rmse_rad",
+            "body_position_mpjpe",
+            "not_available_from_a0_joint_angle_target",
+            "requires_supplemental_evaluator_artifact",
+            "body_position_mpjpe_supplemental.json",
             "eval_metrics",
         ):
             self.assertIn(token, text)
+        self.assertNotIn("mpjpe_like", text)
         for path in (*A0_CONFIGS, *NO_ENCODER_CONFIGS):
+            config_text = path.read_text(encoding="utf-8")
             config = json.loads(path.read_text(encoding="utf-8"))
             self.assertNotIn("mpjpe", " ".join(config["losses"]["primary"]).lower())
             self.assertNotIn("joint_pos_rmse", " ".join(config["losses"]["primary"]).lower())
+            self.assertEqual(config["evaluation_metrics"], EXPECTED_EVAL_METRICS)
+            self.assertNotIn("mpjpe_like", config_text)
+
+    def test_a0_expected_dims_guard_is_in_normal_dry_run_and_formal_path(self) -> None:
+        text = (REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py").read_text(encoding="utf-8")
+        for token in (
+            "def assert_expected_feature_dims",
+            "features_expected_dims_validate",
+            "features.expected_dims mismatch",
+            "motion_dim=motion_dim",
+            "skeleton_feature_lookup=skeleton_feature_lookup",
+        ):
+            self.assertIn(token, text)
+        self.assertLess(text.index("features_expected_dims_validate"), text.index("model_construct"))
+        for path in A0_CONFIGS:
+            config = json.loads(path.read_text(encoding="utf-8"))
+            with self.subTest(path=path.name):
+                self.assertEqual(config["features"]["expected_dims"]["motion_token"], 840)
+                self.assertEqual(config["features"]["expected_dims"]["x_skel"], 104)
+                self.assertEqual(config["features"]["expected_dims"]["z_skel"], 64)
+                self.assertEqual(config["features"]["expected_dims"]["model_input"], 904)
+                self.assertEqual(config["features"]["expected_dims"]["target"], 670)
+        for path in NO_ENCODER_CONFIGS:
+            config = json.loads(path.read_text(encoding="utf-8"))
+            with self.subTest(path=path.name):
+                self.assertEqual(config["features"]["expected_dims"]["motion_token"], 840)
+                self.assertEqual(config["features"]["expected_dims"]["x_skel"], 0)
+                self.assertEqual(config["features"]["expected_dims"]["z_skel"], 0)
+                self.assertEqual(config["features"]["expected_dims"]["model_input"], 840)
+                self.assertEqual(config["features"]["expected_dims"]["target"], 670)
 
     def test_a0_stage_trace_covers_requested_dry_run_boundaries(self) -> None:
         text = (REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py").read_text(encoding="utf-8")
@@ -407,13 +460,20 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
             self.assertEqual(manifest["feature_dims"]["model_input"], 904)
             self.assertEqual(manifest["feature_dims"]["target"], 670)
             self.assertEqual(manifest["eval_metrics"]["primary"], "g1_joint_pos_rmse_rad")
+            self.assertEqual(
+                manifest["eval_metrics"]["body_position_mpjpe"]["status"],
+                "not_available_from_a0_joint_angle_target",
+            )
+            self.assertTrue(
+                manifest["eval_metrics"]["body_position_mpjpe"]["requires_supplemental_evaluator_artifact"]
+            )
             self.assertTrue(manifest["skeleton_ae"]["skeleton_encoder_frozen"])
             self.assertFalse(manifest["optimizer"]["contains_skeleton_encoder_params"])
             self.assertFalse(manifest["ddp"]["init_sync"])
             self.assertEqual(manifest["ddp"]["init_sync_source"], "config.ddp.init_sync")
             self.assertEqual(summary["eval_metrics"]["primary"], "g1_joint_pos_rmse_rad")
             self.assertIn("validation/g1_joint_pos_rmse_rad", summary)
-            self.assertIn("validation/mpjpe_like_g1_joint_pos_rmse_rad", summary)
+            self.assertNotIn("validation/mpjpe_like_g1_joint_pos_rmse_rad", summary)
             self.assertEqual(summary["mapping_report"]["missing_skeleton_geometry_count"], 0)
             self.assertIn("skeleton_embedding_mean", norm)
             self.assertIn("skeleton_embedding_std", norm)
@@ -455,6 +515,63 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
         self.assertEqual(tuple(target.shape), (2, 670))
         self.assertEqual(tuple(pred.shape), (3, 670))
 
+    def test_expected_feature_dims_rejects_frozen_and_no_encoder_mismatches(self) -> None:
+        frozen = {
+            "features": {
+                "expected_dims": {
+                    "motion_token": 840,
+                    "x_skel": 104,
+                    "z_skel": 64,
+                    "model_input": 904,
+                    "target": 670,
+                }
+            }
+        }
+        sonic_train.assert_expected_feature_dims(
+            frozen,
+            motion_dim=840,
+            skeleton_dim=64,
+            target_dim=670,
+            skeleton_feature_lookup=object(),
+        )
+        bad_frozen = json.loads(json.dumps(frozen))
+        bad_frozen["features"]["expected_dims"]["model_input"] = 905
+        with self.assertRaisesRegex(ValueError, "features.expected_dims mismatch: model_input"):
+            sonic_train.assert_expected_feature_dims(
+                bad_frozen,
+                motion_dim=840,
+                skeleton_dim=64,
+                target_dim=670,
+                skeleton_feature_lookup=object(),
+            )
+
+        no_encoder = {
+            "features": {
+                "expected_dims": {
+                    "motion_token": 840,
+                    "x_skel": 0,
+                    "z_skel": 0,
+                    "model_input": 840,
+                    "target": 670,
+                }
+            }
+        }
+        sonic_train.assert_expected_feature_dims(
+            no_encoder,
+            motion_dim=840,
+            skeleton_dim=0,
+            target_dim=670,
+            skeleton_feature_lookup=None,
+        )
+        with self.assertRaisesRegex(ValueError, "features.expected_dims mismatch: z_skel"):
+            sonic_train.assert_expected_feature_dims(
+                no_encoder,
+                motion_dim=840,
+                skeleton_dim=64,
+                target_dim=670,
+                skeleton_feature_lookup=object(),
+            )
+
     def test_no_skeleton_encoder_dry_run_writes_motion_only_manifest(self) -> None:
         try:
             import joblib  # noqa: F401
@@ -494,10 +611,17 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
             self.assertEqual(manifest["feature_dims"]["model_input"], 840)
             self.assertEqual(manifest["feature_dims"]["target"], 670)
             self.assertEqual(manifest["eval_metrics"]["primary"], "g1_joint_pos_rmse_rad")
+            self.assertEqual(
+                manifest["eval_metrics"]["body_position_mpjpe"]["status"],
+                "not_available_from_a0_joint_angle_target",
+            )
+            self.assertTrue(
+                manifest["eval_metrics"]["body_position_mpjpe"]["requires_supplemental_evaluator_artifact"]
+            )
             self.assertNotIn("skeleton_ae", manifest)
             self.assertEqual(summary["eval_metrics"]["primary"], "g1_joint_pos_rmse_rad")
             self.assertIn("validation/g1_joint_pos_rmse_rad", summary)
-            self.assertIn("validation/mpjpe_like_g1_joint_pos_rmse_rad", summary)
+            self.assertNotIn("validation/mpjpe_like_g1_joint_pos_rmse_rad", summary)
             self.assertFalse(summary["skeleton_encoder_frozen"])
             self.assertFalse(summary["optimizer_contains_skeleton_encoder_params"])
             self.assertEqual(summary["mapping_report"], {})
@@ -729,6 +853,13 @@ def _write_dry_run_config(
             "future_window_frames": 10,
             "future_step": 1,
             "include_root_pos_target": True,
+            "expected_dims": {
+                "motion_token": 840,
+                "x_skel": 104,
+                "z_skel": 64,
+                "model_input": 904,
+                "target": 670,
+            },
         },
         "split": {"validation_ratio": 0.5, "hash_salt": "test"},
         "normalization": {"max_frames": 1000, "frames_per_chunk": 64},

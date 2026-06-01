@@ -43,15 +43,32 @@
   "evaluation_metrics": {
     "primary": "g1_joint_pos_rmse_rad",
     "aliases": [
-      "joint_pos_rmse_raw",
-      "mpjpe_like_g1_joint_pos_rmse_rad"
+      "joint_pos_rmse_raw"
     ],
-    "metric_family": "MPJPE-like joint-space RMSE",
+    "metric_family": "G1 joint-angle command RMSE",
     "unit": "radian",
     "joint_set": "G1 29-DoF joint position command targets over the future window",
+    "space": "joint_angle_command",
     "root_align": false,
     "scale_align": false,
-    "loss_usage": "eval_metric_only_not_training_objective"
+    "loss_usage": "eval_metric_only_not_training_objective",
+    "logged_keys": [
+      "train/g1_joint_pos_rmse_rad",
+      "validation/g1_joint_pos_rmse_rad"
+    ],
+    "body_position_mpjpe": {
+      "status": "not_available_from_a0_joint_angle_target",
+      "reason": "A0 targets are G1 joint-angle command windows and do not contain FK/body-position targets.",
+      "requires_supplemental_evaluator_artifact": true,
+      "supplemental_evaluator_artifact": "body_position_mpjpe_supplemental.json",
+      "required_run_families": [
+        "A0_frozen_skeleton_ae_uniform",
+        "A0_frozen_skeleton_ae_proportional",
+        "A0_no_skeleton_encoder_uniform",
+        "A0_no_skeleton_encoder_proportional"
+      ],
+      "training_objective_changed": false
+    }
   },
   "output_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_kin_soma_motionlib_a0_no_skeleton_encoder_runs/{run_group}/uniform",
   "validation_command": "PYTHONPATH=src:. /workspace/isaaclab/_isaac_sim/python.sh scripts/train_sonic_kin_skeleton_ae.py --config configs/sonic_kin_soma_motionlib_a0_no_skeleton_encoder_uniform_4gpu.json --dry-run",
