@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import sys
+from typing import Mapping, Sequence
 
 from isaaclab.app import AppLauncher
 
@@ -51,6 +53,23 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=None, help="Optional JSON config for source render defaults.")
     parser.add_argument("--format", choices=("auto", "motionlib", "npz", "csv"), default="auto")
+    parser.add_argument(
+        "--source-renderer",
+        choices=("somamesh", "capsule"),
+        default="somamesh",
+        help="Left-panel source renderer when --bvh is provided. Use capsule only for diagnostics.",
+    )
+    parser.add_argument(
+        "--somamesh-retargeter-root",
+        type=Path,
+        default=Path("/home/user/project/ContextRetarget/third_party/soma-retargeter"),
+    )
+    parser.add_argument(
+        "--somamesh-usd",
+        type=Path,
+        default=Path("/home/user/data/motion_data/soma_shapes/soma_base_rig/soma_base_skel_minimal.usd"),
+    )
+    parser.add_argument("--somamesh-triangle-stride", type=int, default=3)
     parser.add_argument("--duration-sec", type=float, default=4.0)
     parser.add_argument(
         "--asset-root",
@@ -70,6 +89,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--root-position-scale", type=float, default=0.01, help="CSV root position scale only.")
     parser.add_argument("--angle-scale", type=float, default=float(3.141592653589793 / 180.0), help="CSV angle scale only.")
     parser.add_argument(
+        "--target-fps",
+        type=float,
+        default=None,
+        help="Playback FPS override. Use this for generated CSVs because they do not store timing.",
+    )
+    parser.add_argument(
         "--root-rot-format",
         choices=("auto", "wxyz", "xyzw"),
         default="auto",
@@ -80,6 +105,33 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-offset", type=float, nargs=3, default=(2.5, -3.0, 1.6))
     parser.add_argument("--overlay-world-root-axes", action="store_true")
     parser.add_argument("--overlay-semantic-lr", action="store_true")
+    parser.add_argument("--ground-size", type=float, default=28.0, help="Square Isaac ground plane size in meters.")
+    parser.add_argument(
+        "--ground-color",
+        type=float,
+        nargs=3,
+        default=(0.08, 0.20, 0.72),
+        metavar=("R", "G", "B"),
+        help="Ground plane RGB color, each component in 0..1.",
+    )
+    parser.add_argument(
+        "--camera-follow-smoothing",
+        type=int,
+        default=4,
+        help="Centered root-XY smoothing radius in frames for follow camera mode.",
+    )
+    parser.add_argument(
+        "--camera-framing-margin",
+        type=float,
+        default=1.35,
+        help="Multiplier applied to the clip/body envelope when auto-scaling camera distance.",
+    )
+    parser.add_argument("--draw-orientation-labels", action="store_true")
+    parser.add_argument(
+        "--fast-exit-after-report",
+        action="store_true",
+        help="Exit immediately after writing MP4/JSON reports. Useful for headless Isaac runs that hang during shutdown.",
+    )
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     if args.g1_motion is None and args.npz is None:
@@ -113,6 +165,7 @@ from render_bvh_g1_mujoco_pair import (  # noqa: E402
     root_xy_span,
     zero_initial_root_xy,
 )
+from render_somamesh_source import render_somamesh_source_panel  # noqa: E402
 
 
 SONIC_JOINT_NAMES = (
@@ -170,31 +223,49 @@ def main() -> None:
         root_position_scale=args_cli.root_position_scale,
         angle_scale=args_cli.angle_scale,
         root_rot_format=args_cli.root_rot_format,
+        target_fps=args_cli.target_fps,
     )
     if not args_cli.preserve_world_root:
         motion = zero_initial_root_xy(motion)
     target_video = args_cli.output
+    source_video: Path | None = None
     source_report = None
     combine_report = None
     if args_cli.bvh is not None:
         panel_dir = args_cli.output.with_suffix("")
         panel_dir.mkdir(parents=True, exist_ok=True)
-        source_video = panel_dir / "source_bvh_capsules.mp4"
-        target_video = panel_dir / "target_g1_isaac.mp4"
-        source_report = render_source_bvh_panel(
-            args_cli.bvh,
-            source_video,
-            fps=float(motion["fps"]),
-            frame_count=int(motion["frame_count"]),
-            width=args_cli.width,
-            height=args_cli.height,
-            source_position_scale=source_scale,
+        source_video = panel_dir / (
+            "source_somabvh_somamesh.mp4" if args_cli.source_renderer == "somamesh" else "source_bvh_capsules.mp4"
         )
+        target_video = panel_dir / "target_g1_isaac.mp4"
+        if args_cli.source_renderer == "somamesh":
+            source_report = render_somamesh_source_panel(
+                bvh_path=args_cli.bvh,
+                output_path=source_video,
+                fps=float(motion["fps"]),
+                frame_count=int(motion["frame_count"]),
+                width=args_cli.width,
+                height=args_cli.height,
+                stride_triangles=args_cli.somamesh_triangle_stride,
+                title=args_cli.bvh.stem,
+                retargeter_root=args_cli.somamesh_retargeter_root,
+                usd_path=args_cli.somamesh_usd,
+            )
+        else:
+            source_report = render_source_bvh_panel(
+                args_cli.bvh,
+                source_video,
+                fps=float(motion["fps"]),
+                frame_count=int(motion["frame_count"]),
+                width=args_cli.width,
+                height=args_cli.height,
+                source_position_scale=source_scale,
+            )
     stage_utils.create_new_stage()
     sim = sim_utils.SimulationContext(
         sim_utils.SimulationCfg(dt=1.0 / motion["fps"], render_interval=1, device="cuda:0")
     )
-    _spawn_scene(args_cli.asset_root)
+    _spawn_scene(args_cli.asset_root, ground_size=args_cli.ground_size, ground_color=args_cli.ground_color)
     robot = _spawn_robot(args_cli.asset_root, args_cli.robot_urdf, args_cli.robot_usd)
     camera = _spawn_camera(args_cli.width, args_cli.height)
     stage_utils.update_stage()
@@ -202,11 +273,19 @@ def main() -> None:
     robot.update(sim.cfg.dt)
 
     joint_order = _joint_order(robot.joint_names, motion["joint_names"])
-    camera_plan = _camera_plan(motion, args_cli.camera_mode, np.asarray(args_cli.camera_offset, dtype=np.float32))
+    camera_plan = _camera_plan(
+        motion,
+        args_cli.camera_mode,
+        np.asarray(args_cli.camera_offset, dtype=np.float32),
+        follow_smoothing=args_cli.camera_follow_smoothing,
+        framing_margin=args_cli.camera_framing_margin,
+    )
     frames_written = 0
     changed_frames = 0
     previous_frame = None
     frame_sums: list[int] = []
+    overlay_world_axes = bool(args_cli.overlay_world_root_axes or args_cli.draw_orientation_labels)
+    overlay_semantic_lr = bool(args_cli.overlay_semantic_lr or args_cli.draw_orientation_labels)
 
     with imageio.get_writer(target_video, fps=motion["fps"], codec="libx264", quality=8, macro_block_size=1) as writer:
         for frame_index in range(motion["frame_count"]):
@@ -220,8 +299,8 @@ def main() -> None:
                 torch.as_tensor(joint_pos[None, :], dtype=torch.float32, device=sim.device)
             )
             robot.write_data_to_sim()
-            target_np = root_pos if args_cli.camera_mode == "follow" else camera_plan["target"]
-            eye_np = target_np + camera_plan["offset"]
+            target_np = _camera_target_for_frame(camera_plan, frame_index)
+            eye_np = target_np + np.asarray(camera_plan["offset"], dtype=np.float32)
             target = torch.as_tensor(target_np[None, :], dtype=torch.float32, device=sim.device)
             eye = torch.as_tensor(eye_np[None, :], dtype=torch.float32, device=sim.device)
             camera.set_world_poses_from_view(eye, target + torch.tensor([[0.0, 0.0, 0.35]], device=sim.device))
@@ -230,13 +309,13 @@ def main() -> None:
             camera.update(dt=0.0, force_recompute=True)
             frame = camera.data.output["rgb"][0].detach().cpu().numpy()
             frame = np.asarray(frame[..., :3], dtype=np.uint8)
-            if args_cli.overlay_world_root_axes or args_cli.overlay_semantic_lr:
+            if overlay_world_axes or overlay_semantic_lr:
                 frame = _draw_acceptance_overlays(
                     frame,
                     root_pos=root_pos,
                     frame_index=frame_index,
-                    show_axes=args_cli.overlay_world_root_axes,
-                    show_semantic_lr=args_cli.overlay_semantic_lr,
+                    show_axes=overlay_world_axes,
+                    show_semantic_lr=overlay_semantic_lr,
                 )
             frame = cv2.putText(
                 frame.copy(),
@@ -256,8 +335,14 @@ def main() -> None:
             previous_frame = frame_bytes
             frames_written += 1
 
-    if args_cli.bvh is not None:
+    source_failed = (
+        isinstance(source_report, dict)
+        and source_report.get("status") not in (None, "ok")
+    )
+    if args_cli.bvh is not None and not source_failed:
         combine_report = combine_two_videos((source_video, target_video), args_cli.output, fps=int(round(float(motion["fps"]))))
+    elif source_failed:
+        combine_report = {"status": "failed", "message": "source render failed; paired video was not combined"}
 
     target_video_exists = target_video.exists()
     target_video_bytes = target_video.stat().st_size if target_video_exists else 0
@@ -273,6 +358,14 @@ def main() -> None:
         failure_reasons.append(f"combine_status={combine_report.get('status')}")
     if failure_reasons:
         status = "failed"
+    combined_changed_frames = _optional_int_from_report(combine_report, "changed_frames")
+    if combined_changed_frames is None and args_cli.output.exists() and args_cli.output.stat().st_size > 0:
+        combined_changed_frames = _video_changed_frames(args_cli.output)
+    changed_frame_counts = {
+        "target": changed_frames,
+        "source": _optional_int_from_report(source_report, "changed_frames"),
+        "combined": combined_changed_frames,
+    }
     report = {
         "status": status,
         "backend": "isaaclab_usd_g1_kinematic_playback",
@@ -286,23 +379,47 @@ def main() -> None:
         "target_video_exists": bool(target_video_exists),
         "target_video_bytes": int(target_video_bytes),
         "fps": motion["fps"],
+        "target_fps_override": args_cli.target_fps,
         "frames": frames_written,
         "changed_frames": changed_frames,
+        "changed_frame_counts": changed_frame_counts,
         "width": args_cli.width,
         "height": args_cli.height,
         "camera_mode": args_cli.camera_mode,
+        "camera_policy": _camera_policy_report(camera_plan, args_cli),
+        "ground_size": float(args_cli.ground_size),
+        "ground_plane_size": [float(args_cli.ground_size), float(args_cli.ground_size)],
+        "ground_color": [float(value) for value in args_cli.ground_color],
         "root_xy_preserved": True,
         "initial_root_xy_zeroed": not args_cli.preserve_world_root,
         "root_quat_format": motion.get("root_quat_format"),
+        "fps_overridden": bool(motion.get("fps_overridden", False)),
+        "orientation_overlay": {
+            "enabled": bool(overlay_world_axes or overlay_semantic_lr),
+            "world_axes": overlay_world_axes,
+            "root_axes": overlay_world_axes,
+            "semantic_left_right": overlay_semantic_lr,
+            "projected_label_frames": frames_written if overlay_world_axes or overlay_semantic_lr else 0,
+            "semantics": _orientation_overlay_semantics(),
+        },
         "target_root_xy_span_m": root_xy_span(motion["root_pos"]),
         "source_position_scale": source_scale,
         "source_render": source_report,
+        "source_renderer": args_cli.source_renderer if args_cli.bvh is not None else "",
+        "source_renderer_contract": (
+            "SOMA/BVH source panel uses skinned SomaMesh LBS, not capsule"
+            if args_cli.bvh is not None and args_cli.source_renderer == "somamesh"
+            else "capsule source panel is diagnostic fallback"
+            if args_cli.bvh is not None
+            else ""
+        ),
+        "somamesh_usd": str(args_cli.somamesh_usd) if args_cli.bvh is not None and args_cli.source_renderer == "somamesh" else "",
         "combine": combine_report,
         "robot_asset": str(_robot_asset(args_cli.asset_root, args_cli.robot_urdf, args_cli.robot_usd)),
         "preserved_overlays": {
-            "world_axes": bool(args_cli.overlay_world_root_axes),
-            "root_axes": bool(args_cli.overlay_world_root_axes),
-            "semantic_left_right": bool(args_cli.overlay_semantic_lr),
+            "world_axes": overlay_world_axes,
+            "root_axes": overlay_world_axes,
+            "semantic_left_right": overlay_semantic_lr,
         },
         "robot_joint_names": robot.joint_names,
         "motion_joint_names": list(motion["joint_names"]),
@@ -374,43 +491,192 @@ def _shutdown_simulation_app(*, phase: str, report_path: Path | None = None) -> 
         return _cleanup_warning(phase, exc, report_path or Path(""))
 
 
+def _optional_int_from_report(report: object, key: str) -> int | None:
+    if not isinstance(report, Mapping):
+        return None
+    value = report.get(key)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _video_changed_frames(path: Path) -> int | None:
+    try:
+        reader = imageio.get_reader(path)
+    except Exception:
+        return None
+    changed = 0
+    previous_frame: bytes | None = None
+    try:
+        for frame in reader:
+            frame_bytes = np.asarray(frame[..., :3], dtype=np.uint8).tobytes()
+            if previous_frame is not None and frame_bytes != previous_frame:
+                changed += 1
+            previous_frame = frame_bytes
+    except Exception:
+        return None
+    finally:
+        reader.close()
+    return changed
+
+
 def _read_json(path: Path | None) -> dict[str, object]:
     if path is None:
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _camera_plan(motion: dict[str, object], mode: str, camera_offset: np.ndarray) -> dict[str, np.ndarray]:
+def _camera_plan(
+    motion: dict[str, object],
+    mode: str,
+    camera_offset: np.ndarray,
+    *,
+    follow_smoothing: int,
+    framing_margin: float,
+) -> dict[str, object]:
     root_pos = np.asarray(motion["root_pos"], dtype=np.float32)
+    stable_target_z = max(0.8, float(np.mean(root_pos[:, 2])))
+    margin = max(1.0, float(framing_margin))
+    smoothing_radius = max(0, int(follow_smoothing))
+    envelope = _camera_envelope(root_pos, margin=margin)
+    auto_offset = _scaled_camera_offset(camera_offset, float(envelope["camera_distance_m"]))
     if mode == "fixed":
         target = np.asarray([0.0, 0.0, 0.8], dtype=np.float32)
         offset = camera_offset
+        targets = None
+        policy = "fixed camera; auto-framing envelope is reported but not applied"
     elif mode == "trajectory":
-        min_xy = np.min(root_pos[:, :2], axis=0)
-        max_xy = np.max(root_pos[:, :2], axis=0)
-        center_xy = (min_xy + max_xy) * 0.5
-        span = max(float(np.linalg.norm(max_xy - min_xy)), 1.0)
         target = np.asarray(
-            [float(center_xy[0]), float(center_xy[1]), max(0.8, float(np.mean(root_pos[:, 2])))],
+            [float(envelope["center_xyz_m"][0]), float(envelope["center_xyz_m"][1]), stable_target_z],
             dtype=np.float32,
         )
-        offset = camera_offset * max(1.0, span / 2.0)
+        offset = auto_offset
+        targets = None
+        policy = "static whole-clip center target; distance scaled from root/body envelope plus margin"
     else:
-        target = root_pos[0].copy()
-        offset = camera_offset
-    return {"target": target, "offset": offset.astype(np.float32, copy=False)}
+        targets = _smooth_root_xy_targets(root_pos, radius=smoothing_radius, stable_target_z=stable_target_z)
+        target = targets[0].copy()
+        offset = auto_offset
+        policy = (
+            "per-frame follow target uses smoothed root XY; look-at height is stable; "
+            "distance is scaled from the whole-clip root/body envelope plus margin"
+        )
+    return {
+        "mode": mode,
+        "target": target.astype(np.float32, copy=False),
+        "targets": targets,
+        "offset": offset.astype(np.float32, copy=False),
+        "stable_target_z": stable_target_z,
+        "look_at_lift_m": 0.35,
+        "stable_look_at_z": stable_target_z + 0.35,
+        "follow_smoothing_frames": smoothing_radius,
+        "framing_margin": margin,
+        "envelope": envelope,
+        "policy": policy,
+    }
 
 
-def _spawn_scene(asset_root: Path) -> None:
-    sim_utils.GroundPlaneCfg(size=(12.0, 12.0), color=(0.62, 0.62, 0.60)).func(
+def _smooth_root_xy_targets(root_pos: np.ndarray, *, radius: int, stable_target_z: float) -> np.ndarray:
+    targets = root_pos.astype(np.float32, copy=True)
+    targets[:, 2] = float(stable_target_z)
+    if radius <= 0 or len(targets) <= 1:
+        return targets
+    xy = root_pos[:, :2].astype(np.float64)
+    for frame_index in range(len(targets)):
+        start = max(0, frame_index - radius)
+        stop = min(len(targets), frame_index + radius + 1)
+        targets[frame_index, :2] = xy[start:stop].mean(axis=0)
+    return targets.astype(np.float32, copy=False)
+
+
+def _camera_envelope(root_pos: np.ndarray, *, margin: float) -> dict[str, object]:
+    body_radius_m = 0.70
+    body_height_m = 1.55
+    ground_clearance_m = 0.15
+    min_xyz = root_pos.min(axis=0).astype(np.float64)
+    max_xyz = root_pos.max(axis=0).astype(np.float64)
+    min_xyz[:2] -= body_radius_m
+    max_xyz[:2] += body_radius_m
+    min_xyz[2] -= ground_clearance_m
+    max_xyz[2] += body_height_m
+    size_xyz = np.maximum(max_xyz - min_xyz, 0.0)
+    center_xyz = (min_xyz + max_xyz) * 0.5
+    xy_diagonal = float(np.linalg.norm(size_xyz[:2]))
+    vertical = float(size_xyz[2])
+    camera_distance = max(3.0, max(xy_diagonal * 0.90, vertical * 1.80, float(size_xyz.max()) * 1.35) * margin)
+    return {
+        "min_xyz_m": [float(value) for value in min_xyz],
+        "max_xyz_m": [float(value) for value in max_xyz],
+        "center_xyz_m": [float(value) for value in center_xyz],
+        "size_xyz_m": [float(value) for value in size_xyz],
+        "root_xy_span_m": root_xy_span(root_pos),
+        "body_radius_m": body_radius_m,
+        "body_height_m": body_height_m,
+        "ground_clearance_m": ground_clearance_m,
+        "camera_distance_m": camera_distance,
+    }
+
+
+def _scaled_camera_offset(camera_offset: np.ndarray, distance: float) -> np.ndarray:
+    offset = np.asarray(camera_offset, dtype=np.float32)
+    norm = float(np.linalg.norm(offset))
+    if norm < 1e-6:
+        offset = np.asarray((2.5, -3.0, 1.6), dtype=np.float32)
+        norm = float(np.linalg.norm(offset))
+    return offset * (max(norm, float(distance)) / norm)
+
+
+def _camera_target_for_frame(camera_plan: Mapping[str, object], frame_index: int) -> np.ndarray:
+    targets = camera_plan.get("targets")
+    if isinstance(targets, np.ndarray):
+        return targets[min(frame_index, len(targets) - 1)].astype(np.float32, copy=True)
+    return np.asarray(camera_plan["target"], dtype=np.float32).copy()
+
+
+def _camera_policy_report(camera_plan: Mapping[str, object], args: argparse.Namespace) -> dict[str, object]:
+    targets = camera_plan.get("targets")
+    target_xy_span = root_xy_span(targets) if isinstance(targets, np.ndarray) else 0.0
+    return {
+        "mode": str(camera_plan["mode"]),
+        "camera_offset": [float(value) for value in np.asarray(args.camera_offset, dtype=np.float32)],
+        "resolved_offset": [float(value) for value in np.asarray(camera_plan["offset"], dtype=np.float32)],
+        "follow_smoothing_frames": int(camera_plan["follow_smoothing_frames"]),
+        "framing_margin": float(camera_plan["framing_margin"]),
+        "stable_target_z": float(camera_plan["stable_target_z"]),
+        "look_at_lift_m": float(camera_plan["look_at_lift_m"]),
+        "stable_look_at_z": float(camera_plan["stable_look_at_z"]),
+        "target_xy_span_m": float(target_xy_span),
+        "envelope": camera_plan["envelope"],
+        "policy": str(camera_plan["policy"]),
+    }
+
+
+def _spawn_scene(asset_root: Path, *, ground_size: float, ground_color: Sequence[float]) -> None:
+    if ground_size <= 0 or not math.isfinite(float(ground_size)):
+        raise ValueError(f"ground_size must be positive, got {ground_size}")
+    color = _ground_color_tuple(ground_color)
+    ground_cfg = sim_utils.GroundPlaneCfg(size=(float(ground_size), float(ground_size)), color=color)
+    ground_cfg.func(
         "/World/Ground",
-        sim_utils.GroundPlaneCfg(size=(12.0, 12.0), color=(0.62, 0.62, 0.60)),
+        ground_cfg,
     )
     sim_utils.DomeLightCfg(intensity=2500.0, color=(1.0, 1.0, 1.0)).func(
         "/World/DomeLight",
         sim_utils.DomeLightCfg(intensity=2500.0, color=(1.0, 1.0, 1.0)),
     )
     os.environ.setdefault("ROS_PACKAGE_PATH", str(asset_root))
+
+
+def _ground_color_tuple(values: Sequence[float]) -> tuple[float, float, float]:
+    if len(values) != 3:
+        raise ValueError(f"ground_color must have three RGB values, got {values}")
+    color = tuple(float(value) for value in values)
+    if any(value < 0.0 or value > 1.0 or not math.isfinite(value) for value in color):
+        raise ValueError(f"ground_color values must be finite 0..1 RGB components, got {values}")
+    return color
 
 
 def _spawn_robot(asset_root: Path, robot_urdf: Path | None, robot_usd: Path | None) -> Articulation:
@@ -547,6 +813,15 @@ def _draw_acceptance_overlays(
         cv2.putText(image, "R", (image.shape[1] - 53, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (245, 247, 242), 2, cv2.LINE_AA)
     cv2.putText(image, f"acceptance overlay {frame_index:04d}", (16, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (28, 38, 42), 1, cv2.LINE_AA)
     return image
+
+
+def _orientation_overlay_semantics() -> dict[str, str]:
+    return {
+        "world_axes": "2D lower-left overlay indicating preserved world/root axes",
+        "root_position": "per-frame root position text in world coordinates",
+        "L": "left semantic marker",
+        "R": "right semantic marker",
+    }
 
 
 if __name__ == "__main__":

@@ -97,6 +97,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--root-position-scale", type=float, default=0.01, help="CSV root position scale only.")
     parser.add_argument("--angle-scale", type=float, default=math.pi / 180.0, help="CSV angle scale only.")
     parser.add_argument(
+        "--target-fps",
+        type=float,
+        default=None,
+        help="Playback FPS override. Use this for generated CSVs because they do not store timing.",
+    )
+    parser.add_argument(
         "--root-rot-format",
         choices=("auto", "wxyz", "xyzw"),
         default="auto",
@@ -139,6 +145,7 @@ def main() -> None:
         root_position_scale=args.root_position_scale,
         angle_scale=args.angle_scale,
         root_rot_format=args.root_rot_format,
+        target_fps=args.target_fps,
     )
     if not args.preserve_world_root:
         g1_motion = zero_initial_root_xy(g1_motion)
@@ -178,6 +185,7 @@ def main() -> None:
         "model_xml": str(model_xml),
         "output": str(args.output),
         "fps": fps,
+        "target_fps_override": args.target_fps,
         "frames": frame_count,
         "duration_sec": frame_count / fps if fps > 0 else 0.0,
         "source_position_scale": source_scale,
@@ -216,6 +224,7 @@ def load_g1_motion(
     root_position_scale: float,
     angle_scale: float,
     root_rot_format: str,
+    target_fps: float | None = None,
 ) -> dict[str, Any]:
     resolved = detect_g1_format(path, fmt)
     if resolved == "motionlib":
@@ -226,6 +235,8 @@ def load_g1_motion(
         motion = load_csv_g1(path, root_position_scale=root_position_scale, angle_scale=angle_scale)
     else:
         raise ValueError(f"unsupported G1 motion format: {resolved}")
+    if target_fps is not None:
+        motion = with_g1_motion_fps(motion, target_fps)
     return limit_g1_motion(motion, max_frames=max_frames, duration_sec=duration_sec)
 
 
@@ -375,6 +386,16 @@ def make_g1_motion(
         "root_quat_format": root_quat_format,
         "root_xy_span_m": root_xy_span(root_pos),
     }
+
+
+def with_g1_motion_fps(motion: dict[str, Any], fps: float) -> dict[str, Any]:
+    if fps <= 0 or not math.isfinite(fps):
+        raise ValueError(f"target_fps must be positive, got {fps}")
+    updated = dict(motion)
+    updated["fps"] = float(fps)
+    updated["joint_vel"] = finite_difference_velocity(np.asarray(updated["joint_pos"]), float(fps))
+    updated["fps_overridden"] = True
+    return updated
 
 
 def root_rot_to_wxyz(
