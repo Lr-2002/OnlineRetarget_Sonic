@@ -140,14 +140,47 @@ PYTHONPATH=src python3 scripts/inspect_bones_seed.py scan-pair-quality \
   --target-provenance kinematic_g1_csv
 ```
 
-Evaluate prediction/target JSONL outputs offline:
+Evaluate LR-225-style prediction/target JSONL outputs offline with the shared online/offline
+metric registry:
 
 ```bash
 PYTHONPATH=src python3 scripts/inspect_bones_seed.py offline-eval \
-  --input-jsonl runs/predictions/example.jsonl \
+  --input-jsonl runs/train/<run_name>/train_predictions.jsonl \
   --output-root runs \
-  --run-name baseline_eval
+  --run-name baseline_eval \
+  --metric g1_joint_pos_rmse_rad \
+  --metric joint_velocity_rmse \
+  --metric root_position_rmse \
+  --metric root_rot6d_rmse \
+  --metric global_body_position_error \
+  --metric root_relative_body_position_error \
+  --metric joint_rotation_error \
+  --metric joint_velocity_error \
+  --metric joint_acceleration_error \
+  --metric joint_jump_count \
+  --metric joint_limit_proximity_count \
+  --metric self_collision_count \
+  --metric floating_guard \
+  --metric cross_ratio_guard \
+  --metric phc_failure_guard \
+  --metric mpjpe \
+  --metric w_mpjpe
 ```
+
+The command writes `eval/<run_name>/eval_summary.json`, `per_sample_metrics.csv`, and
+`failure_manifest.csv`. MPJPE and W-MPJPE report `blocked` rather than a numeric value unless the
+JSONL rows include paired predicted/target G1 body or link positions, a pinned FK/link/root-alignment
+contract, and body/link weights for W-MPJPE.
+
+Paper-style metrics are registered separately: `global_body_position_error` / `E_g_mpbpe`,
+`root_relative_body_position_error` / `E_mpbpe` / `root_relative_MPJPE`,
+`joint_rotation_error`, PHC-style `joint_velocity_error` / `joint_acceleration_error`, NMR-style
+`joint_jump_count`, `self_collision_count`, and the `floating_guard`, `cross_ratio_guard`, and
+`phc_failure_guard` gates. Metrics that need MuJoCo contacts, lowest-foot height, self-intersection
+ratio, PHC body-joint distance, or full-joint rotations report `unavailable` when those explicit
+fields are absent; the scanner's FK self-collision proxy is not treated as MuJoCo contact evidence.
+Metrics with method coverage report `not_applicable` when a supplied `method_id` is outside the
+metric's method set, and non-available metrics stay out of numeric aggregates instead of becoming 0.
 
 Build a tiny raw-BVH-channel supervised JSONL for data-path debugging:
 

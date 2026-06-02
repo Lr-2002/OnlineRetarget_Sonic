@@ -110,6 +110,51 @@ The built-in A0 evaluation metric is `g1_joint_pos_rmse_rad`, logged as
 `train/g1_joint_pos_rmse_rad` and `validation/g1_joint_pos_rmse_rad`. It is a G1 joint-angle
 command RMSE over the 29-DoF joint position target window.
 
+The shared metric registry lives in `src/online_retarget/metrics.py`. Online logging calls
+`compute_online_metrics(...)`, and offline reports call the same registry through
+`online-retarget offline-eval` / `scripts/inspect_bones_seed.py offline-eval`. For LR-225-style
+prediction artifacts, run:
+
+```bash
+PYTHONPATH=src python3 scripts/inspect_bones_seed.py offline-eval \
+  --input-jsonl runs/train/<run_name>/train_predictions.jsonl \
+  --output-root runs \
+  --run-name lr177_a0_eval \
+  --metric g1_joint_pos_rmse_rad \
+  --metric joint_velocity_rmse \
+  --metric root_position_rmse \
+  --metric root_rot6d_rmse \
+  --metric global_body_position_error \
+  --metric root_relative_body_position_error \
+  --metric joint_rotation_error \
+  --metric joint_velocity_error \
+  --metric joint_acceleration_error \
+  --metric joint_jump_count \
+  --metric joint_limit_proximity_count \
+  --metric self_collision_count \
+  --metric floating_guard \
+  --metric cross_ratio_guard \
+  --metric phc_failure_guard \
+  --metric mpjpe \
+  --metric w_mpjpe
+```
+
+The evaluator writes JSON and CSV reports under `runs/eval/lr177_a0_eval/`. Each requested metric
+has metadata plus `<metric>_status` and `<metric>_reason` fields, so unavailable root/body metrics
+are explicit instead of zero-filled.
+
+The shared registry also exposes paper/NMR/PHC labels and formulas: `E_g_mpbpe`,
+`E_mpbpe`, `root_relative_MPJPE`, full-joint `joint_rotation_error`, PHC-style
+velocity/acceleration error terms, NMR `joint_jump_count` using `abs(delta_q) > 0.5 rad`, MuJoCo
+`self_collision_count`, and the `floating_guard`, `cross_ratio_guard`, and `phc_failure_guard`
+gates. A0 artifacts may still report these as `unavailable` when the JSONL rows do not include
+full-joint rotations, MuJoCo contact counts/pairs, lowest-foot height or self-intersection ratio,
+PHC avg body-joint distance, or joint limit arrays. The G1 FK self-collision scanner proxy is not
+substituted for MuJoCo contacts.
+If a row supplies `method_id`, metrics outside that metric's `method_coverage` are emitted as
+`not_applicable`; missing/unavailable/blocked/not-applicable metrics are tracked in availability
+counts and are not summarized as numeric 0.
+
 `body_position_mpjpe` is not produced by these A0 training targets because the target tensor is a
 joint-angle command window, not an FK/body-position target. Any report that compares body-position
 MPJPE for these four run families must include a separate
@@ -123,6 +168,14 @@ MPJPE for these four run families must include a separate
 The supplemental artifact should record the evaluator command, control-repo SHA, FK model or body
 position source, sample split/count, units, and the resulting body-position MPJPE values. Do not
 rename or treat `g1_joint_pos_rmse_rad` as MPJPE.
+
+Current blockers for true body-position MPJPE and W-MPJPE are: paired predicted-vs-target G1
+body/link position arrays, pinned FK link order, position units in meters, root-alignment semantics,
+and body/link weights for W-MPJPE.
+
+`root_relative_body_position_error` additionally needs paired root position arrays or an explicit
+`root_body_index` / `root_link_index` so the metric can perform body-root subtraction rather than
+reusing global positions.
 
 ## Skeleton Geometry AE Pretraining
 

@@ -19,6 +19,7 @@ except ImportError:  # pragma: no cover - environment blocker path
 
 from online_retarget.data.schema import ObservationSpec, OutputSpec, iter_motion_pair_refs
 from online_retarget.evaluation import EvaluationConfig, evaluate_jsonl
+from online_retarget.metrics import DEFAULT_ONLINE_METRIC_NAMES, compute_online_metrics
 
 
 FORMAL_SAMPLE_BUILDER = "bvh_fk_30body_window"
@@ -602,7 +603,30 @@ def _train_jsonl(
             loss.backward()
             optimizer.step()
             if rank == 0 and (step == 1 or step == steps or step % log_every == 0):
-                step_log = {"step": step, "loss": float(loss.detach().cpu())}
+                loss_value = float(loss.detach().cpu())
+                online_fields: dict[str, Any] = {
+                    "independent_batch": True,
+                    "loss": loss.detach(),
+                    "target_joints": batch_y.detach(),
+                }
+                metric_prediction = _online_prediction_for_metrics(
+                    torch,
+                    model,
+                    model_build.family,
+                    batch_x,
+                    config,
+                    prev_target=batch_prev_y,
+                )
+                if metric_prediction is not None:
+                    online_fields["predicted_joints"] = metric_prediction.detach()
+                step_log = {"step": step, "loss": loss_value}
+                step_log.update(
+                    compute_online_metrics(
+                        online_fields,
+                        _online_metric_names(config),
+                        prefix="train/",
+                    )
+                )
                 print(json.dumps(step_log, sort_keys=True))
                 _wandb_log(wandb_run, step_log, step=step)
             if step >= steps:
@@ -908,6 +932,49 @@ def _evaluation_config(config: dict[str, Any], *, run_name: str) -> EvaluationCo
         max_failures=int(payload.get("max_failures", 50)),
         run_name=run_name,
     )
+
+
+def _online_metric_names(config: dict[str, Any]) -> tuple[str, ...]:
+    payload = config.get("evaluation", {})
+    if not isinstance(payload, dict):
+        payload = {}
+    metrics = payload.get("online_metrics", DEFAULT_ONLINE_METRIC_NAMES)
+    if isinstance(metrics, str):
+        return (metrics,)
+    return tuple(str(metric) for metric in metrics)
+
+
+def _online_prediction_for_metrics(
+    torch,
+    model,
+    family: str,
+    observation,
+    config: dict[str, Any],
+    *,
+    prev_target=None,
+):
+    """Return a detached batch prediction for online metrics without affecting training mode."""
+
+    if family == "flow_matching":
+        return None
+    was_training = model.training
+    try:
+        model.eval()
+        with torch.no_grad():
+            if family == "token_transformer":
+                unwrapped = _unwrap_model(model)
+                if prev_target is None:
+                    prev_target = torch.zeros(
+                        observation.shape[0],
+                        unwrapped.output_dim,
+                        device=observation.device,
+                        dtype=observation.dtype,
+                    )
+                return unwrapped(observation, prev_state=prev_target)
+            return model(observation)
+    finally:
+        if was_training:
+            model.train()
 
 
 def _load_supervised_samples(samples_jsonl: Path) -> list[dict[str, Any]]:

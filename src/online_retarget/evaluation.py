@@ -11,15 +11,11 @@ import subprocess
 from typing import Iterable, Mapping, Sequence
 
 from .metrics import (
-    action_similarity,
+    DEFAULT_EVALUATION_METRIC_NAMES,
+    compute_metric_bundle,
     contact_artifact_metrics,
-    joint_jump_rate,
-    joint_mae,
-    joint_mse,
-    joint_rmse,
-    joint_velocity_rmse,
-    max_joint_abs_error,
-    mpjpe,
+    flatten_metric_bundle,
+    metric_metadata,
 )
 
 
@@ -76,11 +72,12 @@ def evaluate_jsonl(
     failure_manifest_csv = output_dir / "failure_manifest.csv"
 
     samples = list(_iter_jsonl(input_jsonl))
-    per_sample = [_sample_metrics(sample, config) for sample in samples]
+    metric_names = config.metrics or DEFAULT_EVALUATION_METRIC_NAMES
+    per_sample = [_sample_metrics(sample, config, metric_names) for sample in samples]
     _write_csv(per_sample_csv, per_sample)
     failures = sorted(
         per_sample,
-        key=lambda row: float(row.get(config.failure_metric, 0.0)),
+        key=lambda row: _failure_sort_value(row, config.failure_metric),
         reverse=True,
     )[: config.max_failures]
     _write_csv(failure_manifest_csv, failures)
@@ -92,6 +89,8 @@ def evaluate_jsonl(
         "config": config.to_dict(),
         "sample_count": len(per_sample),
         "overall": overall,
+        "metric_metadata": metric_metadata(metric_names),
+        "metric_availability": _metric_availability(per_sample, metric_names),
         "by_actor": _grouped_aggregate(per_sample, "actor_uid"),
         "by_category": _grouped_aggregate(per_sample, "category"),
         "by_package": _grouped_aggregate(per_sample, "package"),
@@ -113,9 +112,11 @@ def evaluate_jsonl(
     )
 
 
-def _sample_metrics(sample: Mapping[str, object], config: EvaluationConfig) -> dict[str, object]:
-    predicted_joints = _required(sample, "predicted_joints")
-    target_joints = _required(sample, "target_joints")
+def _sample_metrics(
+    sample: Mapping[str, object],
+    config: EvaluationConfig,
+    metric_names: Sequence[str],
+) -> dict[str, object]:
     fps = float(sample.get("fps", config.fps))
     row = {
         "sample_id": str(sample.get("sample_id", "")),
@@ -124,34 +125,41 @@ def _sample_metrics(sample: Mapping[str, object], config: EvaluationConfig) -> d
         "package": str(sample.get("package", "")),
         "quality_flags": _quality_flags_string(sample.get("quality_flags", "")),
     }
-    predicted_joint_jump_rate = joint_jump_rate(
-        predicted_joints,
-        fps=fps,
-        max_velocity=config.joint_jump_velocity,
+    metric_fields = dict(sample)
+    metric_fields.setdefault("fps", fps)
+    metric_fields.setdefault("joint_jump_velocity", config.joint_jump_velocity)
+    row.update(
+        flatten_metric_bundle(
+            compute_metric_bundle(
+                metric_fields,
+                metric_names,
+                fps=fps,
+                joint_jump_velocity=config.joint_jump_velocity,
+            )
+        )
     )
-    target_joint_jump_rate = joint_jump_rate(
-        target_joints,
-        fps=fps,
-        max_velocity=config.joint_jump_velocity,
+    predicted_body_pos = _first_present(
+        sample,
+        (
+            "predicted_body_pos",
+            "predicted_g1_body_pos",
+            "predicted_body_positions",
+            "predicted_link_positions",
+        ),
     )
-    metric_values = {
-        "joint_mae": joint_mae(predicted_joints, target_joints),
-        "joint_mse": joint_mse(predicted_joints, target_joints),
-        "joint_rmse": joint_rmse(predicted_joints, target_joints),
-        "max_joint_abs_error": max_joint_abs_error(predicted_joints, target_joints),
-        "joint_velocity_rmse": joint_velocity_rmse(predicted_joints, target_joints, fps=fps),
-        "action_similarity": action_similarity(predicted_joints, target_joints),
-        "predicted_joint_jump_rate": predicted_joint_jump_rate,
-        "target_joint_jump_rate": target_joint_jump_rate,
-        "predicted_minus_target_joint_jump_rate": predicted_joint_jump_rate - target_joint_jump_rate,
-    }
-    if sample.get("predicted_body_pos") is not None and sample.get("target_body_pos") is not None:
-        predicted_body_pos = sample["predicted_body_pos"]
-        target_body_pos = sample["target_body_pos"]
-        metric_values["mpjpe"] = mpjpe(predicted_body_pos, target_body_pos)
+    target_body_pos = _first_present(
+        sample,
+        (
+            "target_body_pos",
+            "target_g1_body_pos",
+            "target_body_positions",
+            "target_link_positions",
+        ),
+    )
+    if predicted_body_pos is not None and target_body_pos is not None:
         foot_indices = _foot_indices(sample)
         if foot_indices:
-            metric_values.update(
+            row.update(
                 {
                     f"predicted_{metric}": value
                     for metric, value in contact_artifact_metrics(
@@ -167,11 +175,6 @@ def _sample_metrics(sample: Mapping[str, object], config: EvaluationConfig) -> d
                     ).items()
                 }
             )
-    enabled = set(config.metrics)
-    if enabled:
-        row.update({name: value for name, value in metric_values.items() if name in enabled})
-    else:
-        row.update(metric_values)
     return row
 
 
@@ -198,10 +201,18 @@ def _foot_indices(sample: Mapping[str, object]) -> tuple[int, ...]:
 
 def _aggregate_metrics(rows: Sequence[Mapping[str, object]]) -> dict[str, float]:
     metric_names = _metric_names(rows)
-    return {metric: _mean_float(row.get(metric) for row in rows) for metric in metric_names}
+    aggregate: dict[str, float] = {}
+    for metric in metric_names:
+        value = _mean_float(row.get(metric) for row in rows)
+        if value is not None:
+            aggregate[metric] = value
+    return aggregate
 
 
-def _grouped_aggregate(rows: Sequence[Mapping[str, object]], group_key: str) -> dict[str, dict[str, float]]:
+def _grouped_aggregate(
+    rows: Sequence[Mapping[str, object]],
+    group_key: str,
+) -> dict[str, dict[str, float]]:
     groups: dict[str, list[Mapping[str, object]]] = defaultdict(list)
     for row in rows:
         groups[str(row.get(group_key, ""))].append(row)
@@ -227,17 +238,50 @@ def _metric_names(rows: Sequence[Mapping[str, object]]) -> list[str]:
     return sorted(names)
 
 
-def _mean_float(values: Iterable[object]) -> float:
+def _mean_float(values: Iterable[object]) -> float | None:
     numeric = [float(value) for value in values if isinstance(value, (int, float))]
     if not numeric:
-        return 0.0
+        return None
     return sum(numeric) / len(numeric)
 
 
-def _required(sample: Mapping[str, object], key: str):
-    if key not in sample:
-        raise ValueError(f"evaluation sample missing required key: {key}")
-    return sample[key]
+def _metric_availability(
+    rows: Sequence[Mapping[str, object]],
+    metric_names: Sequence[str],
+) -> dict[str, dict[str, object]]:
+    availability: dict[str, dict[str, object]] = {}
+    for metric in metric_names:
+        counts = {"available": 0, "unavailable": 0, "blocked": 0, "not_applicable": 0}
+        reasons: set[str] = set()
+        status_key = f"{metric}_status"
+        reason_key = f"{metric}_reason"
+        for row in rows:
+            status = str(row.get(status_key, "unavailable"))
+            if status not in counts:
+                counts[status] = 0
+            counts[status] += 1
+            reason = str(row.get(reason_key, ""))
+            if reason:
+                reasons.add(reason)
+        availability[metric] = {
+            "counts": counts,
+            "reasons": sorted(reasons),
+        }
+    return availability
+
+
+def _failure_sort_value(row: Mapping[str, object], metric: str) -> float:
+    value = row.get(metric)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return float("-inf")
+
+
+def _first_present(sample: Mapping[str, object], keys: Sequence[str]) -> object | None:
+    for key in keys:
+        if key in sample and sample[key] is not None:
+            return sample[key]
+    return None
 
 
 def _iter_jsonl(path: Path) -> Iterable[dict[str, object]]:

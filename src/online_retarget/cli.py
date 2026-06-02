@@ -793,6 +793,12 @@ def main() -> None:
     offline_eval.add_argument("--max-contact-skate-distance", type=float, default=0.02)
     offline_eval.add_argument("--failure-metric", default="joint_rmse")
     offline_eval.add_argument("--max-failures", type=int, default=50)
+    offline_eval.add_argument(
+        "--metric",
+        action="append",
+        default=[],
+        help="Metric to compute from the shared registry. Repeat for multiple metrics.",
+    )
 
     args = parser.parse_args()
     if args.command == "inventory":
@@ -1415,6 +1421,7 @@ def _offline_eval(args: argparse.Namespace) -> None:
             failure_metric=args.failure_metric,
             max_failures=args.max_failures,
             run_name=args.run_name,
+            metrics=tuple(args.metric),
         ),
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
