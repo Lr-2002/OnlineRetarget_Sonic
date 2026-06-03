@@ -6,9 +6,10 @@ import argparse
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
+import math
 from pathlib import Path
 import sys
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 
 SCHEMA_VERSION = "lr239.isaac_src_contact_packets.v1"
@@ -52,6 +53,56 @@ SONIC_JOINT_NAMES: tuple[str, ...] = (
 )
 
 DEFAULT_FOOT_LINKS: tuple[str, str] = ("left_ankle_roll_link", "right_ankle_roll_link")
+DEFAULT_BODY_NAMES: tuple[str, ...] = (
+    "pelvis",
+    "left_hip_pitch_link",
+    "right_hip_pitch_link",
+    "waist_yaw_link",
+    "left_hip_roll_link",
+    "right_hip_roll_link",
+    "waist_roll_link",
+    "left_hip_yaw_link",
+    "right_hip_yaw_link",
+    "torso_link",
+    "left_knee_link",
+    "right_knee_link",
+    "left_shoulder_pitch_link",
+    "right_shoulder_pitch_link",
+    "left_ankle_pitch_link",
+    "right_ankle_pitch_link",
+    "left_shoulder_roll_link",
+    "right_shoulder_roll_link",
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
+    "left_shoulder_yaw_link",
+    "right_shoulder_yaw_link",
+    "left_elbow_link",
+    "right_elbow_link",
+    "left_wrist_roll_link",
+    "right_wrist_roll_link",
+    "left_wrist_pitch_link",
+    "right_wrist_pitch_link",
+    "left_wrist_yaw_link",
+    "right_wrist_yaw_link",
+)
+
+REQUIRED_STATE_DATASETS: Mapping[str, tuple[str, ...]] = {
+    "pred root_pos_world_m": ("pred_g1_state/root_pos_world_m", "pred/root_pos_world_m"),
+    "target root_pos_world_m": (
+        "target_g1_state/root_pos_world_m",
+        "target/root_pos_world_m",
+    ),
+    "pred root_quat_wxyz": (
+        "pred_g1_state/root_quat_wxyz",
+        "pred/root_quat_wxyz",
+    ),
+    "target root_quat_wxyz": (
+        "target_g1_state/root_quat_wxyz",
+        "target/root_quat_wxyz",
+    ),
+    "pred joint_q_rad": ("pred_g1_state/joint_q_rad", "pred/joint_q_rad"),
+    "target joint_q_rad": ("target_g1_state/joint_q_rad", "target/joint_q_rad"),
+}
 
 
 @dataclass(frozen=True)
@@ -95,6 +146,7 @@ class ReplayConfig:
     fps: float = 50.0
     root_rot_format: str = "wxyz"
     joint_names: tuple[str, ...] = SONIC_JOINT_NAMES
+    body_names: tuple[str, ...] = DEFAULT_BODY_NAMES
     contact: ContactContract = field(default_factory=ContactContract)
 
 
@@ -111,7 +163,46 @@ class ArtifactSummary:
     joint_names: tuple[str, ...] = ()
     datasets: tuple[str, ...] = ()
     missing_required_datasets: tuple[str, ...] = ()
+    state_dataset_paths: tuple[tuple[str, str], ...] = ()
+    state_dataset_shapes: tuple[tuple[str, tuple[int, ...]], ...] = ()
+    shape_errors: tuple[str, ...] = ()
     message: str = ""
+
+
+@dataclass(frozen=True)
+class PairedStateData:
+    frame_count: int
+    fps: float
+    joint_names: tuple[str, ...]
+    pred_root_pos_world_m: Any
+    target_root_pos_world_m: Any
+    pred_root_quat_wxyz: Any
+    target_root_quat_wxyz: Any
+    pred_joint_q_rad: Any
+    target_joint_q_rad: Any
+
+
+@dataclass(frozen=True)
+class ReplayStateFrame:
+    frame_idx: int
+    label: str
+    root_pos_world_m: Sequence[float]
+    root_quat_wxyz: Sequence[float]
+    joint_q_rad: Sequence[float]
+
+
+class ReplayBackend(Protocol):
+    def __enter__(self) -> "ReplayBackend":
+        ...
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        ...
+
+    def collect_state_packet(self, state: ReplayStateFrame) -> dict[str, Any]:
+        ...
+
+    def report(self) -> dict[str, Any]:
+        ...
 
 
 def default_replay_config(
@@ -204,6 +295,7 @@ def replay_config_from_mapping(payload: Mapping[str, Any]) -> ReplayConfig:
         fps=float(payload.get("fps", 50.0)),
         root_rot_format=str(payload.get("root_rot_format", "wxyz")),
         joint_names=tuple(str(value) for value in payload.get("joint_names", SONIC_JOINT_NAMES)),
+        body_names=tuple(str(value) for value in payload.get("body_names", DEFAULT_BODY_NAMES)),
         contact=contact,
     )
 
@@ -220,6 +312,8 @@ def validate_replay_config(config: ReplayConfig) -> list[str]:
         errors.append("root_rot_format must be wxyz for IsaacLab write_root_state_to_sim")
     if len(config.joint_names) != 29:
         errors.append(f"joint_names must contain 29 G1 joints, got {len(config.joint_names)}")
+    if set(config.contact.foot_links) - set(config.body_names):
+        errors.append("body_names must include the configured foot links")
     if set(config.contact.foot_links) - set(_canonical_link_names(config)):
         errors.append("contact.foot_links must be named G1 links in the canonical model contract")
     if not config.contact.foot_links:
@@ -273,25 +367,16 @@ def inspect_paired_state_h5(path: Path) -> ArtifactSummary:
     try:
         with h5py.File(path, "r") as handle:
             datasets = tuple(sorted(_walk_h5_datasets(handle)))
-            pred_joint = _first_dataset(handle, ("pred_g1_state/joint_q_rad", "pred/joint_q_rad"))
-            target_joint = _first_dataset(
-                handle,
-                ("target_g1_state/joint_q_rad", "target/joint_q_rad"),
+            state_datasets = _state_datasets(handle)
+            missing = tuple(_missing_state_datasets(state_datasets))
+            shape_errors = tuple(_state_shape_errors(state_datasets))
+            pred_joint = state_datasets.get("pred joint_q_rad")
+            frame_count = int(pred_joint.shape[0]) if pred_joint is not None else None
+            joint_count = (
+                int(pred_joint.shape[1])
+                if pred_joint is not None and len(pred_joint.shape) > 1
+                else None
             )
-            missing = tuple(_missing_state_datasets(handle))
-            if pred_joint is None or target_joint is None:
-                return ArtifactSummary(
-                    str(path),
-                    True,
-                    size,
-                    sha,
-                    "invalid",
-                    datasets=datasets,
-                    missing_required_datasets=missing,
-                    message="missing pred/target joint_q_rad datasets",
-                )
-            frame_count = int(pred_joint.shape[0])
-            joint_count = int(pred_joint.shape[1]) if len(pred_joint.shape) > 1 else None
             fps = _read_h5_float(handle, ("fps", "metadata/fps"))
             joint_names = _read_h5_joint_names(handle)
             return ArtifactSummary(
@@ -306,6 +391,15 @@ def inspect_paired_state_h5(path: Path) -> ArtifactSummary:
                 joint_names=joint_names,
                 datasets=datasets,
                 missing_required_datasets=missing,
+                state_dataset_paths=tuple(
+                    (label, dataset.name.lstrip("/"))
+                    for label, dataset in sorted(state_datasets.items())
+                ),
+                state_dataset_shapes=tuple(
+                    (label, tuple(int(dim) for dim in dataset.shape))
+                    for label, dataset in sorted(state_datasets.items())
+                ),
+                shape_errors=shape_errors,
             )
     except OSError as exc:
         return ArtifactSummary(str(path), True, size, sha, "invalid", message=str(exc))
@@ -349,8 +443,8 @@ def build_manifest(
             max_frames=max_frames,
         ),
         "runtime_blocker": (
-            "Non-dry run must execute on the 5090 Isaac/SRC runtime via $ISAAC_PYTHON after the "
-            "contact sensor/body-pair extraction code is bound to the verified G1 USD."
+            "Non-dry run must execute on the verified 5090 Isaac/SRC runtime via "
+            "$ISAAC_PYTHON after Code Reviewer approves this contact/body-pair binding."
         ),
     }
     (output_dir / "packet_schema.json").write_text(
@@ -378,6 +472,8 @@ def validate_artifact_summary(artifact: ArtifactSummary) -> list[str]:
                 "paired_state_h5 missing required datasets: "
                 + ", ".join(artifact.missing_required_datasets)
             )
+        for shape_error in artifact.shape_errors:
+            errors.append(f"paired_state_h5 {shape_error}")
         if artifact.frame_count is None or artifact.frame_count <= 0:
             errors.append("paired_state_h5 frame_count must be positive")
         if artifact.joint_count != 29:
@@ -406,16 +502,21 @@ def packet_schema_payload(config: ReplayConfig) -> dict[str, Any]:
             "root_pos_world_m": "[3] float",
             "root_quat_wxyz": "[4] float",
             "joint_q_rad": f"[{len(config.joint_names)}] float in joint_names order",
+            "body_pos_world_m": f"[{len(config.body_names)}, 3] float in body_names order",
             "foot_contact_force_n": f"[{len(config.contact.foot_links)}] float",
             "foot_in_contact": f"[{len(config.contact.foot_links)}] bool",
             "support_margin_m": "float, signed distance to configured support region",
             "floating_guard": "bool",
             "self_collision_count": "int",
-            "contact_pairs": "list of {body_a, body_b, force_n, position_world_m}",
+            "contact_pairs": (
+                "list of {body_a, body_b, force_n, position_world_m, source}; "
+                "position_world_m is contact point when provided by backend, otherwise body origin"
+            ),
             "cross_ratio": "float or null",
             "cross_ratio_guard": "bool or null",
         },
         "joint_names": list(config.joint_names),
+        "body_names": list(config.body_names),
         "foot_links": list(config.contact.foot_links),
         "disabled_collision_pairs": [
             list(pair) for pair in config.contact.disabled_collision_pairs
@@ -429,6 +530,7 @@ def packet_schema_payload(config: ReplayConfig) -> dict[str, Any]:
 def replay_config_payload(config: ReplayConfig) -> dict[str, Any]:
     payload = asdict(config)
     payload["joint_names"] = list(config.joint_names)
+    payload["body_names"] = list(config.body_names)
     payload["contact"]["foot_links"] = list(config.contact.foot_links)
     payload["contact"]["disabled_collision_pairs"] = [
         list(pair) for pair in config.contact.disabled_collision_pairs
@@ -443,6 +545,13 @@ def artifact_summary_payload(summary: ArtifactSummary) -> dict[str, Any]:
     payload = asdict(summary)
     payload["joint_names"] = list(summary.joint_names)
     payload["datasets"] = list(summary.datasets)
+    payload["state_dataset_paths"] = [
+        [label, path] for label, path in summary.state_dataset_paths
+    ]
+    payload["state_dataset_shapes"] = [
+        [label, list(shape)] for label, shape in summary.state_dataset_shapes
+    ]
+    payload["shape_errors"] = list(summary.shape_errors)
     return payload
 
 
@@ -473,14 +582,44 @@ def run_dry_or_blocked_export(args: argparse.Namespace) -> dict[str, Any]:
     )
     if args.dry_run:
         return manifest
-    manifest["status"] = "blocked"
-    manifest["blocked"] = (
-        "Isaac/SRC replay packet extraction is not implemented in this local pass. "
-        "Patch surface is scripts/export_lr239_isaac_src_packets.py plus "
-        "online_retarget.isaac_src_replay: bind AppLauncher, spawn G1 USD with "
-        "activate_contact_sensors=True/enabled_self_collisions=True, instantiate "
-        "ContactSensorCfg for foot links filtered to ground, replay pred/target states, "
-        "and serialize packet_schema.json-compatible JSONL."
+    if manifest["status"] == "blocked":
+        return manifest
+    try:
+        state = load_paired_state_data(
+            Path(config.paired_state_h5),
+            config=config,
+            max_frames=args.max_frames,
+        )
+        backend_factory = args.backend_factory or (
+            lambda replay_config: IsaacLabReplayBackend(
+                replay_config,
+                device=args.device,
+            )
+        )
+        export_result = export_replay_packets(
+            config=config,
+            state=state,
+            output_dir=args.output_dir,
+            max_frames=args.max_frames,
+            backend_factory=backend_factory,
+        )
+    except Exception as exc:
+        manifest["status"] = "blocked"
+        manifest["blocked"] = f"IsaacLab replay extraction failed: {type(exc).__name__}: {exc}"
+        (args.output_dir / "replay_manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return manifest
+
+    manifest["status"] = "completed"
+    manifest["runtime_blocker"] = ""
+    manifest["export_result"] = export_result
+    manifest["packet_jsonl_exists"] = Path(manifest["packet_jsonl"]).exists()
+    manifest["packet_jsonl_bytes"] = (
+        Path(manifest["packet_jsonl"]).stat().st_size
+        if Path(manifest["packet_jsonl"]).exists()
+        else 0
     )
     (args.output_dir / "replay_manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -497,15 +636,380 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--variant", default="")
     parser.add_argument("--max-frames", type=int, default=64)
+    parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    args.backend_factory = None
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     manifest = run_dry_or_blocked_export(args)
     print(json.dumps(manifest, indent=2, sort_keys=True))
-    return 0 if manifest.get("status") in {"dry_run", "ready"} else 2
+    return 0 if manifest.get("status") in {"dry_run", "ready", "completed"} else 2
+
+
+def load_paired_state_data(
+    path: Path,
+    *,
+    config: ReplayConfig,
+    max_frames: int,
+) -> PairedStateData:
+    summary = inspect_paired_state_h5(path)
+    errors = validate_artifact_summary(summary)
+    if errors:
+        raise ValueError("; ".join(errors))
+    try:
+        import h5py  # type: ignore
+        import numpy as np  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("h5py and numpy are required to load paired G1 state") from exc
+
+    limit = max(1, int(max_frames))
+    with h5py.File(path, "r") as handle:
+        datasets = _state_datasets(handle)
+        frame_count = int(summary.frame_count or 0)
+        usable = min(frame_count, limit)
+        pred_root_pos = np.asarray(datasets["pred root_pos_world_m"][:usable], dtype=np.float32)
+        target_root_pos = np.asarray(datasets["target root_pos_world_m"][:usable], dtype=np.float32)
+        pred_root_quat = _normalize_quat_array(
+            np.asarray(datasets["pred root_quat_wxyz"][:usable], dtype=np.float32)
+        )
+        target_root_quat = _normalize_quat_array(
+            np.asarray(datasets["target root_quat_wxyz"][:usable], dtype=np.float32)
+        )
+        pred_joint = np.asarray(datasets["pred joint_q_rad"][:usable], dtype=np.float32)
+        target_joint = np.asarray(datasets["target joint_q_rad"][:usable], dtype=np.float32)
+    joint_names = summary.joint_names or config.joint_names
+    return PairedStateData(
+        frame_count=usable,
+        fps=float(summary.fps or config.fps),
+        joint_names=tuple(joint_names),
+        pred_root_pos_world_m=pred_root_pos,
+        target_root_pos_world_m=target_root_pos,
+        pred_root_quat_wxyz=pred_root_quat,
+        target_root_quat_wxyz=target_root_quat,
+        pred_joint_q_rad=pred_joint,
+        target_joint_q_rad=target_joint,
+    )
+
+
+def export_replay_packets(
+    *,
+    config: ReplayConfig,
+    state: PairedStateData,
+    output_dir: Path,
+    max_frames: int,
+    backend_factory: Callable[[ReplayConfig], ReplayBackend],
+) -> dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    packet_path = output_dir / "isaac_src_packets.jsonl"
+    frame_limit = min(state.frame_count, max(1, int(max_frames)))
+    dt = 1.0 / float(state.fps)
+    packets_written = 0
+    backend_report: dict[str, Any] = {}
+    with backend_factory(config) as backend:
+        with packet_path.open("w", encoding="utf-8") as packet_file:
+            for frame_idx in range(frame_limit):
+                pred = backend.collect_state_packet(
+                    ReplayStateFrame(
+                        frame_idx=frame_idx,
+                        label="pred",
+                        root_pos_world_m=_row(state.pred_root_pos_world_m, frame_idx),
+                        root_quat_wxyz=_row(state.pred_root_quat_wxyz, frame_idx),
+                        joint_q_rad=_row(state.pred_joint_q_rad, frame_idx),
+                    )
+                )
+                target = backend.collect_state_packet(
+                    ReplayStateFrame(
+                        frame_idx=frame_idx,
+                        label="target",
+                        root_pos_world_m=_row(state.target_root_pos_world_m, frame_idx),
+                        root_quat_wxyz=_row(state.target_root_quat_wxyz, frame_idx),
+                        joint_q_rad=_row(state.target_joint_q_rad, frame_idx),
+                    )
+                )
+                packet = {
+                    "schema_version": SCHEMA_VERSION,
+                    "variant": config.variant,
+                    "frame_idx": frame_idx,
+                    "t": frame_idx * dt,
+                    "dt": dt,
+                    "pred": pred,
+                    "target": target,
+                    "contract": _contract_hash(config),
+                }
+                packet_file.write(json.dumps(packet, sort_keys=True) + "\n")
+                packets_written += 1
+        backend_report = backend.report()
+    return {
+        "backend": backend_report,
+        "packet_jsonl": str(packet_path),
+        "packets_written": packets_written,
+        "frame_limit": frame_limit,
+        "fps": float(state.fps),
+    }
+
+
+class IsaacLabReplayBackend:
+    """Bounded IsaacLab replay backend used only for non-dry packet extraction."""
+
+    def __init__(self, config: ReplayConfig, *, device: str = "cuda:0") -> None:
+        self.config = config
+        self.device = device
+        self.sim: Any | None = None
+        self.robot: Any | None = None
+        self.contact_sensor: Any | None = None
+        self.app_launcher: Any | None = None
+        self.simulation_app: Any | None = None
+        self.torch: Any | None = None
+        self.body_names: tuple[str, ...] = config.body_names
+        self.robot_joint_order: list[int] = []
+        self.body_indices: list[int] = []
+        self.foot_body_indices: list[int] = []
+        self.frames_collected = 0
+
+    def __enter__(self) -> "IsaacLabReplayBackend":
+        try:
+            from isaaclab.app import AppLauncher  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                "IsaacLab non-dry export requires isaaclab.app.AppLauncher; run with "
+                f"{DEFAULT_ISAAC_PYTHON} on the verified 5090 Isaac runtime"
+            ) from exc
+
+        launcher_parser = argparse.ArgumentParser(add_help=False)
+        AppLauncher.add_app_launcher_args(launcher_parser)
+        launcher_args = launcher_parser.parse_args([])
+        launcher_args.headless = True
+        launcher_args.enable_cameras = False
+        if hasattr(launcher_args, "device"):
+            launcher_args.device = self.device
+        self.app_launcher = AppLauncher(launcher_args)
+        self.simulation_app = self.app_launcher.app
+        try:
+            import torch  # type: ignore
+            import isaacsim.core.utils.stage as stage_utils  # type: ignore
+            import isaaclab.sim as sim_utils  # type: ignore
+            from isaaclab.actuators import ImplicitActuatorCfg  # type: ignore
+            from isaaclab.assets import Articulation, ArticulationCfg  # type: ignore
+            from isaaclab.sensors import ContactSensor, ContactSensorCfg  # type: ignore
+        except ImportError as exc:
+            self._close_simulation_app()
+            raise RuntimeError(
+                "IsaacLab non-dry export requires isaacsim/isaaclab modules; run with "
+                f"{DEFAULT_ISAAC_PYTHON} on the verified 5090 Isaac runtime"
+            ) from exc
+
+        self.torch = torch
+        stage_utils.create_new_stage()
+        dt = 1.0 / max(float(self.config.fps), 1.0)
+        self.sim = sim_utils.SimulationContext(
+            sim_utils.SimulationCfg(dt=dt, render_interval=1, device=self.device)
+        )
+        ground_cfg = sim_utils.GroundPlaneCfg()
+        ground_cfg.func(self.config.contact.support.ground_prim_path, ground_cfg)
+        robot_cfg = ArticulationCfg(
+            prim_path=self.config.root_prim_path,
+            spawn=sim_utils.UsdFileCfg(
+                usd_path=self.config.robot_usd,
+                activate_contact_sensors=self.config.contact.activate_contact_sensors,
+                articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                    enabled_self_collisions=self.config.contact.enable_self_collisions,
+                    solver_position_iteration_count=8,
+                    solver_velocity_iteration_count=4,
+                ),
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                    disable_gravity=False,
+                    retain_accelerations=True,
+                    linear_damping=0.0,
+                    angular_damping=0.0,
+                    max_linear_velocity=1000.0,
+                    max_angular_velocity=1000.0,
+                    max_depenetration_velocity=1.0,
+                ),
+            ),
+            init_state=ArticulationCfg.InitialStateCfg(
+                pos=(0.0, 0.0, 0.8),
+                joint_pos={".*": 0.0},
+                joint_vel={".*": 0.0},
+            ),
+            actuators={
+                "all": ImplicitActuatorCfg(
+                    joint_names_expr=[".*"],
+                    stiffness=0.0,
+                    damping=0.0,
+                )
+            },
+        )
+        self.robot = Articulation(robot_cfg)
+        filter_paths = tuple(self.config.contact.contact_filter_prim_paths)
+        sensor_cfg = ContactSensorCfg(
+            prim_path=f"{self.config.root_prim_path}/.*",
+            update_period=0.0,
+            history_length=1,
+            debug_vis=False,
+            track_contact_points=True,
+            max_contact_data_count_per_prim=16,
+            force_threshold=self.config.contact.contact_force_threshold_n,
+            filter_prim_paths_expr=filter_paths,
+        )
+        self.contact_sensor = ContactSensor(sensor_cfg)
+        self.sim.reset()
+        self.robot.update(self.sim.cfg.dt)
+        self.contact_sensor.update(dt=self.sim.cfg.dt)
+        self.robot_joint_order = _index_order(
+            self.robot.joint_names,
+            self.config.joint_names,
+            label="robot joints",
+        )
+        robot_body_names = tuple(str(name) for name in self.robot.body_names)
+        self.body_indices = _index_order(
+            robot_body_names,
+            self.config.body_names,
+            label="robot bodies",
+        )
+        self.body_names = tuple(robot_body_names[index] for index in self.body_indices)
+        self.foot_body_indices = [
+            self.body_names.index(foot_link) for foot_link in self.config.contact.foot_links
+        ]
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if self.sim is not None:
+            callbacks = (
+                getattr(self.sim, "stop", None),
+                getattr(self.sim, "clear_instance", None),
+            )
+            for callback in callbacks:
+                if callback is None:
+                    continue
+                try:
+                    callback()
+                except Exception:
+                    pass
+        self._close_simulation_app()
+
+    def _close_simulation_app(self) -> None:
+        app = self.simulation_app
+        if app is None:
+            return
+        try:
+            if app.is_running():
+                app.close()
+        except Exception:
+            pass
+        finally:
+            self.simulation_app = None
+
+    def collect_state_packet(self, state: ReplayStateFrame) -> dict[str, Any]:
+        if self.robot is None or self.sim is None or self.torch is None:
+            raise RuntimeError("IsaacLabReplayBackend must be entered before collection")
+        torch = self.torch
+        joint_pos = [float(state.joint_q_rad[index]) for index in self.robot_joint_order]
+        joint_vel = [0.0 for _ in joint_pos]
+        root_state = torch.zeros((1, 13), dtype=torch.float32, device=self.sim.device)
+        root_state[0, :3] = torch.as_tensor(
+            state.root_pos_world_m,
+            dtype=torch.float32,
+            device=self.sim.device,
+        )
+        root_state[0, 3:7] = torch.as_tensor(
+            _normalize_quat_list(state.root_quat_wxyz),
+            dtype=torch.float32,
+            device=self.sim.device,
+        )
+        self.robot.write_root_state_to_sim(root_state)
+        self.robot.write_joint_state_to_sim(
+            torch.as_tensor([joint_pos], dtype=torch.float32, device=self.sim.device),
+            torch.as_tensor([joint_vel], dtype=torch.float32, device=self.sim.device),
+        )
+        self.robot.set_joint_position_target(
+            torch.as_tensor([joint_pos], dtype=torch.float32, device=self.sim.device)
+        )
+        self.robot.write_data_to_sim()
+        self.sim.step(render=False)
+        self.robot.update(self.sim.cfg.dt)
+        if self.contact_sensor is not None:
+            self.contact_sensor.update(dt=self.sim.cfg.dt)
+        self.frames_collected += 1
+        body_pos = _tensor_to_nested_list(self.robot.data.body_pos_w[0, self.body_indices, :])
+        foot_forces, foot_contact_flags = self._foot_contact_state()
+        contact_pairs = self._contact_pairs(body_pos=body_pos, foot_forces=foot_forces)
+        support_margin = self._support_margin(body_pos)
+        return {
+            "root_pos_world_m": _float_list(state.root_pos_world_m),
+            "root_quat_wxyz": _normalize_quat_list(state.root_quat_wxyz),
+            "joint_q_rad": _float_list(state.joint_q_rad),
+            "body_names": list(self.body_names),
+            "body_pos_world_m": body_pos,
+            "foot_contact_force_n": foot_forces,
+            "foot_in_contact": foot_contact_flags,
+            "support_margin_m": support_margin,
+            "floating_guard": all(not flag for flag in foot_contact_flags)
+            and support_margin > self.config.contact.support.floating_clearance_threshold_m,
+            "self_collision_count": _self_collision_count(contact_pairs, self.config),
+            "contact_pairs": contact_pairs,
+            "cross_ratio": None,
+            "cross_ratio_guard": None,
+        }
+
+    def report(self) -> dict[str, Any]:
+        return {
+            "backend": "isaaclab_usd_g1_contact_replay",
+            "device": self.device,
+            "robot_usd": self.config.robot_usd,
+            "root_prim_path": self.config.root_prim_path,
+            "body_names": list(self.body_names),
+            "foot_links": list(self.config.contact.foot_links),
+            "frames_collected": self.frames_collected,
+            "cross_ratio_status": "unavailable_without_src_geometry_checker",
+        }
+
+    def _foot_contact_state(self) -> tuple[list[float], list[bool]]:
+        force_by_body = _contact_force_by_body_name(self.contact_sensor)
+        forces: list[float] = []
+        flags: list[bool] = []
+        for foot_link in self.config.contact.foot_links:
+            force = float(force_by_body.get(foot_link, 0.0))
+            forces.append(force)
+            flags.append(force >= self.config.contact.contact_force_threshold_n)
+        return forces, flags
+
+    def _contact_pairs(
+        self,
+        *,
+        body_pos: Sequence[Sequence[float]],
+        foot_forces: Sequence[float],
+    ) -> list[dict[str, Any]]:
+        pairs = _extract_contact_pairs(self.contact_sensor, self.config)
+        if pairs:
+            return pairs
+        fallback_pairs: list[dict[str, Any]] = []
+        for foot_link, force in zip(self.config.contact.foot_links, foot_forces):
+            if force < self.config.contact.contact_force_threshold_n:
+                continue
+            body_index = self.body_names.index(foot_link)
+            fallback_pairs.append(
+                {
+                    "body_a": foot_link,
+                    "body_b": self.config.contact.support.ground_prim_path,
+                    "force_n": float(force),
+                    "position_world_m": list(body_pos[body_index]),
+                    "source": "contact_sensor_net_force_ground_filter",
+                }
+            )
+        return fallback_pairs
+
+    def _support_margin(self, body_pos: Sequence[Sequence[float]]) -> float:
+        axis_index = {"x": 0, "y": 1, "z": 2}[self.config.contact.support.up_axis.lower()]
+        if not self.foot_body_indices:
+            return math.inf
+        min_foot_height = min(
+            float(body_pos[index][axis_index]) for index in self.foot_body_indices
+        )
+        return min_foot_height - float(self.config.contact.support.ground_height_m)
 
 
 def _config_from_args(args: argparse.Namespace) -> ReplayConfig:
@@ -516,6 +1020,137 @@ def _config_from_args(args: argparse.Namespace) -> ReplayConfig:
     if args.variant:
         payload["variant"] = args.variant
     return replay_config_from_mapping(payload)
+
+
+def _row(array: Any, index: int) -> list[float]:
+    return _float_list(array[index])
+
+
+def _float_list(values: Sequence[float]) -> list[float]:
+    return [float(value) for value in values]
+
+
+def _tensor_to_nested_list(value: Any) -> list[list[float]]:
+    try:
+        value = value.detach().cpu().numpy()
+    except AttributeError:
+        pass
+    return [[float(component) for component in row] for row in value]
+
+
+def _normalize_quat_array(values: Any) -> Any:
+    try:
+        import numpy as np  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("numpy is required to normalize root_quat_wxyz arrays") from exc
+    quats = np.asarray(values, dtype=np.float32)
+    norms = np.linalg.norm(quats, axis=1, keepdims=True)
+    if bool(np.any(norms <= 0.0)):
+        raise ValueError("root_quat_wxyz contains zero-norm quaternion")
+    return quats / norms
+
+
+def _normalize_quat_list(values: Sequence[float]) -> list[float]:
+    quat = [float(value) for value in values]
+    if len(quat) != 4:
+        raise ValueError(f"root_quat_wxyz must have four values, got {len(quat)}")
+    norm = math.sqrt(sum(value * value for value in quat))
+    if norm <= 0.0 or not math.isfinite(norm):
+        raise ValueError("root_quat_wxyz contains zero or non-finite norm")
+    return [value / norm for value in quat]
+
+
+def _index_order(available: Sequence[str], required: Sequence[str], *, label: str) -> list[int]:
+    lookup = {str(name): index for index, name in enumerate(available)}
+    missing = [str(name) for name in required if str(name) not in lookup]
+    if missing:
+        raise RuntimeError(f"{label} missing required names: {missing}")
+    return [lookup[str(name)] for name in required]
+
+
+def _contact_force_by_body_name(contact_sensor: Any | None) -> dict[str, float]:
+    if contact_sensor is None or not hasattr(contact_sensor, "data"):
+        return {}
+    body_names = tuple(str(name) for name in getattr(contact_sensor, "body_names", ()))
+    forces = getattr(contact_sensor.data, "net_forces_w", None)
+    if forces is None:
+        return {}
+    try:
+        forces = forces.detach().cpu().numpy()
+    except AttributeError:
+        pass
+    if getattr(forces, "ndim", 0) == 3:
+        forces = forces[0]
+    result: dict[str, float] = {}
+    for index, body_name in enumerate(body_names):
+        if index >= len(forces):
+            continue
+        vector = forces[index]
+        result[body_name] = math.sqrt(sum(float(component) ** 2 for component in vector))
+    return result
+
+
+def _extract_contact_pairs(
+    contact_sensor: Any | None,
+    config: ReplayConfig,
+) -> list[dict[str, Any]]:
+    if contact_sensor is None or not hasattr(contact_sensor, "data"):
+        return []
+    body_names = tuple(str(name) for name in getattr(contact_sensor, "body_names", ()))
+    force_matrix = getattr(contact_sensor.data, "force_matrix_w", None)
+    if force_matrix is None:
+        return []
+    try:
+        force_matrix = force_matrix.detach().cpu().numpy()
+    except AttributeError:
+        pass
+    if getattr(force_matrix, "ndim", 0) == 4:
+        force_matrix = force_matrix[0]
+    pairs: list[dict[str, Any]] = []
+    for body_index, body_name in enumerate(body_names):
+        if body_index >= len(force_matrix):
+            continue
+        for filter_index, vector in enumerate(force_matrix[body_index]):
+            force = math.sqrt(sum(float(component) ** 2 for component in vector))
+            if force < config.contact.contact_force_threshold_n:
+                continue
+            body_b = (
+                config.contact.contact_filter_prim_paths[filter_index]
+                if filter_index < len(config.contact.contact_filter_prim_paths)
+                else f"filter_{filter_index}"
+            )
+            pairs.append(
+                {
+                    "body_a": body_name,
+                    "body_b": body_b,
+                    "force_n": float(force),
+                    "position_world_m": None,
+                    "source": "contact_sensor_force_matrix",
+                }
+            )
+    return pairs
+
+
+def _self_collision_count(contact_pairs: Sequence[Mapping[str, Any]], config: ReplayConfig) -> int:
+    disabled = {tuple(pair) for pair in config.contact.disabled_collision_pairs}
+    disabled |= {(right, left) for left, right in disabled}
+    ground_paths = set(config.contact.contact_filter_prim_paths)
+    ground_paths.add(config.contact.support.ground_prim_path)
+    count = 0
+    for pair in contact_pairs:
+        body_a = str(pair.get("body_a", ""))
+        body_b = str(pair.get("body_b", ""))
+        if not body_a or not body_b or body_b in ground_paths:
+            continue
+        if (body_a, body_b) in disabled:
+            continue
+        count += 1
+    return count
+
+
+def _contract_hash(config: ReplayConfig) -> str:
+    payload = json.dumps(replay_config_payload(config), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _mapping(value: object, label: str) -> Mapping[str, Any]:
@@ -571,44 +1206,50 @@ def _first_dataset(handle: Any, names: Sequence[str]) -> Any | None:
     return None
 
 
-def _missing_state_datasets(handle: Any) -> list[str]:
-    checks = {
-        "pred root_pos": (
-            "pred_g1_state/root_pos_world_m",
-            "pred_g1_state/root_pos",
-            "pred/root_pos_world_m",
-            "pred/root_pos",
-        ),
-        "target root_pos": (
-            "target_g1_state/root_pos_world_m",
-            "target_g1_state/root_pos",
-            "target/root_pos_world_m",
-            "target/root_pos",
-        ),
-        "pred root_rot": (
-            "pred_g1_state/root_quat_wxyz",
-            "pred_g1_state/root_rot_wxyz",
-            "pred_g1_state/root_rot",
-            "pred/root_quat_wxyz",
-            "pred/root_rot_wxyz",
-            "pred/root_rot",
-        ),
-        "target root_rot": (
-            "target_g1_state/root_quat_wxyz",
-            "target_g1_state/root_rot_wxyz",
-            "target_g1_state/root_rot",
-            "target/root_quat_wxyz",
-            "target/root_rot_wxyz",
-            "target/root_rot",
-        ),
-        "pred joint_q_rad": ("pred_g1_state/joint_q_rad", "pred/joint_q_rad"),
-        "target joint_q_rad": ("target_g1_state/joint_q_rad", "target/joint_q_rad"),
+def _state_datasets(handle: Any) -> dict[str, Any]:
+    return {
+        label: dataset
+        for label, candidates in REQUIRED_STATE_DATASETS.items()
+        if (dataset := _first_dataset(handle, candidates)) is not None
     }
-    return [
-        label
-        for label, candidates in checks.items()
-        if _first_dataset(handle, candidates) is None
-    ]
+
+
+def _missing_state_datasets(state_datasets: Mapping[str, Any]) -> list[str]:
+    return [label for label in REQUIRED_STATE_DATASETS if label not in state_datasets]
+
+
+def _state_shape_errors(state_datasets: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    expected_last_dim = {
+        "pred root_pos_world_m": 3,
+        "target root_pos_world_m": 3,
+        "pred root_quat_wxyz": 4,
+        "target root_quat_wxyz": 4,
+        "pred joint_q_rad": 29,
+        "target joint_q_rad": 29,
+    }
+    frame_counts: dict[str, int] = {}
+    for label, width in expected_last_dim.items():
+        dataset = state_datasets.get(label)
+        if dataset is None:
+            continue
+        shape = tuple(int(dim) for dim in dataset.shape)
+        if len(shape) != 2:
+            errors.append(f"{label} must be rank-2 [N,{width}], got {shape}")
+            continue
+        if shape[1] != width:
+            errors.append(f"{label} width must be {width}, got {shape[1]}")
+        frame_counts[label] = shape[0]
+    positive_counts = {label: count for label, count in frame_counts.items() if count > 0}
+    if len(positive_counts) != len(frame_counts):
+        bad = ", ".join(label for label, count in frame_counts.items() if count <= 0)
+        errors.append(f"state datasets must have positive frame count: {bad}")
+    if frame_counts:
+        unique_counts = sorted(set(frame_counts.values()))
+        if len(unique_counts) > 1:
+            rendered = ", ".join(f"{label}={count}" for label, count in frame_counts.items())
+            errors.append(f"pred/target state frame counts must match: {rendered}")
+    return errors
 
 
 def _read_h5_float(handle: Any, names: Sequence[str]) -> float | None:
