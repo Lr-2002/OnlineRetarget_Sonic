@@ -4991,6 +4991,9 @@ def main() -> None:
                 if visual_validation_due(config, step, now=now, last_time=last_visual_validation_time):
                     visual_metrics: dict[str, float] = {}
                     if is_main:
+                        visual_cfg = config.get("visual_validation", {})
+                        if not isinstance(visual_cfg, Mapping):
+                            visual_cfg = {}
                         try:
                             visual_metrics = run_visual_validation(
                                 model=unwrap_model(model),
@@ -5003,6 +5006,9 @@ def main() -> None:
                                 joint_dim=joint_dim,
                                 wandb_run=wandb_run,
                                 skeleton_feature_lookup=skeleton_feature_lookup,
+                                acceptance_backend=bool(visual_cfg.get("acceptance_backend", False)),
+                                isaac_python_bin=visual_cfg.get("isaac_python_bin"),
+                                isaac_render_script=visual_cfg.get("isaac_render_script"),
                             )
                         except Exception as exc:
                             visual_metrics = {

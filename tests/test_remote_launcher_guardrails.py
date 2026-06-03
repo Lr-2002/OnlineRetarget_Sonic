@@ -16,6 +16,19 @@ SUPERVISED_CONFIGS = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_uniform_4gpu.json",
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_proportional_4gpu.json",
 )
+A0_FOUR_GPU_CONFIGS = (
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_uniform_4gpu.json",
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_proportional_4gpu.json",
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_frozen_ae_uniform_4gpu.json",
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_frozen_ae_proportional_4gpu.json",
+)
+A0_TWO_GPU_2K_VIS_CONFIGS = (
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_uniform_2gpu_2kvis.json",
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_proportional_2gpu_2kvis.json",
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_frozen_ae_uniform_2gpu_2kvis.json",
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_frozen_ae_proportional_2gpu_2kvis.json",
+)
+A0_TWO_GPU_TO_FOUR_GPU_CONFIGS = tuple(zip(A0_TWO_GPU_2K_VIS_CONFIGS, A0_FOUR_GPU_CONFIGS))
 
 
 class RemoteLauncherGuardrailTests(unittest.TestCase):
@@ -148,6 +161,66 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                 self.assertNotIn("episode_length", text)
 
 
+class A0TwoGpuAcceptedVisualizationConfigTests(unittest.TestCase):
+    def test_original_accepted_a0_four_gpu_configs_remain_formal_records(self) -> None:
+        for path in A0_FOUR_GPU_CONFIGS:
+            with self.subTest(path=path.name):
+                config = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(config["training"]["required_gpu_count"], 4)
+                self.assertEqual(config["runtime"]["required_gpu_count"], 4)
+                self.assertEqual(config["visual_validation"]["every_steps"], 20000)
+                self.assertNotIn("acceptance_backend", config["visual_validation"])
+                self.assertEqual(config["variant"]["gpu_topology"], "single_4gpu_ddp_job")
+
+    def test_two_gpu_2k_visual_configs_are_committed_5090_validation_profiles(self) -> None:
+        for path in A0_TWO_GPU_2K_VIS_CONFIGS:
+            with self.subTest(path=path.name):
+                config = json.loads(path.read_text(encoding="utf-8"))
+                visual = config["visual_validation"]
+                self.assertEqual(config["training_lane"], "soma_motionlib_kin_only")
+                self.assertEqual(config["training"]["required_gpu_count"], 2)
+                self.assertEqual(config["runtime"]["required_gpu_count"], 2)
+                self.assertEqual(config["variant"]["gpu_topology"], "single_2gpu_ddp_job")
+                self.assertEqual(visual["every_steps"], 2000)
+                self.assertEqual(visual["every_minutes"], 0)
+                self.assertIs(visual["acceptance_backend"], True)
+                self.assertEqual(visual["isaac_python_bin"], "/workspace/isaaclab/_isaac_sim/python.sh")
+                self.assertEqual(visual["isaac_render_script"], "scripts/render_g1_isaac_pair.py")
+                self.assertIn("g1_robot_usd", visual)
+                self.assertIn("--nproc-per-node=2", config["validation_command"])
+                self.assertIn(f"--config configs/{path.name}", config["validation_command"])
+                self.assertIn("2gpu", config["wandb"]["tags"])
+                self.assertIn("2kvis", config["wandb"]["tags"])
+                self.assertIn("acceptance-backend", config["wandb"]["tags"])
+                self.assertNotIn("4gpu", config["wandb"]["tags"])
+
+    def test_two_gpu_profiles_only_change_launch_and_visual_validation_contract(self) -> None:
+        preserved_keys = (
+            "training_lane",
+            "input_data",
+            "source_features",
+            "target_decoder",
+            "decoder_targets",
+            "target_features",
+            "losses",
+            "evaluation_metrics",
+            "features",
+            "split",
+            "normalization",
+            "model",
+            "ddp",
+        )
+        for two_gpu_path, four_gpu_path in A0_TWO_GPU_TO_FOUR_GPU_CONFIGS:
+            with self.subTest(path=two_gpu_path.name):
+                two_gpu = json.loads(two_gpu_path.read_text(encoding="utf-8"))
+                four_gpu = json.loads(four_gpu_path.read_text(encoding="utf-8"))
+                for key in preserved_keys:
+                    self.assertEqual(two_gpu[key], four_gpu[key])
+                self.assertEqual(two_gpu["training"]["seed"], four_gpu["training"]["seed"])
+                self.assertEqual(two_gpu["training"]["max_steps"], four_gpu["training"]["max_steps"])
+                self.assertEqual(two_gpu["output_dir"], four_gpu["output_dir"])
+
+
 class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -179,6 +252,13 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
         self.assertIn("--wandb-mode", text)
         self.assertIn("DISABLE_VISUAL_VALIDATION", text)
         self.assertIn("--disable-visual-validation", text)
+
+    def test_launcher_accepts_2gpu_configs_by_matching_required_gpu_count(self) -> None:
+        text = self.launcher_text
+        self.assertIn('NPROC_PER_NODE="${NPROC_PER_NODE:-4}"', text)
+        self.assertIn('REQUIRED_GPU_COUNT="$("${PYTHON_BIN}" -c', text)
+        self.assertIn('if [[ "${REQUIRED_GPU_COUNT}" != "${NPROC_PER_NODE}" ]]; then', text)
+        self.assertIn("NPROC_PER_NODE must match required_gpu_count", text)
 
     def test_launcher_preflight_scope_matches_strict_supervised_smoke(self) -> None:
         text = self.launcher_text
@@ -219,6 +299,13 @@ class SupervisedTrainerDdpGuardrailTests(unittest.TestCase):
         self.assertIn("run_visual_validation", text)
         self.assertIn("save_checkpoint(output_dir, unwrap_model(model)", text)
         self.assertIn("distributed_barrier(runtime)", text)
+
+    def test_trainer_passes_configured_acceptance_backend_to_visual_hook(self) -> None:
+        text = self.trainer_text
+        self.assertIn('visual_cfg = config.get("visual_validation", {})', text)
+        self.assertIn('acceptance_backend=bool(visual_cfg.get("acceptance_backend", False))', text)
+        self.assertIn('isaac_python_bin=visual_cfg.get("isaac_python_bin")', text)
+        self.assertIn('isaac_render_script=visual_cfg.get("isaac_render_script")', text)
 
     def test_trainer_supports_short_smoke_cli_overrides(self) -> None:
         text = self.trainer_text
