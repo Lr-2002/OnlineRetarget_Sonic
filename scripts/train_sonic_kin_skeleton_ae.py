@@ -47,6 +47,7 @@ if SRC_ROOT.exists() and str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from online_retarget.a0_visual_validation import (  # noqa: E402
+    ACCEPTANCE_G1_BACKEND,
     ACCEPTANCE_SOURCE_BACKEND,
     DEBUG_CAPSULE_BACKEND,
     PRIMARY_VISUAL_BACKEND,
@@ -3432,9 +3433,10 @@ def _render_motionlib_acceptance_visual_validation_clip(
     clip_dir = output_dir / f"{index:02d}_{clip_name}"
     clip_dir.mkdir(parents=True, exist_ok=True)
 
-    source_video = clip_dir / "source_somamesh_global_soma.mp4"
-    inference_video = clip_dir / "inference_g1_isaaclab.mp4"
-    combined_video = clip_dir / "source_somamesh_inference_isaaclab.mp4"
+    source_video = clip_dir / "01_soma_somameshshapes.mp4"
+    target_video = clip_dir / "02_g1_target_playback_isaaclab.mp4"
+    inference_video = clip_dir / "03_g1_kinematics_playback_isaaclab.mp4"
+    combined_video = clip_dir / "accepted_vertical_soma_target_kinematics.mp4"
     metadata_path = clip_dir / "metadata.json"
     visual_renderer = A0VisualValidationRenderer(config)
 
@@ -3455,18 +3457,51 @@ def _render_motionlib_acceptance_visual_validation_clip(
         fps=fps,
         width=render_width,
         height=render_height,
-        label="accepted source SomaMesh/global-SOMA",
+        label="Soma",
     )
     source_report.update(
         {
+            "panel": "Soma",
             "source_coordinate_frame": "global_soma_display",
             "source_display_transform": SOMA_DISPLAY_TRANSFORM,
             "render_backend": ACCEPTANCE_SOURCE_BACKEND,
+            "required_renderer": "SomaMeshShapes",
+            "skeleton_capsule_fallback": "disabled",
         }
     )
 
     root_pos = robot_root["root_pos"][:frame_count]
     root_quat = robot_root["root_quat"][:frame_count]
+    target_motion = clip_dir / "02_g1_target_playback_isaaclab_input.npz"
+    target_motion_asset_report = visual_renderer.write_g1_motion_npz(
+        path=target_motion,
+        joint_pos=arrays["joint_pos"][:frame_count],
+        root_pos=root_pos,
+        root_quat=root_quat,
+        fps=fps,
+        joint_names=G1_SONIC_JOINT_NAMES[:joint_dim],
+    )
+    isaac_python = isaac_python_bin or cfg.get("isaac_python_bin") or "/workspace/isaaclab/_isaac_sim/python.sh"
+    isaac_script = isaac_render_script or cfg.get("isaac_render_script") or ROOT / "scripts" / "render_g1_isaac_pair.py"
+    target_report = visual_renderer.render_g1_isaaclab_playback(
+        python_bin=isaac_python,
+        script_path=isaac_script,
+        motion_path=target_motion,
+        output_path=target_video,
+        duration_sec=frame_count / fps if fps > 0 else float(cfg.get("duration_sec", 4.0)),
+        width=render_width,
+        height=render_height,
+        execute=execute_isaaclab,
+        cwd=ROOT,
+    )
+    target_report.update(
+        {
+            "panel": "G1 Target Playback",
+            "render_backend": ACCEPTANCE_G1_BACKEND,
+            "data_source": "motionlib_target",
+        }
+    )
+
     prediction = _predict_motionlib_visual_g1_state(
         model=model,
         arrays=arrays,
@@ -3481,7 +3516,7 @@ def _render_motionlib_acceptance_visual_validation_clip(
         skeleton_feature_lookup=skeleton_feature_lookup,
     )
     inference_root_quat = _prediction_root_quat_wxyz(prediction, frame_count=frame_count)
-    inference_motion = clip_dir / "inference_g1_isaaclab_input.npz"
+    inference_motion = clip_dir / "03_g1_kinematics_playback_isaaclab_input.npz"
     motion_asset_report = visual_renderer.write_g1_motion_npz(
         path=inference_motion,
         joint_pos=prediction["joint_pos"][:frame_count],
@@ -3490,8 +3525,6 @@ def _render_motionlib_acceptance_visual_validation_clip(
         fps=fps,
         joint_names=G1_SONIC_JOINT_NAMES[:joint_dim],
     )
-    isaac_python = isaac_python_bin or cfg.get("isaac_python_bin") or "/workspace/isaaclab/_isaac_sim/python.sh"
-    isaac_script = isaac_render_script or cfg.get("isaac_render_script") or ROOT / "scripts" / "render_g1_isaac_pair.py"
     inference_report = visual_renderer.render_g1_isaaclab_playback(
         python_bin=isaac_python,
         script_path=isaac_script,
@@ -3503,19 +3536,30 @@ def _render_motionlib_acceptance_visual_validation_clip(
         execute=execute_isaaclab,
         cwd=ROOT,
     )
+    inference_report.update(
+        {
+            "panel": "G1 Kinematics Playback",
+            "render_backend": ACCEPTANCE_G1_BACKEND,
+            "data_source": "model_prediction",
+        }
+    )
 
-    acceptance_ok = source_report.get("status") == "ok" and inference_report.get("status") == "ok"
-    active_backend = PRIMARY_VISUAL_BACKEND if acceptance_ok else DEBUG_CAPSULE_BACKEND
+    acceptance_ok = (
+        source_report.get("status") == "ok"
+        and target_report.get("status") == "ok"
+        and inference_report.get("status") == "ok"
+    )
     combine_report = _combine_panel_videos(
-        (source_video, inference_video),
+        (source_video, target_video, inference_video),
         combined_video,
         fps=int(round(fps)),
+        layout="vertical",
     )
     if not acceptance_ok:
         combine_report = {
             **combine_report,
             "status": "failed",
-            "message": "acceptance backend incomplete; source or IsaacLab G1 playback did not finish",
+            "message": "acceptance backend incomplete; SomaMeshShapes, target IsaacLab, or kinematics IsaacLab playback did not finish",
         }
     metadata = {
         "step": step,
@@ -3526,19 +3570,43 @@ def _render_motionlib_acceptance_visual_validation_clip(
         "fps": fps,
         "frames": frame_count,
         "duration_sec": frame_count / fps if fps > 0 else 0.0,
-        "source_render": source_report,
-        "dataset_render": {
-            "status": "not_requested",
-            "message": "acceptance rerender compares accepted source SomaMesh against inference IsaacLab playback",
+        "accepted_visual_contract": {
+            "layout": "vertical",
+            "combined_artifact": str(combined_video),
+            "panel_order": ["Soma", "G1 Target Playback", "G1 Kinematics Playback"],
+            "panels": [
+                {
+                    "name": "Soma",
+                    "artifact": str(source_video),
+                    "backend": ACCEPTANCE_SOURCE_BACKEND,
+                    "required_renderer": "SomaMeshShapes",
+                    "skeleton_capsule_fallback": "disabled",
+                },
+                {
+                    "name": "G1 Target Playback",
+                    "artifact": str(target_video),
+                    "backend": ACCEPTANCE_G1_BACKEND,
+                    "data_source": "motionlib_target",
+                },
+                {
+                    "name": "G1 Kinematics Playback",
+                    "artifact": str(inference_video),
+                    "backend": ACCEPTANCE_G1_BACKEND,
+                    "data_source": "model_prediction",
+                },
+            ],
         },
+        "source_render": source_report,
+        "dataset_render": target_report,
         "inference_render": inference_report,
+        "g1_isaaclab_target_motion_asset": target_motion_asset_report,
         "g1_isaaclab_motion_asset": motion_asset_report,
         "combine": combine_report,
         "combined_video": str(combined_video),
-        "visual_backend": visual_renderer.backend_manifest(active_backend=active_backend),
+        "visual_backend": visual_renderer.backend_manifest(active_backend=PRIMARY_VISUAL_BACKEND),
         "root_composition": visual_renderer.root_composition_metadata(),
         "acceptance_backend_complete": bool(acceptance_ok),
-        "debug_fallback_backend": DEBUG_CAPSULE_BACKEND,
+        "soma_skeleton_capsule_fallback": "disabled",
     }
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return {
@@ -3548,7 +3616,7 @@ def _render_motionlib_acceptance_visual_validation_clip(
         "fps": fps,
         "frames": frame_count,
         "source_status": source_report.get("status"),
-        "dataset_status": "not_requested",
+        "dataset_status": target_report.get("status"),
         "inference_status": inference_report.get("status"),
         "combined_status": combine_report.get("status"),
         "combined_video": str(combined_video),
@@ -4053,6 +4121,7 @@ def _combine_panel_videos(
     output: Path,
     *,
     fps: int,
+    layout: str = "horizontal",
 ) -> dict[str, object]:
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
@@ -4068,7 +4137,7 @@ def _combine_panel_videos(
         [
             "-filter_complex",
             "".join(f"[{index}:v]" for index in range(stack_inputs))
-            + f"hstack=inputs={stack_inputs},fps={max(1, fps)}[v]",
+            + f"{'vstack' if layout == 'vertical' else 'hstack'}=inputs={stack_inputs},fps={max(1, fps)}[v]",
             "-map",
             "[v]",
             "-an",
@@ -4092,10 +4161,12 @@ def _combine_panel_videos(
         return {"status": "failed", "message": "combined visual validation video was not written"}
     return {
         "status": "ok",
-        "message": "combined source/dataset/inference visual validation video",
+        "message": f"combined source/dataset/inference visual validation video ({layout})",
         "video_path": str(output),
         "bytes": output.stat().st_size,
         "fps": max(1, fps),
+        "layout": layout,
+        "panel_count": stack_inputs,
     }
 
 

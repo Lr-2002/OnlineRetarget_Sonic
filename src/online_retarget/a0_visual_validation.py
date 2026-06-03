@@ -32,7 +32,7 @@ ONLINE_RETARGET_ROOT_ENV_KEYS = (
     "ONLINERETARGET_RUNTIME_ROOT",
     "ONLINE_RETARGET_ROOT",
 )
-PRIMARY_VISUAL_BACKEND = "somamesh_global_soma_plus_isaaclab_g1_kinematic_playback"
+PRIMARY_VISUAL_BACKEND = "somamesh_global_soma_plus_isaaclab_g1_target_and_kinematic_playback"
 ACCEPTANCE_SOURCE_BACKEND = "accepted_somamesh_global_soma_display"
 ACCEPTANCE_G1_BACKEND = "isaaclab_usd_g1_kinematic_playback"
 DEBUG_CAPSULE_BACKEND = "software_capsule_debug_fallback"

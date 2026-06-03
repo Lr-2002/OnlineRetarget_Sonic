@@ -82,6 +82,7 @@ class A0VisualValidationRendererTests(unittest.TestCase):
 
         manifest = renderer.backend_manifest(active_backend=DEBUG_CAPSULE_BACKEND)
 
+        self.assertIn("target_and_kinematic", PRIMARY_VISUAL_BACKEND)
         self.assertEqual(manifest["primary_backend"], PRIMARY_VISUAL_BACKEND)
         self.assertEqual(manifest["active_backend"], DEBUG_CAPSULE_BACKEND)
         self.assertEqual(manifest["source_display_transform"], SOMA_DISPLAY_TRANSFORM)
