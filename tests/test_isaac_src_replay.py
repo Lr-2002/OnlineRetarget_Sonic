@@ -19,7 +19,9 @@ from online_retarget.isaac_src_replay import (
     run_dry_or_blocked_export,
     validate_artifact_summary,
     validate_replay_config,
+    filtered_ground_contact_force_norm,
     foot_ground_contact_sensor_prim_paths,
+    IsaacLabReplayBackend,
 )
 
 
@@ -46,6 +48,7 @@ class IsaacSrcReplayContractTests(unittest.TestCase):
             },
         )
         self.assertIn("foot_ground_contact_pairs", schema["state_packet_fields"])
+        self.assertIn("foot_ground_contact_status", schema["state_packet_fields"])
         self.assertIn("body_pair_contacts", schema["state_packet_fields"])
         self.assertIn("body_pair_contact_status", schema["state_packet_fields"])
         self.assertIn("self_collision_count", schema["state_packet_fields"])
@@ -247,6 +250,67 @@ class IsaacSrcReplayContractTests(unittest.TestCase):
         self.assertEqual(packets[0]["pred"]["cross_ratio_status"], "blocked")
         self.assertAlmostEqual(packets[0]["target"]["body_pos_world_m"][0][2], 0.8)
 
+    def test_filtered_ground_force_ignores_aggregate_net_force(self) -> None:
+        try:
+            import numpy as np  # type: ignore
+        except ImportError:
+            self.skipTest("numpy is required for the contact force regression fixture")
+        config = default_replay_config()
+        sensor = _FakeContactSensor(
+            net_forces_w=np.asarray([[[100.0, 0.0, 0.0]]], dtype=np.float32),
+            force_matrix_w=np.asarray([[[[0.0, 0.0, 0.0]]]], dtype=np.float32),
+        )
+
+        reading = filtered_ground_contact_force_norm(sensor, config)
+
+        self.assertEqual(reading.status, "available")
+        self.assertEqual(reading.force_n, 0.0)
+
+    def test_zero_filtered_ground_force_emits_no_support_pair(self) -> None:
+        try:
+            import numpy as np  # type: ignore
+        except ImportError:
+            self.skipTest("numpy is required for the contact force regression fixture")
+        config = default_replay_config()
+        backend = IsaacLabReplayBackend(config, device="cpu")
+        backend.body_names = config.body_names
+        backend.foot_contact_sensors = {
+            foot_link: _FakeContactSensor(
+                net_forces_w=np.asarray([[[100.0, 0.0, 0.0]]], dtype=np.float32),
+                force_matrix_w=np.asarray([[[[0.0, 0.0, 0.0]]]], dtype=np.float32),
+            )
+            for foot_link in config.contact.foot_links
+        }
+        body_pos = [[0.0, 0.0, 0.8] for _name in config.body_names]
+
+        foot_ground_state = backend._foot_contact_state()
+        pairs = backend._foot_ground_contact_pairs(
+            body_pos=body_pos,
+            foot_ground_state=foot_ground_state,
+        )
+
+        self.assertEqual(foot_ground_state.status, "available")
+        self.assertEqual(foot_ground_state.forces_n, (0.0, 0.0))
+        self.assertEqual(foot_ground_state.flags, (False, False))
+        self.assertEqual(pairs, [])
+
+    def test_filtered_ground_force_blocks_when_force_matrix_missing(self) -> None:
+        try:
+            import numpy as np  # type: ignore
+        except ImportError:
+            self.skipTest("numpy is required for the contact force regression fixture")
+        config = default_replay_config()
+        sensor = _FakeContactSensor(
+            net_forces_w=np.asarray([[[100.0, 0.0, 0.0]]], dtype=np.float32),
+            force_matrix_w=None,
+        )
+
+        reading = filtered_ground_contact_force_norm(sensor, config)
+
+        self.assertEqual(reading.status, "blocked")
+        self.assertIsNone(reading.force_n)
+
+
 def _write_valid_paired_h5(path: Path, *, frames: int) -> None:
     import h5py  # type: ignore
 
@@ -287,15 +351,19 @@ class _FakeReplayBackend:
             "body_pos_world_m": [list(state.root_pos_world_m) for _name in self.config.body_names],
             "foot_contact_force_n": [42.0, 0.0],
             "foot_in_contact": [True, False],
+            "foot_ground_contact_status": "available",
+            "foot_ground_contact_reason": "",
             "support_margin_m": 0.0,
             "floating_guard": False,
+            "floating_guard_status": "available",
+            "floating_guard_reason": "",
             "foot_ground_contact_pairs": [
                 {
                     "body_a": "left_ankle_roll_link",
                     "body_b": "/World/Ground",
                     "force_n": 42.0,
                     "position_world_m": list(state.root_pos_world_m),
-                    "source": "fake_single_body_foot_ground_contact_sensor",
+                    "source": "fake_single_body_foot_ground_filtered_force_matrix",
                 }
             ],
             "contact_pairs": [
@@ -304,7 +372,7 @@ class _FakeReplayBackend:
                     "body_b": "/World/Ground",
                     "force_n": 42.0,
                     "position_world_m": list(state.root_pos_world_m),
-                    "source": "fake_single_body_foot_ground_contact_sensor",
+                    "source": "fake_single_body_foot_ground_filtered_force_matrix",
                 }
             ],
             "body_pair_contacts": None,
@@ -324,6 +392,20 @@ class _FakeReplayBackend:
             "backend": "fake_isaaclab_contact_backend",
             "frames_collected": len(self.frames),
         }
+
+
+class _FakeContactSensor:
+    def __init__(self, *, net_forces_w, force_matrix_w):
+        self.data = _FakeContactData(
+            net_forces_w=net_forces_w,
+            force_matrix_w=force_matrix_w,
+        )
+
+
+class _FakeContactData:
+    def __init__(self, *, net_forces_w, force_matrix_w):
+        self.net_forces_w = net_forces_w
+        self.force_matrix_w = force_matrix_w
 
 
 if __name__ == "__main__":

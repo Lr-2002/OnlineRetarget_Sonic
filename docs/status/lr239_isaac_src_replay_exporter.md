@@ -45,7 +45,8 @@ Each JSONL packet is one frame with paired `pred` and `target` state packets. St
 
 Contact families are intentionally separated:
 
-- `foot_ground_contact_pairs` is support-only evidence from single-body foot sensors filtered to the configured ground prim.
+- `foot_ground_contact_pairs` is support-only evidence from each single-body foot sensor's filtered `force_matrix_w` entry for the configured ground prim. Aggregate `net_forces_w` is not accepted as `/World/Ground` evidence.
+- `foot_ground_contact_status=blocked` means filtered `force_matrix_w` is absent or unusable; in that case foot-ground pairs are empty, foot force entries are `null`, and `floating_guard` is `null`.
 - `contact_pairs` is a compatibility alias for `foot_ground_contact_pairs`; it is not a body-body or self-collision source.
 - `body_pair_contacts` is `null` with `body_pair_contact_status=blocked` until a verified body-body extractor is bound.
 - `self_collision_count` is `null` with `self_collision_status=blocked` until it is computed from verified body-body contacts after disabled-pair filtering.
@@ -58,6 +59,7 @@ The non-dry implementation is now bound to IsaacLab behind the existing CLI. It:
 - Spawn the verified G1 USD with `enabled_self_collisions=True`.
 - Ensure the spawner activates PhysX contact reporters/contact sensors; IsaacLab contact sensors require contact reporter activation on the rigid bodies.
 - Instantiate one `ContactSensorCfg` per declared foot link, using a single foot body prim per sensor, and filter each sensor to `/World/Ground`.
+- Compute foot-ground support only from filtered `force_matrix_w`; if IsaacLab does not provide that filtered matrix, leave foot-ground support blocked instead of falling back to aggregate `net_forces_w`.
 - Replay `pred_g1_state` and `target_g1_state` from `paired_g1_state.h5` in SONIC joint order.
 - Serialize `packet_schema.json`-compatible JSONL for LR-235 consumption, with body-pair/self-collision/SRC fields blocked/null unless their verified sources are present.
 
