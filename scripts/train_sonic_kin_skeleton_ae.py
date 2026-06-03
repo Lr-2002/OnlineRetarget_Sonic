@@ -53,6 +53,7 @@ from online_retarget.a0_visual_validation import (  # noqa: E402
     PRIMARY_VISUAL_BACKEND,
     A0VisualValidationRenderer,
     SOMA_DISPLAY_TRANSFORM,
+    accepted_vertical_v2_artifact_paths,
 )
 from online_retarget.data.bones_sonic import SONIC_JOINT_NAMES as G1_SONIC_JOINT_NAMES  # noqa: E402
 from online_retarget.data.skeleton_ae_registry import SKELETON_GEOMETRY_DIM  # noqa: E402
@@ -3432,15 +3433,17 @@ def _render_motionlib_acceptance_visual_validation_clip(
     clip_name = _safe_filename(str(row.get("filename") or Path(str(row["relative_path"])).stem))
     sample_id = clip_name
     step_id = f"step_{step:08d}"
-    clip_dir = output_dir / "accepted_vertical_v2"
+    paths = accepted_vertical_v2_artifact_paths(output_dir, sample_id=sample_id, step=step)
+    clip_dir = paths["artifact_dir"]
     clip_dir.mkdir(parents=True, exist_ok=True)
 
-    artifact_stem = f"{sample_id}__{step_id}__vertical_somamesh_g1target_g1kinematics"
-    source_video = clip_dir / f"{sample_id}__{step_id}__row1_soma_somamesh.mp4"
-    target_video = clip_dir / f"{sample_id}__{step_id}__row2_g1_target_isaaclab.mp4"
-    inference_video = clip_dir / f"{sample_id}__{step_id}__row3_g1_kinematics_isaaclab.mp4"
-    combined_video = clip_dir / f"{artifact_stem}.mp4"
-    metadata_path = clip_dir / f"{artifact_stem}.json"
+    source_video = paths["row1_video"]
+    target_video = paths["row2_video"]
+    inference_video = paths["row3_video"]
+    target_motion = paths["row2_motion_npz"]
+    inference_motion = paths["row3_motion_npz"]
+    combined_video = paths["combined_video"]
+    metadata_path = paths["manifest_json"]
     visual_renderer = A0VisualValidationRenderer(config)
 
     arrays = load_soma_motionlib_arrays(row, config)
@@ -3482,7 +3485,6 @@ def _render_motionlib_acceptance_visual_validation_clip(
 
     root_pos = robot_root["root_pos"][:frame_count]
     root_quat = robot_root["root_quat"][:frame_count]
-    target_motion = clip_dir / "02_g1_target_playback_isaaclab_input.npz"
     target_motion_asset_report = visual_renderer.write_g1_motion_npz(
         path=target_motion,
         joint_pos=arrays["joint_pos"][:frame_count],
@@ -3531,7 +3533,6 @@ def _render_motionlib_acceptance_visual_validation_clip(
         skeleton_feature_lookup=skeleton_feature_lookup,
     )
     inference_root_quat = _prediction_root_quat_wxyz(prediction, frame_count=frame_count)
-    inference_motion = clip_dir / "03_g1_kinematics_playback_isaaclab_input.npz"
     motion_asset_report = visual_renderer.write_g1_motion_npz(
         path=inference_motion,
         joint_pos=prediction["joint_pos"][:frame_count],

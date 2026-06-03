@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -17,6 +18,7 @@ from online_retarget.a0_visual_validation import (
     PRIMARY_VISUAL_BACKEND,
     SOMA_DISPLAY_TRANSFORM,
     A0VisualValidationRenderer,
+    accepted_vertical_v2_artifact_paths,
 )
 
 
@@ -215,6 +217,88 @@ class A0VisualValidationRendererTests(unittest.TestCase):
             self.assertEqual(command_record["expected_output_path"], str(root / "g1.mp4"))
             self.assertTrue(command_record["preserve_world_root"])
             self.assertIn("semantic_left_right", command_record["overlays"])
+
+    def test_accepted_vertical_v2_two_sample_npz_manifest_paths_are_unique_and_hashes_match(self) -> None:
+        def sha256(path: Path) -> str:
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return digest.hexdigest()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            renderer = A0VisualValidationRenderer({})
+            base_dir = root / "visual_validation" / "step_00002000"
+            manifests = []
+            for sample_id, value in (("sample_a", 1.0), ("sample_b", 2.0)):
+                paths = accepted_vertical_v2_artifact_paths(base_dir, sample_id=sample_id, step=2000)
+                row2_report = renderer.write_g1_motion_npz(
+                    path=paths["row2_motion_npz"],
+                    joint_pos=np.full((2, 2), value, dtype=np.float32),
+                    root_pos=np.asarray([[0.0, 0.0, 0.8], [0.1, 0.0, 0.8]], dtype=np.float32),
+                    root_quat=np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (2, 1)),
+                    fps=50.0,
+                    joint_names=["left", "right"],
+                )
+                row3_report = renderer.write_g1_motion_npz(
+                    path=paths["row3_motion_npz"],
+                    joint_pos=np.full((2, 2), value + 10.0, dtype=np.float32),
+                    root_pos=np.asarray([[0.2, 0.0, 0.8], [0.3, 0.0, 0.8]], dtype=np.float32),
+                    root_quat=np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (2, 1)),
+                    fps=50.0,
+                    joint_names=["left", "right"],
+                )
+                manifest = {
+                    "sample_id": sample_id,
+                    "accepted_visual_contract": {
+                        "panels": [
+                            {"name": "Soma"},
+                            {
+                                "name": "G1 Target Playback",
+                                "motion_path": row2_report["path"],
+                                "motion_sha256": row2_report["sha256"],
+                            },
+                            {
+                                "name": "G1 Kinematics Playback",
+                                "motion_path": row3_report["path"],
+                                "motion_sha256": row3_report["sha256"],
+                            },
+                        ],
+                    },
+                    "g1_isaaclab_target_motion_asset": row2_report,
+                    "g1_isaaclab_motion_asset": row3_report,
+                }
+                paths["manifest_json"].write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+                manifests.append(json.loads(paths["manifest_json"].read_text(encoding="utf-8")))
+
+            row2_paths = [
+                Path(manifest["accepted_visual_contract"]["panels"][1]["motion_path"])
+                for manifest in manifests
+            ]
+            row3_paths = [
+                Path(manifest["accepted_visual_contract"]["panels"][2]["motion_path"])
+                for manifest in manifests
+            ]
+            self.assertEqual(len(set(row2_paths)), 2)
+            self.assertEqual(len(set(row3_paths)), 2)
+            for manifest, row2_path, row3_path in zip(manifests, row2_paths, row3_paths):
+                row2 = manifest["accepted_visual_contract"]["panels"][1]
+                row3 = manifest["accepted_visual_contract"]["panels"][2]
+                self.assertEqual(
+                    row2_path.name,
+                    f"{manifest['sample_id']}__step_00002000__row2_g1_target_isaaclab_input.npz",
+                )
+                self.assertEqual(
+                    row3_path.name,
+                    f"{manifest['sample_id']}__step_00002000__row3_g1_kinematics_isaaclab_input.npz",
+                )
+                self.assertTrue(row2_path.exists())
+                self.assertTrue(row3_path.exists())
+                self.assertEqual(row2["motion_sha256"], sha256(row2_path))
+                self.assertEqual(row3["motion_sha256"], sha256(row3_path))
+                self.assertEqual(manifest["g1_isaaclab_target_motion_asset"]["path"], str(row2_path))
+                self.assertEqual(manifest["g1_isaaclab_motion_asset"]["path"], str(row3_path))
 
     def test_fake_isaaclab_returncode_zero_without_mp4_is_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

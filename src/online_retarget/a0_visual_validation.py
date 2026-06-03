@@ -41,6 +41,29 @@ SOMA_DISPLAY_TRANSFORM = "(x,y,z)_display=(x,-z,y)_soma"
 ACCEPTANCE_OVERLAYS = ("world_axes", "root_axes", "semantic_left_right")
 
 
+def accepted_vertical_v2_artifact_paths(
+    output_dir: Path | str,
+    *,
+    sample_id: str,
+    step: int,
+) -> dict[str, Path]:
+    """Build stable accepted-v2 artifact paths for one sample and step."""
+
+    step_id = f"step_{int(step):08d}"
+    artifact_dir = Path(output_dir) / "accepted_vertical_v2"
+    artifact_stem = f"{sample_id}__{step_id}__vertical_somamesh_g1target_g1kinematics"
+    return {
+        "artifact_dir": artifact_dir,
+        "manifest_json": artifact_dir / f"{artifact_stem}.json",
+        "combined_video": artifact_dir / f"{artifact_stem}.mp4",
+        "row1_video": artifact_dir / f"{sample_id}__{step_id}__row1_soma_somamesh.mp4",
+        "row2_video": artifact_dir / f"{sample_id}__{step_id}__row2_g1_target_isaaclab.mp4",
+        "row3_video": artifact_dir / f"{sample_id}__{step_id}__row3_g1_kinematics_isaaclab.mp4",
+        "row2_motion_npz": artifact_dir / f"{sample_id}__{step_id}__row2_g1_target_isaaclab_input.npz",
+        "row3_motion_npz": artifact_dir / f"{sample_id}__{step_id}__row3_g1_kinematics_isaaclab_input.npz",
+    }
+
+
 def resolve_g1_usd_path(
     config: Mapping[str, Any],
     explicit_path: Path | str | None = None,
