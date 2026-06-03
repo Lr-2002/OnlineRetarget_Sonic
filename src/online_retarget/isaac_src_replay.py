@@ -142,6 +142,8 @@ class ContactContract:
     enable_self_collisions: bool = True
     activate_contact_sensors: bool = True
     contact_force_threshold_n: float = 1.0
+    foot_slide_speed_threshold_mps: float = 0.25
+    foot_skate_distance_threshold_m: float = 0.02
     support: SupportContract = field(default_factory=SupportContract)
     cross_ratio: CrossRatioContract = field(default_factory=CrossRatioContract)
 
@@ -214,6 +216,18 @@ class FootGroundContactState:
     flags: tuple[bool, ...]
     status: str
     reason: str = ""
+
+
+@dataclass(frozen=True)
+class FootArtifactState:
+    foot_slide_speed_mps: tuple[float | None, ...]
+    foot_slide_flags: tuple[bool | None, ...]
+    foot_skate_distance_m: tuple[float | None, ...]
+    foot_skate_flags: tuple[bool | None, ...]
+    foot_float_clearance_m: tuple[float | None, ...]
+    foot_float_flags: tuple[bool | None, ...]
+    foot_artifact_status: str
+    foot_artifact_reason: str = ""
 
 
 class ReplayBackend(Protocol):
@@ -308,6 +322,18 @@ def replay_config_from_mapping(payload: Mapping[str, Any]) -> ReplayConfig:
         enable_self_collisions=bool(contact_payload.get("enable_self_collisions", True)),
         activate_contact_sensors=bool(contact_payload.get("activate_contact_sensors", True)),
         contact_force_threshold_n=float(contact_payload.get("contact_force_threshold_n", 1.0)),
+        foot_slide_speed_threshold_mps=float(
+            contact_payload.get(
+                "foot_slide_speed_threshold_mps",
+                ContactContract.foot_slide_speed_threshold_mps,
+            )
+        ),
+        foot_skate_distance_threshold_m=float(
+            contact_payload.get(
+                "foot_skate_distance_threshold_m",
+                ContactContract.foot_skate_distance_threshold_m,
+            )
+        ),
         support=support,
         cross_ratio=cross_ratio,
     )
@@ -357,6 +383,10 @@ def validate_replay_config(config: ReplayConfig) -> list[str]:
         errors.append("contact.activate_contact_sensors must be true for PhysX contact packets")
     if config.contact.contact_force_threshold_n < 0:
         errors.append("contact.contact_force_threshold_n must be non-negative")
+    if config.contact.foot_slide_speed_threshold_mps < 0:
+        errors.append("contact.foot_slide_speed_threshold_mps must be non-negative")
+    if config.contact.foot_skate_distance_threshold_m < 0:
+        errors.append("contact.foot_skate_distance_threshold_m must be non-negative")
     if config.contact.support.up_axis.lower() not in {"x", "y", "z"}:
         errors.append("contact.support.up_axis must be x, y, or z")
     if config.contact.support.floating_clearance_threshold_m < 0:
@@ -537,6 +567,32 @@ def packet_schema_payload(config: ReplayConfig) -> dict[str, Any]:
             "floating_guard": "bool or null when foot-ground support is blocked",
             "floating_guard_status": "available or blocked",
             "floating_guard_reason": "string reason when blocked",
+            "foot_slide_speed_mps": (
+                f"[{len(config.contact.foot_links)}] float or null; per-foot horizontal "
+                "speed while verified current and previous /World/Ground contact are true"
+            ),
+            "foot_slide_flags": (
+                f"[{len(config.contact.foot_links)}] bool or null; true when slide speed "
+                "exceeds contact.foot_slide_speed_threshold_mps"
+            ),
+            "foot_skate_distance_m": (
+                f"[{len(config.contact.foot_links)}] float or null; rolling horizontal "
+                "distance accumulated across the active verified contact segment"
+            ),
+            "foot_skate_flags": (
+                f"[{len(config.contact.foot_links)}] bool or null; true when rolling "
+                "contact segment distance exceeds contact.foot_skate_distance_threshold_m"
+            ),
+            "foot_float_clearance_m": (
+                f"[{len(config.contact.foot_links)}] float or null; foot clearance during "
+                "verified contact frames"
+            ),
+            "foot_float_flags": (
+                f"[{len(config.contact.foot_links)}] bool or null; true when verified "
+                "contact foot clearance exceeds support.floating_clearance_threshold_m"
+            ),
+            "foot_artifact_status": "available or blocked",
+            "foot_artifact_reason": "string reason when blocked",
             "foot_ground_contact_pairs": (
                 "list of verified support-only {body_a, body_b, force_n, "
                 "position_world_m, source} pairs from single-body foot sensor "
@@ -869,6 +925,7 @@ class IsaacLabReplayBackend:
         self.robot_joint_order: list[int] = []
         self.body_indices: list[int] = []
         self.foot_body_indices: list[int] = []
+        self.foot_artifact_tracker = FootArtifactTracker(config)
         self.frames_collected = 0
 
     def __enter__(self) -> "IsaacLabReplayBackend":
@@ -1046,6 +1103,14 @@ class IsaacLabReplayBackend:
             body_pos=body_pos,
             foot_ground_state=foot_ground_state,
         )
+        foot_positions = [body_pos[index] for index in self.foot_body_indices]
+        foot_artifacts = self.foot_artifact_tracker.update(
+            label=state.label,
+            foot_positions=foot_positions,
+            foot_in_contact=foot_ground_state.flags,
+            foot_ground_contact_status=foot_ground_state.status,
+            foot_ground_contact_reason=foot_ground_state.reason,
+        )
         body_pair_payload = _blocked_body_pair_payload()
         src_payload = _blocked_src_payload()
         support_margin = self._support_margin(body_pos)
@@ -1068,6 +1133,14 @@ class IsaacLabReplayBackend:
             "floating_guard": floating_guard,
             "floating_guard_status": foot_ground_state.status,
             "floating_guard_reason": foot_ground_state.reason,
+            "foot_slide_speed_mps": list(foot_artifacts.foot_slide_speed_mps),
+            "foot_slide_flags": list(foot_artifacts.foot_slide_flags),
+            "foot_skate_distance_m": list(foot_artifacts.foot_skate_distance_m),
+            "foot_skate_flags": list(foot_artifacts.foot_skate_flags),
+            "foot_float_clearance_m": list(foot_artifacts.foot_float_clearance_m),
+            "foot_float_flags": list(foot_artifacts.foot_float_flags),
+            "foot_artifact_status": foot_artifacts.foot_artifact_status,
+            "foot_artifact_reason": foot_artifacts.foot_artifact_reason,
             "foot_ground_contact_pairs": foot_ground_contact_pairs,
             "contact_pairs": foot_ground_contact_pairs,
             **body_pair_payload,
@@ -1156,6 +1229,143 @@ class IsaacLabReplayBackend:
         return min_foot_height - float(self.config.contact.support.ground_height_m)
 
 
+class FootArtifactTracker:
+    """Rolling foot artifact state derived only from verified foot-ground contact."""
+
+    def __init__(self, config: ReplayConfig) -> None:
+        self.config = config
+        self.axis_index = {"x": 0, "y": 1, "z": 2}[
+            config.contact.support.up_axis.lower()
+        ]
+        self.horizontal_axes = tuple(index for index in range(3) if index != self.axis_index)
+        self.dt = 1.0 / max(float(config.fps), 1.0)
+        self._previous: dict[str, tuple[tuple[float, float, float], ...]] = {}
+        self._previous_contact: dict[str, tuple[bool, ...]] = {}
+        self._segment_start: dict[tuple[str, int], tuple[float, float, float]] = {}
+
+    def update(
+        self,
+        *,
+        label: str,
+        foot_positions: Sequence[Sequence[float]],
+        foot_in_contact: Sequence[bool],
+        foot_ground_contact_status: str,
+        foot_ground_contact_reason: str = "",
+    ) -> FootArtifactState:
+        foot_count = len(self.config.contact.foot_links)
+        if foot_ground_contact_status != "available":
+            self._clear_label(label)
+            reason = foot_ground_contact_reason or "verified foot-ground contact is unavailable"
+            return FootArtifactState(
+                foot_slide_speed_mps=tuple(None for _ in range(foot_count)),
+                foot_slide_flags=tuple(None for _ in range(foot_count)),
+                foot_skate_distance_m=tuple(None for _ in range(foot_count)),
+                foot_skate_flags=tuple(None for _ in range(foot_count)),
+                foot_float_clearance_m=tuple(None for _ in range(foot_count)),
+                foot_float_flags=tuple(None for _ in range(foot_count)),
+                foot_artifact_status="blocked",
+                foot_artifact_reason=reason,
+            )
+        if len(foot_positions) != foot_count or len(foot_in_contact) != foot_count:
+            self._clear_label(label)
+            return FootArtifactState(
+                foot_slide_speed_mps=tuple(None for _ in range(foot_count)),
+                foot_slide_flags=tuple(None for _ in range(foot_count)),
+                foot_skate_distance_m=tuple(None for _ in range(foot_count)),
+                foot_skate_flags=tuple(None for _ in range(foot_count)),
+                foot_float_clearance_m=tuple(None for _ in range(foot_count)),
+                foot_float_flags=tuple(None for _ in range(foot_count)),
+                foot_artifact_status="blocked",
+                foot_artifact_reason="foot pose/contact width does not match foot_links",
+            )
+
+        current = tuple(_point3(position) for position in foot_positions)
+        current_contact = tuple(bool(flag) for flag in foot_in_contact)
+        previous = self._previous.get(label)
+        previous_contact = self._previous_contact.get(label)
+        slide_speeds: list[float | None] = []
+        slide_flags: list[bool | None] = []
+        skate_distances: list[float | None] = []
+        skate_flags: list[bool | None] = []
+        float_clearances: list[float | None] = []
+        float_flags: list[bool | None] = []
+
+        for foot_index, position in enumerate(current):
+            in_contact = current_contact[foot_index]
+            prev_in_contact = (
+                previous_contact is not None
+                and foot_index < len(previous_contact)
+                and previous_contact[foot_index]
+            )
+            segment_key = (label, foot_index)
+            if in_contact:
+                self._segment_start.setdefault(segment_key, position)
+                clearance = self._clearance(position)
+                float_clearances.append(clearance)
+                float_flags.append(
+                    clearance > self.config.contact.support.floating_clearance_threshold_m
+                )
+                distance = self._horizontal_distance(
+                    self._segment_start[segment_key],
+                    position,
+                )
+                skate_distances.append(distance)
+                skate_flags.append(distance > self.config.contact.foot_skate_distance_threshold_m)
+                if previous is not None and prev_in_contact:
+                    speed = self._horizontal_distance(previous[foot_index], position) / self.dt
+                    slide_speeds.append(speed)
+                    slide_flags.append(
+                        speed > self.config.contact.foot_slide_speed_threshold_mps
+                    )
+                else:
+                    slide_speeds.append(None)
+                    slide_flags.append(None)
+            else:
+                self._segment_start.pop(segment_key, None)
+                slide_speeds.append(None)
+                slide_flags.append(None)
+                skate_distances.append(None)
+                skate_flags.append(None)
+                float_clearances.append(None)
+                float_flags.append(None)
+
+        self._previous[label] = current
+        self._previous_contact[label] = current_contact
+        return FootArtifactState(
+            foot_slide_speed_mps=tuple(slide_speeds),
+            foot_slide_flags=tuple(slide_flags),
+            foot_skate_distance_m=tuple(skate_distances),
+            foot_skate_flags=tuple(skate_flags),
+            foot_float_clearance_m=tuple(float_clearances),
+            foot_float_flags=tuple(float_flags),
+            foot_artifact_status="available",
+        )
+
+    def _clear_label(self, label: str) -> None:
+        self._previous.pop(label, None)
+        self._previous_contact.pop(label, None)
+        for key in tuple(self._segment_start):
+            if key[0] == label:
+                self._segment_start.pop(key, None)
+
+    def _clearance(self, point: Sequence[float]) -> float:
+        return float(point[self.axis_index]) - float(
+            self.config.contact.support.ground_height_m
+        )
+
+    def _horizontal_distance(
+        self,
+        left: Sequence[float],
+        right: Sequence[float],
+    ) -> float:
+        return math.sqrt(
+            sum(
+                (float(left[index]) - float(right[index])) ** 2
+                for index in self.horizontal_axes
+            )
+        )
+
+
 def _config_from_args(args: argparse.Namespace) -> ReplayConfig:
     base = load_replay_config(args.config)
     payload = replay_config_payload(base)
@@ -1172,6 +1382,12 @@ def _row(array: Any, index: int) -> list[float]:
 
 def _float_list(values: Sequence[float]) -> list[float]:
     return [float(value) for value in values]
+
+
+def _point3(values: Sequence[float]) -> tuple[float, float, float]:
+    if len(values) != 3:
+        raise ValueError(f"foot position must have three values, got {len(values)}")
+    return (float(values[0]), float(values[1]), float(values[2]))
 
 
 def _tensor_to_nested_list(value: Any) -> list[list[float]]:

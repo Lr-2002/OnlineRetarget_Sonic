@@ -18,6 +18,7 @@ from online_retarget.isaac_src_replay import (
     main,
     packet_schema_payload,
     PairedStateData,
+    FootArtifactTracker,
     replay_config_from_mapping,
     run_dry_or_blocked_export,
     validate_artifact_summary,
@@ -52,6 +53,10 @@ class IsaacSrcReplayContractTests(unittest.TestCase):
         )
         self.assertIn("foot_ground_contact_pairs", schema["state_packet_fields"])
         self.assertIn("foot_ground_contact_status", schema["state_packet_fields"])
+        self.assertIn("foot_slide_speed_mps", schema["state_packet_fields"])
+        self.assertIn("foot_skate_distance_m", schema["state_packet_fields"])
+        self.assertIn("foot_float_clearance_m", schema["state_packet_fields"])
+        self.assertIn("foot_artifact_status", schema["state_packet_fields"])
         self.assertIn("body_pair_contacts", schema["state_packet_fields"])
         self.assertIn("body_pair_contact_status", schema["state_packet_fields"])
         self.assertIn("self_collision_count", schema["state_packet_fields"])
@@ -202,6 +207,110 @@ class IsaacSrcReplayContractTests(unittest.TestCase):
         self.assertTrue(any("pred root_quat_wxyz width must be 4" in error for error in errors))
         self.assertTrue(any("pred joint_q_rad width must be 29" in error for error in errors))
 
+    def test_foot_artifact_tracker_rolls_verified_contact_only(self) -> None:
+        config = replay_config_from_mapping(
+            {
+                "fps": 50.0,
+                "contact": {
+                    "foot_slide_speed_threshold_mps": 0.25,
+                    "foot_skate_distance_threshold_m": 0.02,
+                    "support": {
+                        "ground_height_m": 0.0,
+                        "floating_clearance_threshold_m": 0.04,
+                    },
+                },
+            }
+        )
+        tracker = FootArtifactTracker(config)
+
+        first = tracker.update(
+            label="pred",
+            foot_positions=((0.0, 0.0, 0.01), (1.0, 0.0, 0.01)),
+            foot_in_contact=(True, False),
+            foot_ground_contact_status="available",
+        )
+        second = tracker.update(
+            label="pred",
+            foot_positions=((0.03, 0.0, 0.05), (1.0, 0.0, 0.01)),
+            foot_in_contact=(True, False),
+            foot_ground_contact_status="available",
+        )
+
+        self.assertEqual(first.foot_artifact_status, "available")
+        self.assertEqual(first.foot_slide_speed_mps, (None, None))
+        self.assertEqual(first.foot_skate_distance_m, (0.0, None))
+        self.assertEqual(first.foot_float_flags, (False, None))
+        self.assertEqual(second.foot_artifact_status, "available")
+        self.assertAlmostEqual(second.foot_slide_speed_mps[0] or 0.0, 1.5)
+        self.assertEqual(second.foot_slide_flags, (True, None))
+        self.assertAlmostEqual(second.foot_skate_distance_m[0] or 0.0, 0.03)
+        self.assertEqual(second.foot_skate_flags, (True, None))
+        self.assertAlmostEqual(second.foot_float_clearance_m[0] or 0.0, 0.05)
+        self.assertEqual(second.foot_float_flags, (True, None))
+
+    def test_foot_artifact_tracker_blocks_and_clears_state_when_contact_unverified(self) -> None:
+        config = default_replay_config()
+        tracker = FootArtifactTracker(config)
+        tracker.update(
+            label="target",
+            foot_positions=((0.0, 0.0, 0.01), (1.0, 0.0, 0.01)),
+            foot_in_contact=(True, True),
+            foot_ground_contact_status="available",
+        )
+
+        blocked = tracker.update(
+            label="target",
+            foot_positions=((0.05, 0.0, 0.01), (1.0, 0.0, 0.01)),
+            foot_in_contact=(True, True),
+            foot_ground_contact_status="blocked",
+            foot_ground_contact_reason="force_matrix_w missing",
+        )
+        resumed = tracker.update(
+            label="target",
+            foot_positions=((0.10, 0.0, 0.01), (1.0, 0.0, 0.01)),
+            foot_in_contact=(True, True),
+            foot_ground_contact_status="available",
+        )
+
+        self.assertEqual(blocked.foot_artifact_status, "blocked")
+        self.assertEqual(blocked.foot_artifact_reason, "force_matrix_w missing")
+        self.assertEqual(blocked.foot_slide_speed_mps, (None, None))
+        self.assertEqual(resumed.foot_slide_speed_mps, (None, None))
+        self.assertEqual(resumed.foot_skate_distance_m, (0.0, 0.0))
+
+    def test_export_replay_packets_emits_safe_foot_artifacts_without_hdf5(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "out"
+            config = default_replay_config()
+            state = _minimal_paired_state(frames=2)
+
+            result = export_replay_packets(
+                config=config,
+                state=state,
+                output_dir=output_dir,
+                max_frames=2,
+                backend_factory=lambda replay_config: _FakeReplayBackend(replay_config),
+            )
+            packets = [
+                json.loads(line)
+                for line in (output_dir / "isaac_src_packets.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+
+        self.assertEqual(result["packets_written"], 2)
+        self.assertEqual(packets[0]["pred"]["foot_artifact_status"], "available")
+        self.assertEqual(packets[0]["pred"]["foot_slide_speed_mps"], [None, None])
+        self.assertEqual(packets[1]["pred"]["foot_slide_flags"], [True, None])
+        self.assertEqual(packets[1]["pred"]["foot_skate_flags"], [True, None])
+        self.assertEqual(packets[1]["pred"]["foot_float_flags"], [True, None])
+        self.assertIsNone(packets[1]["pred"]["body_pair_contacts"])
+        self.assertEqual(packets[1]["pred"]["body_pair_contact_status"], "blocked")
+        self.assertIsNone(packets[1]["pred"]["self_collision_count"])
+        self.assertEqual(packets[1]["pred"]["self_collision_status"], "blocked")
+        self.assertIsNone(packets[1]["pred"]["cross_ratio"])
+        self.assertEqual(packets[1]["pred"]["cross_ratio_status"], "blocked")
+
     def test_non_dry_export_writes_real_jsonl_with_backend_packets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -258,6 +367,11 @@ class IsaacSrcReplayContractTests(unittest.TestCase):
             packets[0]["pred"]["contact_pairs"],
             packets[0]["pred"]["foot_ground_contact_pairs"],
         )
+        self.assertEqual(packets[0]["pred"]["foot_artifact_status"], "available")
+        self.assertEqual(packets[0]["pred"]["foot_slide_speed_mps"], [None, None])
+        self.assertEqual(packets[1]["pred"]["foot_slide_flags"], [True, None])
+        self.assertEqual(packets[1]["pred"]["foot_skate_flags"], [True, None])
+        self.assertEqual(packets[1]["pred"]["foot_float_flags"], [True, None])
         self.assertIsNone(packets[0]["pred"]["body_pair_contacts"])
         self.assertEqual(packets[0]["pred"]["body_pair_contact_status"], "blocked")
         self.assertIsNone(packets[0]["pred"]["self_collision_count"])
@@ -436,6 +550,7 @@ class _FakeReplayBackend:
     def __init__(self, config):
         self.config = config
         self.frames: list[tuple[str, int]] = []
+        self.foot_artifact_tracker = FootArtifactTracker(config)
 
     def __enter__(self):
         return self
@@ -445,12 +560,27 @@ class _FakeReplayBackend:
 
     def collect_state_packet(self, state):
         self.frames.append((state.label, state.frame_idx))
+        body_pos = [list(state.root_pos_world_m) for _name in self.config.body_names]
+        left_foot_index = self.config.body_names.index("left_ankle_roll_link")
+        right_foot_index = self.config.body_names.index("right_ankle_roll_link")
+        body_pos[left_foot_index] = [
+            float(state.root_pos_world_m[0]) + state.frame_idx * 0.03,
+            float(state.root_pos_world_m[1]),
+            0.05 if state.frame_idx else 0.01,
+        ]
+        body_pos[right_foot_index] = [1.0, 0.0, 0.01]
+        foot_artifacts = self.foot_artifact_tracker.update(
+            label=state.label,
+            foot_positions=(body_pos[left_foot_index], body_pos[right_foot_index]),
+            foot_in_contact=(True, False),
+            foot_ground_contact_status="available",
+        )
         return {
             "root_pos_world_m": list(state.root_pos_world_m),
             "root_quat_wxyz": list(state.root_quat_wxyz),
             "joint_q_rad": list(state.joint_q_rad),
             "body_names": list(self.config.body_names),
-            "body_pos_world_m": [list(state.root_pos_world_m) for _name in self.config.body_names],
+            "body_pos_world_m": body_pos,
             "foot_contact_force_n": [42.0, 0.0],
             "foot_in_contact": [True, False],
             "foot_ground_contact_status": "available",
@@ -459,6 +589,14 @@ class _FakeReplayBackend:
             "floating_guard": False,
             "floating_guard_status": "available",
             "floating_guard_reason": "",
+            "foot_slide_speed_mps": list(foot_artifacts.foot_slide_speed_mps),
+            "foot_slide_flags": list(foot_artifacts.foot_slide_flags),
+            "foot_skate_distance_m": list(foot_artifacts.foot_skate_distance_m),
+            "foot_skate_flags": list(foot_artifacts.foot_skate_flags),
+            "foot_float_clearance_m": list(foot_artifacts.foot_float_clearance_m),
+            "foot_float_flags": list(foot_artifacts.foot_float_flags),
+            "foot_artifact_status": foot_artifacts.foot_artifact_status,
+            "foot_artifact_reason": foot_artifacts.foot_artifact_reason,
             "foot_ground_contact_pairs": [
                 {
                     "body_a": "left_ankle_roll_link",

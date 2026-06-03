@@ -37,20 +37,48 @@ Expected dry-run artifacts:
 - `packet_schema.json`
 - empty placeholder `isaac_src_packets.jsonl`
 
+Packet metric aggregation:
+
+```bash
+cd /mnt/data_cpfs/code/wxh/OnlineRetarget
+PYTHONPATH=src:. python3 scripts/summarize_lr239_isaac_src_packets.py \
+  --input-jsonl /path/to/isaac_src_packets.jsonl \
+  --output-dir /path/to/packet_metrics
+```
+
+Expected metric artifacts:
+
+- `packet_metric_summary.json`
+- `per_frame_side_metrics.json`
+- `per_frame_side_metrics.jsonl`
+- `per_frame_side_metrics.csv`
+- `per_frame_side_foot_metrics.csv`
+
 ## Packet Contract
 
 `online_retarget.isaac_src_replay` declares schema `lr239.isaac_src_contact_packets.v1`.
 
-Each JSONL packet is one frame with paired `pred` and `target` state packets. State packets carry root pose, 29-DOF joint state, foot contact force/contact flags, support margin/floating guard, foot-ground support pairs, body-pair/self-collision availability fields, and cross-ratio availability fields. The packet schema pins the joint order, foot links, disabled collision pairs, contact filters, ground frame, support thresholds, and cross-ratio contract.
+Each JSONL packet is one frame with paired `pred` and `target` state packets. State packets carry root pose, 29-DOF joint state, foot contact force/contact flags, support margin/floating guard, rolling foot artifact fields, foot-ground support pairs, body-pair/self-collision availability fields, and cross-ratio availability fields. The packet schema pins the joint order, foot links, disabled collision pairs, contact filters, ground frame, support thresholds, foot artifact thresholds, and cross-ratio contract.
 
 Contact families are intentionally separated:
 
 - `foot_ground_contact_pairs` is support-only evidence from each single-body foot sensor's filtered `force_matrix_w` entry for the configured ground prim. Aggregate `net_forces_w` is not accepted as `/World/Ground` evidence.
 - `foot_ground_contact_status=blocked` means filtered `force_matrix_w` is absent or unusable; in that case foot-ground pairs are empty, foot force entries are `null`, and `floating_guard` is `null`.
+- `foot_slide_speed_mps`, `foot_slide_flags`, `foot_skate_distance_m`, `foot_skate_flags`, `foot_float_clearance_m`, and `foot_float_flags` are produced by exporter-local `FootArtifactTracker` rolling state. They are available only when the current per-foot `/World/Ground` contact source is verified through filtered `force_matrix_w`; if foot-ground contact is blocked, these fields are `null` per foot with `foot_artifact_status=blocked`.
+- Foot slide uses horizontal foot speed only when the current and previous frames for that side are both verified in contact. Foot skate is rolling horizontal displacement within the current verified contact segment. Foot float is foot clearance during a verified contact frame. These are foot-ground artifacts only, not body-body collision evidence.
 - `contact_pairs` is a compatibility alias for `foot_ground_contact_pairs`; it is not a body-body or self-collision source.
 - `body_pair_contacts` is `null` with `body_pair_contact_status=blocked` until a verified body-body extractor is bound.
 - `self_collision_count` is `null` with `self_collision_status=blocked` until it is computed from verified body-body contacts after disabled-pair filtering.
 - `cross_ratio` and `cross_ratio_guard` are `null` with `cross_ratio_status=blocked` until an SRC geometry checker is bound.
+
+## Packet Metric Aggregator
+
+`online_retarget.isaac_src_metrics` consumes `isaac_src_packets.jsonl` and writes summary plus per-frame/per-side CSV/JSON artifacts for review and LR-235 ingestion. The first implementation aggregates only the clear metric families:
+
+- Foot-ground contact: foot-ground availability rate, per-foot contact rate, force summary, and support pair count.
+- Footskate / slide: `foot_slide_speed_mps`, `foot_skate_distance_m`, and their flags summarized as max/mean/rate where values are available.
+- Floating/support: `floating_guard`, `support_margin_m`, and `foot_float_clearance_m` summarized as guard violation/pass rates and clearance/support statistics. This does not attempt an airborne/action mask.
+- Blocked/null accounting: `body_pair_contacts`, `self_collision_count`, `cross_ratio`, and `cross_ratio_guard` are summarized only through status counts and null/non-null counts. Blocked/null values are never converted into numeric zero metrics.
 
 ## Isaac Binding
 
@@ -60,6 +88,7 @@ The non-dry implementation is now bound to IsaacLab behind the existing CLI. It:
 - Ensure the spawner activates PhysX contact reporters/contact sensors; IsaacLab contact sensors require contact reporter activation on the rigid bodies.
 - Instantiate one `ContactSensorCfg` per declared foot link, using a single foot body prim per sensor, and filter each sensor to `/World/Ground`.
 - Compute foot-ground support only from filtered `force_matrix_w`; if IsaacLab does not provide that filtered matrix, leave foot-ground support blocked instead of falling back to aggregate `net_forces_w`.
+- Compute footskate/slide/floating artifact fields only from verified foot-ground flags plus foot body poses; do not infer them from aggregate forces or proxy collision geometry.
 - Replay `pred_g1_state` and `target_g1_state` from `paired_g1_state.h5` in SONIC joint order.
 - Serialize `packet_schema.json`-compatible JSONL for LR-235 consumption, with body-pair/self-collision/SRC fields blocked/null unless their verified sources are present.
 
