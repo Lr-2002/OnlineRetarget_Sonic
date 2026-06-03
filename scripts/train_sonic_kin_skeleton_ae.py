@@ -54,6 +54,7 @@ from online_retarget.a0_visual_validation import (  # noqa: E402
     A0VisualValidationRenderer,
     SOMA_DISPLAY_TRANSFORM,
     accepted_vertical_v2_artifact_paths,
+    build_accepted_vertical_v2_metadata,
 )
 from online_retarget.data.bones_sonic import SONIC_JOINT_NAMES as G1_SONIC_JOINT_NAMES  # noqa: E402
 from online_retarget.data.skeleton_ae_registry import SKELETON_GEOMETRY_DIM  # noqa: E402
@@ -3567,89 +3568,35 @@ def _render_motionlib_acceptance_visual_validation_clip(
         }
     )
 
-    acceptance_ok = (
-        source_report.get("status") == "ok"
-        and target_report.get("status") == "ok"
-        and inference_report.get("status") == "ok"
-    )
     combine_report = _combine_panel_videos(
         (source_video, target_video, inference_video),
         combined_video,
         fps=int(round(fps)),
         layout="vertical",
     )
-    if not acceptance_ok:
-        combine_report = {
-            **combine_report,
-            "status": "failed",
-            "message": "acceptance backend incomplete; SomaMeshShapes, target IsaacLab, or kinematics IsaacLab playback did not finish",
-        }
-    metadata = {
-        "step": step,
-        "index": index,
-        "filename": row.get("filename", ""),
-        "relative_path": row.get("relative_path", ""),
-        "sample_id": sample_id,
-        "source_bvh": str(source_bvh) if source_bvh is not None else "",
-        "fps": fps,
-        "frames": frame_count,
-        "duration_sec": frame_count / fps if fps > 0 else 0.0,
-        "time_alignment": {
-            "sample_id": sample_id,
-            "fps": fps,
-            "frames": frame_count,
-            "frame_range": [0, max(0, frame_count - 1)],
-            "all_rows_share_sample_frame_fps": True,
-        },
-        "accepted_visual_contract": {
-            "layout": "vertical",
-            "artifact_version": "accepted_vertical_v2",
-            "artifact_dir": str(clip_dir),
-            "combined_artifact": str(combined_video),
-            "panel_order": ["Soma", "G1 Target Playback", "G1 Kinematics Playback"],
-            "panels": [
-                {
-                    "name": "Soma",
-                    "artifact": str(source_video),
-                    "backend": "SomaMeshShapes",
-                    "soma_backend": "SomaMeshShapes",
-                    "skeleton_fallback_used": False,
-                    "mesh_skinning_metadata": source_report.get("mesh_skinning_metadata", {}),
-                },
-                {
-                    "name": "G1 Target Playback",
-                    "artifact": str(target_video),
-                    "backend": "IsaacLab",
-                    "render_backend": ACCEPTANCE_G1_BACKEND,
-                    "data_source": "motionlib_target",
-                    "motion_path": target_motion_asset_report["path"],
-                    "motion_sha256": target_motion_asset_report["sha256"],
-                },
-                {
-                    "name": "G1 Kinematics Playback",
-                    "artifact": str(inference_video),
-                    "backend": "IsaacLab",
-                    "render_backend": ACCEPTANCE_G1_BACKEND,
-                    "data_source": "model_prediction",
-                    "motion_path": motion_asset_report["path"],
-                    "motion_sha256": motion_asset_report["sha256"],
-                    "checkpoint": str(cfg.get("checkpoint_path", "")),
-                    "checkpoint_step": int(cfg.get("checkpoint_step", step)),
-                },
-            ],
-        },
-        "source_render": source_report,
-        "dataset_render": target_report,
-        "inference_render": inference_report,
-        "g1_isaaclab_target_motion_asset": target_motion_asset_report,
-        "g1_isaaclab_motion_asset": motion_asset_report,
-        "combine": combine_report,
-        "combined_video": str(combined_video),
-        "visual_backend": visual_renderer.backend_manifest(active_backend=PRIMARY_VISUAL_BACKEND),
-        "root_composition": visual_renderer.root_composition_metadata(),
-        "acceptance_backend_complete": bool(acceptance_ok),
-        "soma_skeleton_capsule_fallback": "disabled",
-    }
+    metadata, acceptance_ok, _failure_reasons = build_accepted_vertical_v2_metadata(
+        visual_renderer=visual_renderer,
+        step=step,
+        index=index,
+        row=row,
+        sample_id=sample_id,
+        source_bvh=source_bvh,
+        fps=fps,
+        frame_count=frame_count,
+        clip_dir=clip_dir,
+        source_video=source_video,
+        target_video=target_video,
+        inference_video=inference_video,
+        combined_video=combined_video,
+        source_report=source_report,
+        target_report=target_report,
+        inference_report=inference_report,
+        target_motion_asset_report=target_motion_asset_report,
+        motion_asset_report=motion_asset_report,
+        combine_report=combine_report,
+        checkpoint_path=cfg.get("checkpoint_path", ""),
+        checkpoint_step=int(cfg.get("checkpoint_step", step)),
+    )
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return {
         "index": index,

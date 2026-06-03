@@ -37,6 +37,7 @@ PRIMARY_VISUAL_BACKEND = "somamesh_global_soma_plus_isaaclab_g1_target_and_kinem
 ACCEPTANCE_SOURCE_BACKEND = "accepted_somamesh_global_soma_display"
 ACCEPTANCE_G1_BACKEND = "isaaclab_usd_g1_kinematic_playback"
 DEBUG_CAPSULE_BACKEND = "software_capsule_debug_fallback"
+FAILED_ACCEPTED_VISUAL_BACKEND = "failed_accepted_vertical_v2_incomplete"
 SOMA_DISPLAY_TRANSFORM = "(x,y,z)_display=(x,-z,y)_soma"
 ACCEPTANCE_OVERLAYS = ("world_axes", "root_axes", "semantic_left_right")
 
@@ -62,6 +63,199 @@ def accepted_vertical_v2_artifact_paths(
         "row2_motion_npz": artifact_dir / f"{sample_id}__{step_id}__row2_g1_target_isaaclab_input.npz",
         "row3_motion_npz": artifact_dir / f"{sample_id}__{step_id}__row3_g1_kinematics_isaaclab_input.npz",
     }
+
+
+def build_accepted_vertical_v2_metadata(
+    *,
+    visual_renderer: Any,
+    step: int,
+    index: int,
+    row: Mapping[str, Any],
+    sample_id: str,
+    source_bvh: Path | str | None,
+    fps: float,
+    frame_count: int,
+    clip_dir: Path | str,
+    source_video: Path | str,
+    target_video: Path | str,
+    inference_video: Path | str,
+    combined_video: Path | str,
+    source_report: Mapping[str, Any],
+    target_report: Mapping[str, Any],
+    inference_report: Mapping[str, Any],
+    target_motion_asset_report: Mapping[str, Any],
+    motion_asset_report: Mapping[str, Any],
+    combine_report: Mapping[str, Any],
+    checkpoint_path: Path | str | None = None,
+    checkpoint_step: int | None = None,
+) -> tuple[dict[str, Any], bool, list[str]]:
+    """Build accepted-v2 metadata and gate final-accepted backend state."""
+
+    source_report_dict = dict(source_report)
+    target_report_dict = dict(target_report)
+    inference_report_dict = dict(inference_report)
+    target_motion_asset = dict(target_motion_asset_report)
+    motion_asset = dict(motion_asset_report)
+    combine_report_dict = dict(combine_report)
+    failure_reasons = accepted_vertical_v2_failure_reasons(
+        source_video=Path(source_video),
+        target_video=Path(target_video),
+        inference_video=Path(inference_video),
+        source_report=source_report_dict,
+        target_report=target_report_dict,
+        inference_report=inference_report_dict,
+        target_motion_asset_report=target_motion_asset,
+        motion_asset_report=motion_asset,
+        combine_report=combine_report_dict,
+    )
+    acceptance_ok = not failure_reasons
+    if not acceptance_ok:
+        combine_report_dict = {
+            **combine_report_dict,
+            "status": "failed",
+            "message": "accepted_vertical_v2 incomplete; not final accepted",
+            "acceptance_failure_reasons": failure_reasons,
+        }
+    active_backend = PRIMARY_VISUAL_BACKEND if acceptance_ok else FAILED_ACCEPTED_VISUAL_BACKEND
+    visual_backend = visual_renderer.backend_manifest(active_backend=active_backend)
+    visual_backend["accepted_vertical_v2_status"] = "ok" if acceptance_ok else "failed"
+    visual_backend["acceptance_failure_reasons"] = failure_reasons
+
+    source_bvh_text = str(source_bvh) if source_bvh is not None else ""
+    checkpoint_step_value = int(step if checkpoint_step is None else checkpoint_step)
+    metadata = {
+        "step": int(step),
+        "index": int(index),
+        "filename": row.get("filename", ""),
+        "relative_path": row.get("relative_path", ""),
+        "sample_id": sample_id,
+        "source_bvh": source_bvh_text,
+        "fps": float(fps),
+        "frames": int(frame_count),
+        "duration_sec": float(frame_count) / float(fps) if float(fps) > 0 else 0.0,
+        "time_alignment": {
+            "sample_id": sample_id,
+            "fps": float(fps),
+            "frames": int(frame_count),
+            "frame_range": [0, max(0, int(frame_count) - 1)],
+            "all_rows_share_sample_frame_fps": True,
+        },
+        "accepted_visual_contract": {
+            "layout": "vertical",
+            "artifact_version": "accepted_vertical_v2",
+            "artifact_dir": str(clip_dir),
+            "combined_artifact": str(combined_video),
+            "panel_order": ["Soma", "G1 Target Playback", "G1 Kinematics Playback"],
+            "panels": [
+                {
+                    "name": "Soma",
+                    "artifact": str(source_video),
+                    "backend": "SomaMeshShapes",
+                    "soma_backend": "SomaMeshShapes",
+                    "skeleton_fallback_used": bool(source_report_dict.get("skeleton_fallback_used", False)),
+                    "mesh_skinning_metadata": source_report_dict.get("mesh_skinning_metadata", {}),
+                },
+                {
+                    "name": "G1 Target Playback",
+                    "artifact": str(target_video),
+                    "backend": "IsaacLab",
+                    "render_backend": ACCEPTANCE_G1_BACKEND,
+                    "data_source": "motionlib_target",
+                    "motion_path": target_motion_asset.get("path", ""),
+                    "motion_sha256": target_motion_asset.get("sha256", ""),
+                },
+                {
+                    "name": "G1 Kinematics Playback",
+                    "artifact": str(inference_video),
+                    "backend": "IsaacLab",
+                    "render_backend": ACCEPTANCE_G1_BACKEND,
+                    "data_source": "model_prediction",
+                    "motion_path": motion_asset.get("path", ""),
+                    "motion_sha256": motion_asset.get("sha256", ""),
+                    "checkpoint": str(checkpoint_path or ""),
+                    "checkpoint_step": checkpoint_step_value,
+                },
+            ],
+        },
+        "source_render": source_report_dict,
+        "dataset_render": target_report_dict,
+        "inference_render": inference_report_dict,
+        "g1_isaaclab_target_motion_asset": target_motion_asset,
+        "g1_isaaclab_motion_asset": motion_asset,
+        "combine": combine_report_dict,
+        "combined_video": str(combined_video),
+        "visual_backend": visual_backend,
+        "root_composition": visual_renderer.root_composition_metadata(),
+        "acceptance_backend_complete": bool(acceptance_ok),
+        "soma_skeleton_capsule_fallback": "disabled",
+    }
+    return metadata, bool(acceptance_ok), failure_reasons
+
+
+def accepted_vertical_v2_failure_reasons(
+    *,
+    source_video: Path,
+    target_video: Path,
+    inference_video: Path,
+    source_report: Mapping[str, Any],
+    target_report: Mapping[str, Any],
+    inference_report: Mapping[str, Any],
+    target_motion_asset_report: Mapping[str, Any],
+    motion_asset_report: Mapping[str, Any],
+    combine_report: Mapping[str, Any],
+) -> list[str]:
+    reasons: list[str] = []
+    for label, report in (
+        ("soma", source_report),
+        ("g1_target", target_report),
+        ("g1_kinematics", inference_report),
+    ):
+        if report.get("status") != "ok":
+            reasons.append(f"{label}_status={report.get('status', 'missing')}")
+
+    source_meta = source_report.get("mesh_skinning_metadata", {})
+    if not isinstance(source_meta, Mapping):
+        source_meta = {}
+    if source_report.get("soma_backend") != "SomaMeshShapes":
+        reasons.append("soma_backend_not_somameshshapes")
+    if bool(source_report.get("skeleton_fallback_used", False)):
+        reasons.append("soma_skeleton_fallback_used")
+    if int(source_meta.get("vertices", 0) or 0) <= 0:
+        reasons.append("soma_mesh_vertices_missing")
+    if int(source_meta.get("triangles_loaded", 0) or 0) <= 0:
+        reasons.append("soma_mesh_triangles_missing")
+    if source_meta.get("not_capsule_bvh_visualizer") is not True:
+        reasons.append("soma_not_capsule_marker_missing")
+
+    for label, path in (
+        ("soma_video", source_video),
+        ("g1_target_video", target_video),
+        ("g1_kinematics_video", inference_video),
+    ):
+        if not path.exists() or path.stat().st_size <= 0:
+            reasons.append(f"{label}_missing")
+
+    for label, asset_report in (
+        ("g1_target_motion", target_motion_asset_report),
+        ("g1_kinematics_motion", motion_asset_report),
+    ):
+        path_text = str(asset_report.get("path", ""))
+        sha_text = str(asset_report.get("sha256", ""))
+        if not path_text:
+            reasons.append(f"{label}_path_missing")
+            continue
+        path = Path(path_text)
+        if not path.exists() or path.stat().st_size <= 0:
+            reasons.append(f"{label}_file_missing")
+            continue
+        if len(sha_text) != 64:
+            reasons.append(f"{label}_sha256_missing")
+        elif _file_sha256(path) != sha_text:
+            reasons.append(f"{label}_sha256_mismatch")
+
+    if combine_report.get("status") != "ok":
+        reasons.append(f"combined_status={combine_report.get('status', 'missing')}")
+    return reasons
 
 
 def resolve_g1_usd_path(
