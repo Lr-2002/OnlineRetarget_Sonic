@@ -8,13 +8,16 @@ from pathlib import Path
 import tempfile
 import unittest
 
+import online_retarget.isaac_src_replay as isaac_src_replay_module
 from online_retarget.isaac_src_replay import (
     SCHEMA_VERSION,
     SONIC_JOINT_NAMES,
     default_replay_config,
+    export_replay_packets,
     inspect_paired_state_h5,
     main,
     packet_schema_payload,
+    PairedStateData,
     replay_config_from_mapping,
     run_dry_or_blocked_export,
     validate_artifact_summary,
@@ -236,9 +239,14 @@ class IsaacSrcReplayContractTests(unittest.TestCase):
 
         self.assertEqual(manifest["status"], "completed")
         self.assertEqual(manifest["export_result"]["packets_written"], 2)
+        self.assertEqual(manifest["export_result"]["lifecycle_exit_strategy"], "normal_context_exit")
         self.assertEqual(persisted_manifest["status"], "completed")
         self.assertEqual(persisted_manifest["runtime_blocker"], "")
         self.assertEqual(persisted_manifest["export_result"]["packets_written"], 2)
+        self.assertEqual(
+            persisted_manifest["export_result"]["lifecycle_exit_strategy"],
+            "normal_context_exit",
+        )
         self.assertTrue(persisted_manifest["packet_jsonl_exists"])
         self.assertGreater(persisted_manifest["packet_jsonl_bytes"], 0)
         self.assertEqual(len(packets), 2)
@@ -317,6 +325,92 @@ class IsaacSrcReplayContractTests(unittest.TestCase):
 
         self.assertEqual(reading.status, "blocked")
         self.assertIsNone(reading.force_n)
+
+    def test_hard_exit_backend_persists_completed_manifest_before_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "out"
+            packet_jsonl = output_dir / "isaac_src_packets.jsonl"
+            manifest = {
+                "status": "ready",
+                "runtime_blocker": "pre-export",
+                "packet_jsonl": str(packet_jsonl),
+            }
+            config = default_replay_config()
+            state = _minimal_paired_state(frames=1)
+            exit_calls = 0
+            original_exit = isaac_src_replay_module._exit_process_success
+
+            def completion_callback(export_result):
+                manifest["status"] = "completed"
+                manifest["runtime_blocker"] = ""
+                manifest["export_result"] = export_result
+                manifest["packet_jsonl_exists"] = packet_jsonl.exists()
+                manifest["packet_jsonl_bytes"] = (
+                    packet_jsonl.stat().st_size if packet_jsonl.exists() else 0
+                )
+                (output_dir / "replay_manifest.json").write_text(
+                    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+
+            def fake_exit() -> None:
+                nonlocal exit_calls
+                exit_calls += 1
+                raise SystemExit(0)
+
+            try:
+                isaac_src_replay_module._exit_process_success = fake_exit
+                with self.assertRaises(SystemExit) as raised:
+                    export_replay_packets(
+                        config=config,
+                        state=state,
+                        output_dir=output_dir,
+                        max_frames=1,
+                        backend_factory=lambda replay_config: _HardExitReplayBackend(
+                            replay_config
+                        ),
+                        completion_callback=completion_callback,
+                    )
+            finally:
+                isaac_src_replay_module._exit_process_success = original_exit
+
+            persisted_manifest = json.loads(
+                (output_dir / "replay_manifest.json").read_text(encoding="utf-8")
+            )
+            packets = (output_dir / "isaac_src_packets.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(exit_calls, 1)
+        self.assertEqual(persisted_manifest["status"], "completed")
+        self.assertEqual(persisted_manifest["runtime_blocker"], "")
+        self.assertEqual(persisted_manifest["export_result"]["packets_written"], 1)
+        self.assertEqual(
+            persisted_manifest["export_result"]["lifecycle_exit_strategy"],
+            "os._exit(0)_after_completed_manifest",
+        )
+        self.assertTrue(persisted_manifest["packet_jsonl_exists"])
+        self.assertGreater(persisted_manifest["packet_jsonl_bytes"], 0)
+        self.assertEqual(len(packets), 1)
+
+
+def _minimal_paired_state(*, frames: int) -> PairedStateData:
+    root_pos = [[0.0, 0.0, 0.8 + frame * 0.01] for frame in range(frames)]
+    root_quat = [[1.0, 0.0, 0.0, 0.0] for _frame in range(frames)]
+    joint_q = [[frame * 0.1 for _joint in range(29)] for frame in range(frames)]
+    return PairedStateData(
+        frame_count=frames,
+        fps=50.0,
+        joint_names=SONIC_JOINT_NAMES,
+        pred_root_pos_world_m=root_pos,
+        target_root_pos_world_m=root_pos,
+        pred_root_quat_wxyz=root_quat,
+        target_root_quat_wxyz=root_quat,
+        pred_joint_q_rad=joint_q,
+        target_joint_q_rad=joint_q,
+    )
 
 
 def _write_valid_paired_h5(path: Path, *, frames: int) -> None:
@@ -400,6 +494,10 @@ class _FakeReplayBackend:
             "backend": "fake_isaaclab_contact_backend",
             "frames_collected": len(self.frames),
         }
+
+
+class _HardExitReplayBackend(_FakeReplayBackend):
+    requires_hard_exit_after_success = True
 
 
 class _FakeContactSensor:

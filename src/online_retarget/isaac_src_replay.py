@@ -635,6 +635,12 @@ def _write_json_file(path: Path, payload: Mapping[str, Any]) -> None:
         os.close(directory_fd)
 
 
+def _exit_process_success() -> None:
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
+
+
 def acceptance_smoke(*, config: ReplayConfig, output_dir: Path, max_frames: int = 64) -> str:
     return (
         f"cd {DEFAULT_5090_REPO} && "
@@ -820,6 +826,9 @@ def export_replay_packets(
                 packet_file.write(json.dumps(packet, sort_keys=True) + "\n")
                 packets_written += 1
         backend_report = backend.report()
+        hard_exit_after_success = bool(
+            getattr(backend, "requires_hard_exit_after_success", False)
+        )
         export_result = {
             "backend": backend_report,
             "packet_jsonl": str(packet_path),
@@ -828,14 +837,23 @@ def export_replay_packets(
             "packets_written": packets_written,
             "frame_limit": frame_limit,
             "fps": float(state.fps),
+            "lifecycle_exit_strategy": (
+                "os._exit(0)_after_completed_manifest"
+                if hard_exit_after_success
+                else "normal_context_exit"
+            ),
         }
         if completion_callback is not None:
             completion_callback(export_result)
+        if hard_exit_after_success:
+            _exit_process_success()
     return export_result
 
 
 class IsaacLabReplayBackend:
     """Bounded IsaacLab replay backend used only for non-dry packet extraction."""
+
+    requires_hard_exit_after_success = True
 
     def __init__(self, config: ReplayConfig, *, device: str = "cuda:0") -> None:
         self.config = config
