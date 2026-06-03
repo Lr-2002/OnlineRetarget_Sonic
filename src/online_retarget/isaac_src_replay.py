@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import sys
 from typing import Any, Callable, Mapping, Protocol, Sequence
@@ -475,14 +476,8 @@ def build_manifest(
             "$ISAAC_PYTHON after Code Reviewer approves this contact/body-pair binding."
         ),
     }
-    (output_dir / "packet_schema.json").write_text(
-        json.dumps(packet_schema, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    (output_dir / "replay_manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    _write_json_file(output_dir / "packet_schema.json", packet_schema)
+    _write_json_file(output_dir / "replay_manifest.json", manifest)
     if dry_run:
         packet_jsonl.write_text("", encoding="utf-8")
     return manifest
@@ -606,6 +601,40 @@ def artifact_summary_payload(summary: ArtifactSummary) -> dict[str, Any]:
     return payload
 
 
+def _mark_manifest_completed(
+    *,
+    manifest: dict[str, Any],
+    export_result: dict[str, Any],
+) -> None:
+    packet_jsonl = Path(str(manifest["packet_jsonl"]))
+    manifest["status"] = "completed"
+    manifest["runtime_blocker"] = ""
+    manifest["export_result"] = export_result
+    manifest["packet_jsonl_exists"] = packet_jsonl.exists()
+    manifest["packet_jsonl_bytes"] = (
+        packet_jsonl.stat().st_size if packet_jsonl.exists() else 0
+    )
+
+
+def _write_json_file(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    tmp_path.replace(path)
+    try:
+        directory_fd = os.open(str(path.parent), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def acceptance_smoke(*, config: ReplayConfig, output_dir: Path, max_frames: int = 64) -> str:
     return (
         f"cd {DEFAULT_5090_REPO} && "
@@ -635,6 +664,15 @@ def run_dry_or_blocked_export(args: argparse.Namespace) -> dict[str, Any]:
         return manifest
     if manifest["status"] == "blocked":
         return manifest
+    manifest_path = args.output_dir / "replay_manifest.json"
+
+    def persist_completed_manifest(export_result: dict[str, Any]) -> None:
+        _mark_manifest_completed(
+            manifest=manifest,
+            export_result=export_result,
+        )
+        _write_json_file(manifest_path, manifest)
+
     try:
         state = load_paired_state_data(
             Path(config.paired_state_h5),
@@ -653,29 +691,15 @@ def run_dry_or_blocked_export(args: argparse.Namespace) -> dict[str, Any]:
             output_dir=args.output_dir,
             max_frames=args.max_frames,
             backend_factory=backend_factory,
+            completion_callback=persist_completed_manifest,
         )
     except Exception as exc:
         manifest["status"] = "blocked"
         manifest["blocked"] = f"IsaacLab replay extraction failed: {type(exc).__name__}: {exc}"
-        (args.output_dir / "replay_manifest.json").write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        _write_json_file(manifest_path, manifest)
         return manifest
 
-    manifest["status"] = "completed"
-    manifest["runtime_blocker"] = ""
-    manifest["export_result"] = export_result
-    manifest["packet_jsonl_exists"] = Path(manifest["packet_jsonl"]).exists()
-    manifest["packet_jsonl_bytes"] = (
-        Path(manifest["packet_jsonl"]).stat().st_size
-        if Path(manifest["packet_jsonl"]).exists()
-        else 0
-    )
-    (args.output_dir / "replay_manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    persist_completed_manifest(export_result)
     return manifest
 
 
@@ -698,7 +722,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     manifest = run_dry_or_blocked_export(args)
     print(json.dumps(manifest, indent=2, sort_keys=True))
-    return 0 if manifest.get("status") in {"dry_run", "ready", "completed"} else 2
+    return 0 if manifest.get("status") in {"dry_run", "completed"} else 2
 
 
 def load_paired_state_data(
@@ -753,6 +777,7 @@ def export_replay_packets(
     output_dir: Path,
     max_frames: int,
     backend_factory: Callable[[ReplayConfig], ReplayBackend],
+    completion_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     packet_path = output_dir / "isaac_src_packets.jsonl"
@@ -760,6 +785,7 @@ def export_replay_packets(
     dt = 1.0 / float(state.fps)
     packets_written = 0
     backend_report: dict[str, Any] = {}
+    export_result: dict[str, Any] = {}
     with backend_factory(config) as backend:
         with packet_path.open("w", encoding="utf-8") as packet_file:
             for frame_idx in range(frame_limit):
@@ -794,13 +820,18 @@ def export_replay_packets(
                 packet_file.write(json.dumps(packet, sort_keys=True) + "\n")
                 packets_written += 1
         backend_report = backend.report()
-    return {
-        "backend": backend_report,
-        "packet_jsonl": str(packet_path),
-        "packets_written": packets_written,
-        "frame_limit": frame_limit,
-        "fps": float(state.fps),
-    }
+        export_result = {
+            "backend": backend_report,
+            "packet_jsonl": str(packet_path),
+            "packet_jsonl_exists": packet_path.exists(),
+            "packet_jsonl_bytes": packet_path.stat().st_size if packet_path.exists() else 0,
+            "packets_written": packets_written,
+            "frame_limit": frame_limit,
+            "fps": float(state.fps),
+        }
+        if completion_callback is not None:
+            completion_callback(export_result)
+    return export_result
 
 
 class IsaacLabReplayBackend:

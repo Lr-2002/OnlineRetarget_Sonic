@@ -230,9 +230,17 @@ class IsaacSrcReplayContractTests(unittest.TestCase):
                     encoding="utf-8"
                 ).splitlines()
             ]
+            persisted_manifest = json.loads(
+                (output_dir / "replay_manifest.json").read_text(encoding="utf-8")
+            )
 
         self.assertEqual(manifest["status"], "completed")
         self.assertEqual(manifest["export_result"]["packets_written"], 2)
+        self.assertEqual(persisted_manifest["status"], "completed")
+        self.assertEqual(persisted_manifest["runtime_blocker"], "")
+        self.assertEqual(persisted_manifest["export_result"]["packets_written"], 2)
+        self.assertTrue(persisted_manifest["packet_jsonl_exists"])
+        self.assertGreater(persisted_manifest["packet_jsonl_bytes"], 0)
         self.assertEqual(len(packets), 2)
         self.assertEqual(
             packets[0]["pred"]["foot_ground_contact_pairs"][0]["body_a"],
