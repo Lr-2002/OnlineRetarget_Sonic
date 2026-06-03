@@ -40,6 +40,22 @@ class LR177VisualizationContractTests(unittest.TestCase):
                 self.assertIn(str(retargeter_root), sys.path)
                 self.assertIn(str(retargeter_root / "src"), sys.path)
 
+    def test_somamesh_renderer_preflight_blocks_missing_dependency_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = render_somamesh_source.preflight_somamesh_renderer(
+                retargeter_root=root / "missing-soma-retargeter",
+                usd_path=root / "missing-soma-base.usd",
+            )
+
+            self.assertEqual(report["status"], "blocked")
+            self.assertIn("soma_retargeter_root_missing", report["failure_reasons"])
+            self.assertIn("soma_usd_missing", report["failure_reasons"])
+            self.assertIn("soma_retargeter_import_failed", report["failure_reasons"])
+            message = render_somamesh_source.format_somamesh_preflight_error(report)
+            self.assertIn("SomaMeshShapes renderer preflight blocked before rendering", message)
+            self.assertIn("missing-soma-retargeter", message)
+
     def test_training_visual_gate_passes_somamesh_pythonpath_env(self) -> None:
         text = (REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py").read_text(encoding="utf-8")
 
@@ -49,6 +65,12 @@ class LR177VisualizationContractTests(unittest.TestCase):
         self.assertIn('retargeter_root / "src"', text)
         self.assertIn("paths.extend([str(ROOT), str(SRC_ROOT)])", text)
         self.assertIn('env["PYTHONPATH"] = os.pathsep.join(deduped_paths)', text)
+        self.assertIn("def preflight_acceptance_somamesh_visual_validation", text)
+        self.assertIn("preflight_acceptance_somamesh_visual_validation(config, output_dir, runtime)", text)
+        self.assertIn("--preflight-only", text)
+        self.assertIn("soma_retargeter_root", text)
+        self.assertIn("somamesh_usd", text)
+        self.assertIn("accepted SomaMeshShapes renderer preflight blocked before training", text)
 
     def test_isaac_renderer_exposes_ground_and_framing_contract(self) -> None:
         text = ISAAC_RENDERER.read_text(encoding="utf-8")

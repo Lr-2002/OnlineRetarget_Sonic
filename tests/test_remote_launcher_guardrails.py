@@ -186,6 +186,8 @@ class A0TwoGpuAcceptedVisualizationConfigTests(unittest.TestCase):
                 self.assertIs(visual["acceptance_backend"], True)
                 self.assertEqual(visual["isaac_python_bin"], "/workspace/isaaclab/_isaac_sim/python.sh")
                 self.assertEqual(visual["isaac_render_script"], "scripts/render_g1_isaac_pair.py")
+                self.assertEqual(visual["soma_retargeter_root"], "MUST_CONFIGURE_5090_SOMA_RETARGETER_ROOT")
+                self.assertEqual(visual["somamesh_usd"], "MUST_CONFIGURE_5090_SOMA_BASE_SKEL_MINIMAL_USD")
                 self.assertIn("g1_robot_usd", visual)
                 self.assertIn("--nproc-per-node=2", config["validation_command"])
                 self.assertIn(f"--config configs/{path.name}", config["validation_command"])

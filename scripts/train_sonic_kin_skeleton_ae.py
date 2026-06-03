@@ -3783,6 +3783,118 @@ def _render_somamesh_shapes_source_video(
     return report
 
 
+def _is_unresolved_somamesh_path(value: str) -> bool:
+    normalized = value.strip().lower()
+    return (
+        not normalized
+        or "must_configure" in normalized
+        or normalized.startswith("<")
+        or normalized.startswith("${")
+        or normalized in {"todo", "required", "none", "null"}
+    )
+
+
+def _required_somamesh_path(cfg: Mapping[str, Any], keys: Sequence[str], label: str) -> Path:
+    selected_key = ""
+    selected_value: Any = None
+    for key in keys:
+        if cfg.get(key):
+            selected_key = key
+            selected_value = cfg[key]
+            break
+    if selected_value is None:
+        names = " or ".join(f"visual_validation.{key}" for key in keys)
+        raise RuntimeError(f"{names} is required for accepted SomaMeshShapes visual validation")
+
+    value = str(selected_value)
+    if _is_unresolved_somamesh_path(value):
+        raise RuntimeError(f"visual_validation.{selected_key} is an unresolved {label} placeholder: {value}")
+    path = Path(value)
+    if not path.exists():
+        raise FileNotFoundError(f"visual_validation.{selected_key} is missing: {path}")
+    return path
+
+
+def _somamesh_renderer_script_path(cfg: Mapping[str, Any]) -> Path:
+    script_path = Path(
+        str(cfg.get("soma_render_script") or cfg.get("somamesh_render_script") or ROOT / "scripts" / "render_somamesh_source.py")
+    )
+    if not script_path.is_absolute():
+        script_path = ROOT / script_path
+    if not script_path.exists():
+        raise FileNotFoundError(f"visual_validation.soma_render_script is missing: {script_path}")
+    return script_path
+
+
+def preflight_acceptance_somamesh_visual_validation(
+    config: Mapping[str, Any],
+    output_dir: Path,
+    runtime: Mapping[str, Any] | None = None,
+) -> None:
+    cfg = config.get("visual_validation", {})
+    if not isinstance(cfg, Mapping) or not cfg.get("enabled", False) or not cfg.get("acceptance_backend", False):
+        return
+    if config.get("input_data", {}).get("format") != "soma_motionlib":
+        raise RuntimeError("accepted SomaMeshShapes visual validation requires input_data.format=soma_motionlib")
+
+    retargeter_root = _required_somamesh_path(cfg, ("soma_retargeter_root",), "soma_retargeter_root")
+    soma_usd = _required_somamesh_path(cfg, ("somamesh_usd", "soma_usd"), "Soma USD")
+    script_path = _somamesh_renderer_script_path(cfg)
+    python_bin = str(cfg.get("soma_python_bin") or cfg.get("somamesh_python_bin") or sys.executable)
+    rank = int(runtime.get("rank", 0)) if runtime is not None else 0
+    preflight_dir = output_dir / "logs" / "somamesh_preflight"
+    preflight_dir.mkdir(parents=True, exist_ok=True)
+    report_path = preflight_dir / f"rank_{rank:02d}.json"
+    output_path = preflight_dir / f"rank_{rank:02d}.mp4"
+    command = [
+        python_bin,
+        str(script_path),
+        "--preflight-only",
+        "--output",
+        str(output_path),
+        "--report",
+        str(report_path),
+        "--retargeter-root",
+        str(retargeter_root),
+        "--soma-usd",
+        str(soma_usd),
+    ]
+    timeout = float(cfg.get("somamesh_preflight_timeout_sec", 60.0))
+    try:
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            env=_somamesh_renderer_env(cfg),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "accepted SomaMeshShapes renderer preflight timed out before training; "
+            f"command={command}; stdout_tail={str(exc.stdout or '')[-1000:]}; "
+            f"stderr_tail={str(exc.stderr or '')[-1000:]}"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(
+            "accepted SomaMeshShapes renderer preflight could not start before training; "
+            f"command={command}; error={exc}"
+        ) from exc
+    if result.returncode != 0:
+        report: dict[str, Any] = {}
+        if report_path.exists():
+            try:
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                report = {}
+        raise RuntimeError(
+            "accepted SomaMeshShapes renderer preflight blocked before training; "
+            f"returncode={result.returncode}; command={command}; report={report}; "
+            f"stdout_tail={result.stdout[-1000:]}; stderr_tail={result.stderr[-1000:]}"
+        )
+
+
 def _somamesh_renderer_env(cfg: Mapping[str, Any]) -> dict[str, str]:
     env = os.environ.copy()
     paths: list[str] = []
@@ -4632,6 +4744,8 @@ def validate_runtime(
                 path = Path(str(cfg[key]))
                 if not path.exists():
                     raise FileNotFoundError(f"skeleton_ae.{key} is missing: {path}")
+    if not index_only:
+        preflight_acceptance_somamesh_visual_validation(config, output_dir, runtime)
     if runtime is not None and not is_main_process(runtime):
         return
     if config["runtime"].get("require_committed_code", True):
