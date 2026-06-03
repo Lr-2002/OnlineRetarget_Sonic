@@ -8,6 +8,7 @@ validation clips.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -371,6 +372,7 @@ class A0VisualValidationRenderer:
         return {
             "status": "ok",
             "path": str(out),
+            "sha256": _file_sha256(out),
             "format": "npz",
             "frames": int(frame_count),
             "fps": float(fps),
@@ -658,6 +660,14 @@ def _positive_float(value: float | None, default: float) -> float:
     except (TypeError, ValueError):
         parsed = float(default)
     return parsed if parsed > 0 else float(default)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _run_isaaclab_renderer_bounded(

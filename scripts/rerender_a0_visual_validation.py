@@ -104,6 +104,8 @@ def main() -> None:
     state = checkpoint.get("model", checkpoint)
     model.load_state_dict(state)
     step = int(args.step if args.step is not None else checkpoint.get("step", 0))
+    visual_cfg["checkpoint_path"] = str(args.checkpoint)
+    visual_cfg["checkpoint_step"] = int(step)
 
     metrics = kin.run_visual_validation(
         model=model,

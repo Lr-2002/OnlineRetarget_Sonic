@@ -3430,14 +3430,17 @@ def _render_motionlib_acceptance_visual_validation_clip(
     del render_deps, g1_model
     cfg = config.get("visual_validation", {})
     clip_name = _safe_filename(str(row.get("filename") or Path(str(row["relative_path"])).stem))
-    clip_dir = output_dir / f"{index:02d}_{clip_name}"
+    sample_id = clip_name
+    step_id = f"step_{step:08d}"
+    clip_dir = output_dir / "accepted_vertical_v2"
     clip_dir.mkdir(parents=True, exist_ok=True)
 
-    source_video = clip_dir / "01_soma_somameshshapes.mp4"
-    target_video = clip_dir / "02_g1_target_playback_isaaclab.mp4"
-    inference_video = clip_dir / "03_g1_kinematics_playback_isaaclab.mp4"
-    combined_video = clip_dir / "accepted_vertical_soma_target_kinematics.mp4"
-    metadata_path = clip_dir / "metadata.json"
+    artifact_stem = f"{sample_id}__{step_id}__vertical_somamesh_g1target_g1kinematics"
+    source_video = clip_dir / f"{sample_id}__{step_id}__row1_soma_somamesh.mp4"
+    target_video = clip_dir / f"{sample_id}__{step_id}__row2_g1_target_isaaclab.mp4"
+    inference_video = clip_dir / f"{sample_id}__{step_id}__row3_g1_kinematics_isaaclab.mp4"
+    combined_video = clip_dir / f"{artifact_stem}.mp4"
+    metadata_path = clip_dir / f"{artifact_stem}.json"
     visual_renderer = A0VisualValidationRenderer(config)
 
     arrays = load_soma_motionlib_arrays(row, config)
@@ -3449,24 +3452,31 @@ def _render_motionlib_acceptance_visual_validation_clip(
     render_width = int(cfg.get("width", 640))
     render_height = int(cfg.get("height", 360))
 
-    joint_names = list(arrays.get("joint_names", SOMA_JOINT_NAMES))
-    source_report = visual_renderer.render_somamesh_global_source_video(
-        frames=visual_renderer.soma_motionlib_source_frames(arrays["soma_joints"][:frame_count], joint_names),
-        edges=_soma_edges(arrays.get("joint_names")),
+    source_bvh = _resolve_source_bvh(row, config, output_dir)
+    source_report = _render_somamesh_shapes_source_video(
+        cfg=cfg,
+        source_bvh=source_bvh,
         video_path=source_video,
+        report_path=source_video.with_suffix(".json"),
         fps=fps,
+        frame_count=frame_count,
         width=render_width,
         height=render_height,
-        label="Soma",
+        title="Soma",
     )
     source_report.update(
         {
             "panel": "Soma",
+            "sample_id": sample_id,
             "source_coordinate_frame": "global_soma_display",
             "source_display_transform": SOMA_DISPLAY_TRANSFORM,
+            "backend": "SomaMeshShapes",
             "render_backend": ACCEPTANCE_SOURCE_BACKEND,
-            "required_renderer": "SomaMeshShapes",
+            "soma_backend": "SomaMeshShapes",
+            "skeleton_fallback_used": False,
             "skeleton_capsule_fallback": "disabled",
+            "source_bvh": str(source_bvh) if source_bvh is not None else "",
+            "source_bvh_sha256": _path_sha256(source_bvh) if source_bvh is not None and source_bvh.exists() else "",
         }
     )
 
@@ -3497,8 +3507,13 @@ def _render_motionlib_acceptance_visual_validation_clip(
     target_report.update(
         {
             "panel": "G1 Target Playback",
+            "sample_id": sample_id,
+            "backend": "IsaacLab",
             "render_backend": ACCEPTANCE_G1_BACKEND,
             "data_source": "motionlib_target",
+            "target_motion_path": target_motion_asset_report["path"],
+            "target_motion_sha256": target_motion_asset_report["sha256"],
+            "capsule_renderer_used": False,
         }
     )
 
@@ -3539,8 +3554,15 @@ def _render_motionlib_acceptance_visual_validation_clip(
     inference_report.update(
         {
             "panel": "G1 Kinematics Playback",
+            "sample_id": sample_id,
+            "backend": "IsaacLab",
             "render_backend": ACCEPTANCE_G1_BACKEND,
             "data_source": "model_prediction",
+            "prediction_motion_path": motion_asset_report["path"],
+            "prediction_motion_sha256": motion_asset_report["sha256"],
+            "checkpoint": str(cfg.get("checkpoint_path", "")),
+            "checkpoint_step": int(cfg.get("checkpoint_step", step)),
+            "capsule_renderer_used": False,
         }
     )
 
@@ -3566,33 +3588,52 @@ def _render_motionlib_acceptance_visual_validation_clip(
         "index": index,
         "filename": row.get("filename", ""),
         "relative_path": row.get("relative_path", ""),
-        "source_bvh": str(row.get("source_soma_proportional_path") or row.get("source_bvh") or ""),
+        "sample_id": sample_id,
+        "source_bvh": str(source_bvh) if source_bvh is not None else "",
         "fps": fps,
         "frames": frame_count,
         "duration_sec": frame_count / fps if fps > 0 else 0.0,
+        "time_alignment": {
+            "sample_id": sample_id,
+            "fps": fps,
+            "frames": frame_count,
+            "frame_range": [0, max(0, frame_count - 1)],
+            "all_rows_share_sample_frame_fps": True,
+        },
         "accepted_visual_contract": {
             "layout": "vertical",
+            "artifact_version": "accepted_vertical_v2",
+            "artifact_dir": str(clip_dir),
             "combined_artifact": str(combined_video),
             "panel_order": ["Soma", "G1 Target Playback", "G1 Kinematics Playback"],
             "panels": [
                 {
                     "name": "Soma",
                     "artifact": str(source_video),
-                    "backend": ACCEPTANCE_SOURCE_BACKEND,
-                    "required_renderer": "SomaMeshShapes",
-                    "skeleton_capsule_fallback": "disabled",
+                    "backend": "SomaMeshShapes",
+                    "soma_backend": "SomaMeshShapes",
+                    "skeleton_fallback_used": False,
+                    "mesh_skinning_metadata": source_report.get("mesh_skinning_metadata", {}),
                 },
                 {
                     "name": "G1 Target Playback",
                     "artifact": str(target_video),
-                    "backend": ACCEPTANCE_G1_BACKEND,
+                    "backend": "IsaacLab",
+                    "render_backend": ACCEPTANCE_G1_BACKEND,
                     "data_source": "motionlib_target",
+                    "motion_path": target_motion_asset_report["path"],
+                    "motion_sha256": target_motion_asset_report["sha256"],
                 },
                 {
                     "name": "G1 Kinematics Playback",
                     "artifact": str(inference_video),
-                    "backend": ACCEPTANCE_G1_BACKEND,
+                    "backend": "IsaacLab",
+                    "render_backend": ACCEPTANCE_G1_BACKEND,
                     "data_source": "model_prediction",
+                    "motion_path": motion_asset_report["path"],
+                    "motion_sha256": motion_asset_report["sha256"],
+                    "checkpoint": str(cfg.get("checkpoint_path", "")),
+                    "checkpoint_step": int(cfg.get("checkpoint_step", step)),
                 },
             ],
         },
@@ -3625,6 +3666,175 @@ def _render_motionlib_acceptance_visual_validation_clip(
             metadata["visual_backend"]["active_backend_is_acceptance_backend"]
         ),
     }
+
+
+def _render_somamesh_shapes_source_video(
+    *,
+    cfg: Mapping[str, Any],
+    source_bvh: Path | None,
+    video_path: Path,
+    report_path: Path,
+    fps: float,
+    frame_count: int,
+    width: int,
+    height: int,
+    title: str,
+) -> dict[str, Any]:
+    if source_bvh is None:
+        return {
+            "status": "failed",
+            "message": "accepted Soma row requires a resolvable source BVH for SomaMeshShapes rendering",
+            "soma_backend": "SomaMeshShapes",
+            "skeleton_fallback_used": False,
+            "failure_reasons": ["source_bvh_missing"],
+        }
+    if not source_bvh.exists():
+        return {
+            "status": "failed",
+            "message": f"accepted Soma source BVH is missing: {source_bvh}",
+            "soma_backend": "SomaMeshShapes",
+            "skeleton_fallback_used": False,
+            "failure_reasons": ["source_bvh_missing"],
+            "source_bvh": str(source_bvh),
+        }
+
+    python_bin = str(cfg.get("soma_python_bin") or cfg.get("somamesh_python_bin") or sys.executable)
+    script_path = Path(str(cfg.get("soma_render_script") or cfg.get("somamesh_render_script") or ROOT / "scripts" / "render_somamesh_source.py"))
+    command = [
+        python_bin,
+        str(script_path),
+        "--bvh",
+        str(source_bvh),
+        "--output",
+        str(video_path),
+        "--report",
+        str(report_path),
+        "--fps",
+        f"{float(fps):g}",
+        "--frame-count",
+        str(int(frame_count)),
+        "--width",
+        str(int(width)),
+        "--height",
+        str(int(height)),
+        "--stride-triangles",
+        str(int(cfg.get("somamesh_triangle_stride", 3))),
+        "--title",
+        str(title),
+    ]
+    if cfg.get("soma_retargeter_root"):
+        command.extend(["--retargeter-root", str(cfg["soma_retargeter_root"])])
+    if cfg.get("somamesh_usd") or cfg.get("soma_usd"):
+        command.extend(["--soma-usd", str(cfg.get("somamesh_usd") or cfg.get("soma_usd"))])
+
+    timeout = float(cfg.get("somamesh_render_timeout_sec", 900.0))
+    try:
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": "failed",
+            "message": "SomaMeshShapes renderer timed out",
+            "soma_backend": "SomaMeshShapes",
+            "skeleton_fallback_used": False,
+            "command": command,
+            "stdout_tail": str(exc.stdout or "")[-1000:],
+            "stderr_tail": str(exc.stderr or "")[-1000:],
+            "failure_reasons": ["somamesh_renderer_timeout"],
+        }
+
+    if result.returncode != 0:
+        return {
+            "status": "failed",
+            "message": "SomaMeshShapes renderer failed",
+            "soma_backend": "SomaMeshShapes",
+            "skeleton_fallback_used": False,
+            "command": command,
+            "returncode": int(result.returncode),
+            "stdout_tail": result.stdout[-1000:],
+            "stderr_tail": result.stderr[-1000:],
+            "failure_reasons": [f"somamesh_renderer_returncode={result.returncode}"],
+        }
+    if not report_path.exists():
+        return {
+            "status": "failed",
+            "message": "SomaMeshShapes renderer did not write a report",
+            "soma_backend": "SomaMeshShapes",
+            "skeleton_fallback_used": False,
+            "command": command,
+            "returncode": int(result.returncode),
+            "failure_reasons": ["somamesh_report_missing"],
+        }
+
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "status": "failed",
+            "message": f"SomaMeshShapes renderer report is unreadable: {exc}",
+            "soma_backend": "SomaMeshShapes",
+            "skeleton_fallback_used": False,
+            "command": command,
+            "returncode": int(result.returncode),
+            "failure_reasons": ["somamesh_report_unreadable"],
+        }
+
+    renderer_status = report.get("status")
+    vertices = int(report.get("vertices", 0) or 0)
+    triangles = int(report.get("triangles_loaded", 0) or 0)
+    not_capsule = bool(report.get("not_capsule_bvh_visualizer", False))
+    video_exists = video_path.exists() and video_path.stat().st_size > 0
+    mesh_ok = renderer_status == "ok" and vertices > 0 and triangles > 0 and not_capsule and video_exists
+    report.update(
+        {
+            "status": "ok" if mesh_ok else "failed",
+            "soma_backend": "SomaMeshShapes",
+            "backend": "SomaMeshShapes",
+            "render_backend": ACCEPTANCE_SOURCE_BACKEND,
+            "skeleton_fallback_used": False,
+            "source_bvh": str(source_bvh),
+            "source_bvh_sha256": _path_sha256(source_bvh),
+            "video_path": str(video_path),
+            "report_path": str(report_path),
+            "command": command,
+            "returncode": int(result.returncode),
+            "mesh_skinning_metadata": {
+                "vertices": vertices,
+                "triangles_loaded": triangles,
+                "triangles_drawn_per_frame": int(report.get("triangles_drawn_per_frame", 0) or 0),
+                "renderer": str(report.get("renderer", "")),
+                "not_capsule_bvh_visualizer": not_capsule,
+            },
+        }
+    )
+    if not mesh_ok:
+        report["message"] = "SomaMeshShapes renderer did not produce required mesh/skinning metadata"
+        report["failure_reasons"] = [
+            reason
+            for reason, failed in (
+                ("somamesh_source_status_not_ok", renderer_status != "ok"),
+                ("somamesh_vertices_missing", vertices <= 0),
+                ("somamesh_triangles_missing", triangles <= 0),
+                ("somamesh_not_capsule_marker_missing", not not_capsule),
+                ("somamesh_video_missing", not video_exists),
+            )
+            if failed
+        ]
+    return report
+
+
+def _path_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _render_time_aligned_source_bvh(

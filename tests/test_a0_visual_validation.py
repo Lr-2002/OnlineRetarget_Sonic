@@ -180,6 +180,7 @@ class A0VisualValidationRendererTests(unittest.TestCase):
             with np.load(motion_path) as loaded:
                 self.assertEqual(tuple(loaded["joint_pos"].shape), (3, 29))
                 self.assertEqual(tuple(loaded["root_quat"].shape), (3, 4))
+            self.assertEqual(len(motion_report["sha256"]), 64)
 
             fake_script = root / "fake_isaac.py"
             fake_script.write_text(
