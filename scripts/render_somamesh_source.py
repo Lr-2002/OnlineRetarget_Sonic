@@ -9,13 +9,15 @@ mesh data is available.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -26,7 +28,7 @@ DEFAULT_SOMA_USD = Path("/home/user/data/motion_data/soma_shapes/soma_base_rig/s
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bvh", type=Path, required=True)
+    parser.add_argument("--bvh", type=Path, default=None)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument("--retargeter-root", type=Path, default=DEFAULT_RETARGETER_ROOT)
@@ -37,7 +39,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=540)
     parser.add_argument("--stride-triangles", type=int, default=3)
     parser.add_argument("--title", default="")
+    parser.add_argument("--preflight-only", action="store_true", help="Check renderer dependencies and exit.")
     return parser.parse_args()
+
+
+class SomaMeshPreflightError(RuntimeError):
+    def __init__(self, report: dict[str, Any]) -> None:
+        self.report = report
+        super().__init__(format_somamesh_preflight_error(report))
 
 
 def soma_retargeter_python_paths(root: Path) -> list[Path]:
@@ -56,6 +65,56 @@ def load_soma_retargeter(root: Path) -> None:
         path_text = str(path)
         if path_text not in sys.path:
             sys.path.insert(0, path_text)
+
+
+def preflight_somamesh_renderer(*, retargeter_root: Path, usd_path: Path) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "status": "ok",
+        "stage": "somamesh_renderer_preflight",
+        "python": sys.executable,
+        "cwd": os.getcwd(),
+        "retargeter_root": str(retargeter_root),
+        "retargeter_python_paths": [str(path) for path in soma_retargeter_python_paths(retargeter_root)],
+        "soma_usd": str(usd_path),
+        "failure_reasons": [],
+        "dependency_status": {},
+    }
+
+    if not retargeter_root.exists():
+        report["failure_reasons"].append("soma_retargeter_root_missing")
+    if not usd_path.exists():
+        report["failure_reasons"].append("soma_usd_missing")
+
+    load_soma_retargeter(retargeter_root)
+    if shutil.which("ffmpeg") is None:
+        report["failure_reasons"].append("ffmpeg_missing")
+        report["dependency_status"]["ffmpeg"] = "missing"
+    else:
+        report["dependency_status"]["ffmpeg"] = "ok"
+
+    for module_name in ("PIL", "soma_retargeter", "soma_retargeter.assets.bvh", "soma_retargeter.assets.usd"):
+        try:
+            importlib.import_module(module_name)
+        except Exception as exc:
+            report["dependency_status"][module_name] = f"{type(exc).__name__}: {exc}"
+            report["failure_reasons"].append(f"{module_name}_import_failed")
+        else:
+            report["dependency_status"][module_name] = "ok"
+
+    if report["failure_reasons"]:
+        report["status"] = "blocked"
+    return report
+
+
+def format_somamesh_preflight_error(report: Mapping[str, Any]) -> str:
+    reasons = ", ".join(str(reason) for reason in report.get("failure_reasons", []))
+    return (
+        "SomaMeshShapes renderer preflight blocked before rendering: "
+        f"{reasons or 'unknown'}; "
+        f"retargeter_root={report.get('retargeter_root')}; "
+        f"soma_usd={report.get('soma_usd')}; "
+        f"python={report.get('python')}; cwd={report.get('cwd')}"
+    )
 
 
 def quat_xyzw_to_matrix(q: np.ndarray) -> np.ndarray:
@@ -306,14 +365,15 @@ def render_somamesh_source_panel(
 ) -> dict[str, Any]:
     """Render one SOMA BVH as a skinned SomaMesh panel."""
 
-    if retargeter_root is not None:
-        load_soma_retargeter(retargeter_root)
+    retargeter_root = retargeter_root or DEFAULT_RETARGETER_ROOT
+    usd_path = usd_path or DEFAULT_SOMA_USD
+    preflight = preflight_somamesh_renderer(retargeter_root=retargeter_root, usd_path=usd_path)
+    if preflight["status"] != "ok":
+        raise SomaMeshPreflightError(preflight)
 
     from soma_retargeter.assets.bvh import load_bvh
 
     if mesh_loader is None:
-        if usd_path is None:
-            usd_path = DEFAULT_SOMA_USD
         from soma_retargeter.assets.usd import load_skeletal_mesh_from_usd
 
         def mesh_loader(skeleton: Any) -> Any:
@@ -459,19 +519,32 @@ def render_somamesh_source_panel(
 
 def main() -> None:
     args = parse_args()
-    report = render_somamesh_source_panel(
-        bvh_path=args.bvh,
-        output_path=args.output,
-        fps=args.fps,
-        frame_count=args.frame_count,
-        width=args.width,
-        height=args.height,
-        stride_triangles=args.stride_triangles,
-        title=args.title or args.bvh.stem,
-        retargeter_root=args.retargeter_root,
-        usd_path=args.soma_usd,
-    )
     report_path = args.report or args.output.with_suffix(".json")
+    try:
+        if args.preflight_only:
+            report = preflight_somamesh_renderer(retargeter_root=args.retargeter_root, usd_path=args.soma_usd)
+            if report["status"] != "ok":
+                raise SomaMeshPreflightError(report)
+        else:
+            if args.bvh is None:
+                raise SystemExit("--bvh is required unless --preflight-only is set")
+            report = render_somamesh_source_panel(
+                bvh_path=args.bvh,
+                output_path=args.output,
+                fps=args.fps,
+                frame_count=args.frame_count,
+                width=args.width,
+                height=args.height,
+                stride_triangles=args.stride_triangles,
+                title=args.title or args.bvh.stem,
+                retargeter_root=args.retargeter_root,
+                usd_path=args.soma_usd,
+            )
+    except SomaMeshPreflightError as exc:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(exc.report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(format_somamesh_preflight_error(exc.report), file=sys.stderr)
+        raise SystemExit(2) from exc
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2, sort_keys=True))
 

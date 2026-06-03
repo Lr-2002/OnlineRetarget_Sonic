@@ -174,6 +174,8 @@
     "source_bvh_tar": "/mnt/data_oss/online_retarget/lr147_delta_bvh_vis_data_20260525/back_data/soma_proportional.tar",
     "g1_model_xml": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training/gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml",
     "acceptance_backend": true,
+    "soma_retargeter_root": "MUST_CONFIGURE_5090_SOMA_RETARGETER_ROOT",
+    "somamesh_usd": "MUST_CONFIGURE_5090_SOMA_BASE_SKEL_MINIMAL_USD",
     "g1_robot_usd": "/mnt/data_cpfs/code/wxh/OnlineRetarget/runs/isaaclab_urdf_cache/g1_main/main.usd",
     "isaac_python_bin": "/workspace/isaaclab/_isaac_sim/python.sh",
     "isaac_render_script": "scripts/render_g1_isaac_pair.py"
