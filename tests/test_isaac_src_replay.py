@@ -24,6 +24,7 @@ from online_retarget.isaac_src_replay import (
     validate_artifact_summary,
     validate_replay_config,
     filtered_ground_contact_force_norm,
+    body_pair_contact_filter_body_names,
     foot_ground_contact_sensor_prim_paths,
     IsaacLabReplayBackend,
 )
@@ -439,6 +440,112 @@ class IsaacSrcReplayContractTests(unittest.TestCase):
 
         self.assertEqual(reading.status, "blocked")
         self.assertIsNone(reading.force_n)
+
+    def test_nonzero_filtered_body_body_matrix_emits_contact_and_self_collision(self) -> None:
+        try:
+            import numpy as np  # type: ignore
+        except ImportError:
+            self.skipTest("numpy is required for the body contact regression fixture")
+        config = replay_config_from_mapping(
+            {"body_names": ["pelvis", "torso_link"], "contact": {"foot_links": []}}
+        )
+        backend = IsaacLabReplayBackend(config, device="cpu")
+        backend.body_pair_contact_filters = body_pair_contact_filter_body_names(config)
+        backend.body_pair_contact_sensors = {
+            "pelvis": _FakeContactSensor(
+                net_forces_w=np.asarray([[[0.0, 0.0, 0.0]]], dtype=np.float32),
+                force_matrix_w=np.asarray([[[[0.0, 3.0, 4.0]]]], dtype=np.float32),
+            )
+        }
+
+        payload = backend._body_pair_payload()
+
+        self.assertEqual(payload["body_pair_contact_status"], "available")
+        self.assertEqual(payload["self_collision_status"], "available")
+        self.assertEqual(payload["self_collision_count"], 1)
+        self.assertEqual(payload["body_pair_contacts"][0]["body_a"], "pelvis")
+        self.assertEqual(payload["body_pair_contacts"][0]["body_b"], "torso_link")
+        self.assertAlmostEqual(payload["body_pair_contacts"][0]["force_n"], 5.0)
+        self.assertEqual(
+            payload["body_pair_contacts"][0]["source"],
+            "isaaclab_filtered_force_matrix_w",
+        )
+
+    def test_body_body_ignores_aggregate_net_force_when_filtered_matrix_is_zero(self) -> None:
+        try:
+            import numpy as np  # type: ignore
+        except ImportError:
+            self.skipTest("numpy is required for the body contact regression fixture")
+        config = replay_config_from_mapping(
+            {"body_names": ["pelvis", "torso_link"], "contact": {"foot_links": []}}
+        )
+        backend = IsaacLabReplayBackend(config, device="cpu")
+        backend.body_pair_contact_filters = body_pair_contact_filter_body_names(config)
+        backend.body_pair_contact_sensors = {
+            "pelvis": _FakeContactSensor(
+                net_forces_w=np.asarray([[[999.0, 0.0, 0.0]]], dtype=np.float32),
+                force_matrix_w=np.asarray([[[[0.0, 0.0, 0.0]]]], dtype=np.float32),
+            )
+        }
+
+        payload = backend._body_pair_payload()
+
+        self.assertEqual(payload["body_pair_contact_status"], "available")
+        self.assertEqual(payload["body_pair_contacts"], [])
+        self.assertEqual(payload["self_collision_status"], "available")
+        self.assertEqual(payload["self_collision_count"], 0)
+
+    def test_missing_body_body_filtered_matrix_blocks_and_keeps_nulls(self) -> None:
+        try:
+            import numpy as np  # type: ignore
+        except ImportError:
+            self.skipTest("numpy is required for the body contact regression fixture")
+        config = replay_config_from_mapping(
+            {"body_names": ["pelvis", "torso_link"], "contact": {"foot_links": []}}
+        )
+        backend = IsaacLabReplayBackend(config, device="cpu")
+        backend.body_pair_contact_filters = body_pair_contact_filter_body_names(config)
+        backend.body_pair_contact_sensors = {
+            "pelvis": _FakeContactSensor(
+                net_forces_w=np.asarray([[[999.0, 0.0, 0.0]]], dtype=np.float32),
+                force_matrix_w=None,
+            )
+        }
+
+        payload = backend._body_pair_payload()
+
+        self.assertEqual(payload["body_pair_contact_status"], "blocked")
+        self.assertIsNone(payload["body_pair_contacts"])
+        self.assertEqual(payload["self_collision_status"], "blocked")
+        self.assertIsNone(payload["self_collision_count"])
+        self.assertIn("force_matrix_w missing", payload["body_pair_contact_reason"])
+
+    def test_disabled_pair_is_excluded_from_body_body_filters(self) -> None:
+        config = replay_config_from_mapping(
+            {
+                "body_names": ["pelvis", "torso_link"],
+                "contact": {
+                    "foot_links": [],
+                    "disabled_collision_pairs": [["torso_link", "pelvis"]],
+                },
+            }
+        )
+
+        self.assertEqual(body_pair_contact_filter_body_names(config), {})
+
+    def test_ground_filter_prim_never_enters_body_pair_filters(self) -> None:
+        config = replay_config_from_mapping(
+            {
+                "body_names": ["pelvis", "/World/Ground", "torso_link"],
+                "contact": {"foot_links": [], "contact_filter_prim_paths": ["/World/Ground"]},
+            }
+        )
+
+        filters = body_pair_contact_filter_body_names(config)
+
+        self.assertEqual(filters, {"pelvis": ("torso_link",)})
+        self.assertNotIn("/World/Ground", filters)
+        self.assertNotIn("/World/Ground", filters["pelvis"])
 
     def test_hard_exit_backend_persists_completed_manifest_before_exit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

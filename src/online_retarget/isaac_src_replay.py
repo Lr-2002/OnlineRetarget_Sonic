@@ -21,8 +21,7 @@ DEFAULT_G1_USD = (
 DEFAULT_5090_REPO = "/mnt/data_cpfs/code/wxh/OnlineRetarget"
 DEFAULT_ISAAC_PYTHON = "/workspace/isaaclab/_isaac_sim/python.sh"
 BODY_PAIR_CONTACT_BLOCKED_REASON = (
-    "verified body-body/self-collision contact source is not bound; "
-    "foot-ground sensors are support-only"
+    "verified body-body/self-collision contact source is unavailable"
 )
 SRC_BLOCKED_REASON = "SRC geometry checker is not bound for this exporter"
 FOOT_GROUND_FILTER_BLOCKED_REASON = (
@@ -214,6 +213,13 @@ class FilteredContactForce:
 class FootGroundContactState:
     forces_n: tuple[float | None, ...]
     flags: tuple[bool, ...]
+    status: str
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class BodyPairContactState:
+    contacts: tuple[dict[str, Any], ...] | None
     status: str
     reason: str = ""
 
@@ -917,7 +923,8 @@ class IsaacLabReplayBackend:
         self.sim: Any | None = None
         self.robot: Any | None = None
         self.foot_contact_sensors: dict[str, Any] = {}
-        self.body_pair_contact_source: Any | None = None
+        self.body_pair_contact_sensors: dict[str, Any] = {}
+        self.body_pair_contact_filters: dict[str, tuple[str, ...]] = {}
         self.app_launcher: Any | None = None
         self.simulation_app: Any | None = None
         self.torch: Any | None = None
@@ -1018,9 +1025,31 @@ class IsaacLabReplayBackend:
             )
             for foot_link in self.config.contact.foot_links
         }
+        self.body_pair_contact_filters = body_pair_contact_filter_body_names(self.config)
+        self.body_pair_contact_sensors = {
+            body_name: ContactSensor(
+                ContactSensorCfg(
+                    prim_path=single_body_contact_sensor_prim_path(self.config, body_name),
+                    update_period=0.0,
+                    history_length=1,
+                    debug_vis=False,
+                    track_contact_points=True,
+                    max_contact_data_count_per_prim=32,
+                    force_threshold=self.config.contact.contact_force_threshold_n,
+                    filter_prim_paths_expr=tuple(
+                        single_body_contact_sensor_prim_path(self.config, target)
+                        for target in target_names
+                    ),
+                )
+            )
+            for body_name, target_names in self.body_pair_contact_filters.items()
+            if target_names
+        }
         self.sim.reset()
         self.robot.update(self.sim.cfg.dt)
         for sensor in self.foot_contact_sensors.values():
+            sensor.update(dt=self.sim.cfg.dt)
+        for sensor in self.body_pair_contact_sensors.values():
             sensor.update(dt=self.sim.cfg.dt)
         self.robot_joint_order = _index_order(
             self.robot.joint_names,
@@ -1096,6 +1125,8 @@ class IsaacLabReplayBackend:
         self.robot.update(self.sim.cfg.dt)
         for sensor in self.foot_contact_sensors.values():
             sensor.update(dt=self.sim.cfg.dt)
+        for sensor in self.body_pair_contact_sensors.values():
+            sensor.update(dt=self.sim.cfg.dt)
         self.frames_collected += 1
         body_pos = _tensor_to_nested_list(self.robot.data.body_pos_w[0, self.body_indices, :])
         foot_ground_state = self._foot_contact_state()
@@ -1111,7 +1142,7 @@ class IsaacLabReplayBackend:
             foot_ground_contact_status=foot_ground_state.status,
             foot_ground_contact_reason=foot_ground_state.reason,
         )
-        body_pair_payload = _blocked_body_pair_payload()
+        body_pair_payload = self._body_pair_payload()
         src_payload = _blocked_src_payload()
         support_margin = self._support_margin(body_pos)
         floating_guard = None
@@ -1158,10 +1189,20 @@ class IsaacLabReplayBackend:
             "foot_ground_contact_sensor_prim_paths": foot_ground_contact_sensor_prim_paths(
                 self.config
             ),
+            "body_pair_contact_sensor_prim_paths": body_pair_contact_sensor_prim_paths(
+                self.config
+            ),
+            "body_pair_contact_filter_prim_paths": body_pair_contact_filter_prim_paths(
+                self.config
+            ),
+            "disabled_collision_pairs": [
+                list(pair) for pair in self.config.contact.disabled_collision_pairs
+            ],
+            "contact_force_threshold_n": self.config.contact.contact_force_threshold_n,
             "frames_collected": self.frames_collected,
             "foot_ground_contact_status": "filtered_force_matrix_required",
-            "body_pair_contact_status": "blocked",
-            "body_pair_contact_reason": BODY_PAIR_CONTACT_BLOCKED_REASON,
+            "body_pair_contact_status": "filtered_force_matrix_required",
+            "body_pair_contact_source": "isaaclab_filtered_force_matrix_w",
             "cross_ratio_status": "blocked",
             "cross_ratio_reason": SRC_BLOCKED_REASON,
         }
@@ -1218,6 +1259,77 @@ class IsaacLabReplayBackend:
                 }
             )
         return pairs
+
+    def _body_pair_payload(self) -> dict[str, Any]:
+        state = self._body_pair_contact_state()
+        if state.status != "available":
+            reason = state.reason or BODY_PAIR_CONTACT_BLOCKED_REASON
+            return {
+                "body_pair_contacts": None,
+                "body_pair_contact_status": "blocked",
+                "body_pair_contact_reason": reason,
+                "self_collision_count": None,
+                "self_collision_status": "blocked",
+                "self_collision_reason": reason,
+            }
+        contacts = list(state.contacts or ())
+        return {
+            "body_pair_contacts": contacts,
+            "body_pair_contact_status": "available",
+            "body_pair_contact_reason": "",
+            "self_collision_count": len(contacts),
+            "self_collision_status": "available",
+            "self_collision_reason": "",
+        }
+
+    def _body_pair_contact_state(self) -> BodyPairContactState:
+        if not self.body_pair_contact_filters:
+            return BodyPairContactState(
+                contacts=None,
+                status="blocked",
+                reason="no body-body contact candidate pairs are configured",
+            )
+        contacts: list[dict[str, Any]] = []
+        blocked_reasons: list[str] = []
+        threshold = float(self.config.contact.contact_force_threshold_n)
+        for body_name, target_names in self.body_pair_contact_filters.items():
+            if not target_names:
+                continue
+            sensor = self.body_pair_contact_sensors.get(body_name)
+            matrix = filtered_contact_force_matrix(sensor)
+            if matrix is None:
+                blocked_reasons.append(
+                    f"{body_name}: filtered body-body force_matrix_w missing"
+                )
+                continue
+            if len(matrix) < len(target_names):
+                blocked_reasons.append(
+                    f"{body_name}: filtered body-body force_matrix_w has "
+                    f"{len(matrix)} target rows for {len(target_names)} configured targets"
+                )
+                continue
+            for target_index, target_name in enumerate(target_names):
+                force_w = [float(component) for component in matrix[target_index]]
+                force_n = math.sqrt(sum(component * component for component in force_w))
+                if force_n < threshold:
+                    continue
+                contacts.append(
+                    {
+                        "body_a": body_name,
+                        "body_b": target_name,
+                        "force_n": force_n,
+                        "force_w": force_w,
+                        "contact_pos_world_m": None,
+                        "source": "isaaclab_filtered_force_matrix_w",
+                    }
+                )
+        if blocked_reasons:
+            return BodyPairContactState(
+                contacts=None,
+                status="blocked",
+                reason="; ".join(blocked_reasons),
+            )
+        return BodyPairContactState(contacts=tuple(contacts), status="available")
 
     def _support_margin(self, body_pos: Sequence[Sequence[float]]) -> float:
         axis_index = {"x": 0, "y": 1, "z": 2}[self.config.contact.support.up_axis.lower()]
@@ -1439,6 +1551,47 @@ def foot_ground_contact_sensor_prim_paths(config: ReplayConfig) -> dict[str, str
     }
 
 
+def body_pair_contact_filter_body_names(config: ReplayConfig) -> dict[str, tuple[str, ...]]:
+    excluded_filter_names = {
+        str(config.contact.support.ground_prim_path),
+        *(str(path) for path in config.contact.contact_filter_prim_paths),
+    }
+    body_names = tuple(
+        str(name) for name in config.body_names if str(name) not in excluded_filter_names
+    )
+    disabled_pairs = {
+        frozenset((str(left), str(right)))
+        for left, right in config.contact.disabled_collision_pairs
+    }
+    filters: dict[str, tuple[str, ...]] = {}
+    for source_index, source_name in enumerate(body_names):
+        target_names: list[str] = []
+        for target_name in body_names[source_index + 1 :]:
+            if _is_disabled_body_pair(source_name, target_name, disabled_pairs):
+                continue
+            target_names.append(target_name)
+        if target_names:
+            filters[source_name] = tuple(target_names)
+    return filters
+
+
+def body_pair_contact_sensor_prim_paths(config: ReplayConfig) -> dict[str, str]:
+    return {
+        body_name: single_body_contact_sensor_prim_path(config, body_name)
+        for body_name in body_pair_contact_filter_body_names(config)
+    }
+
+
+def body_pair_contact_filter_prim_paths(config: ReplayConfig) -> dict[str, list[str]]:
+    return {
+        body_name: [
+            single_body_contact_sensor_prim_path(config, target_name)
+            for target_name in target_names
+        ]
+        for body_name, target_names in body_pair_contact_filter_body_names(config).items()
+    }
+
+
 def filtered_ground_contact_force_norm(
     contact_sensor: Any | None,
     config: ReplayConfig,
@@ -1482,6 +1635,42 @@ def filtered_ground_contact_force_norm(
         math.sqrt(sum(float(component) ** 2 for component in vector)),
         "available",
     )
+
+
+def filtered_contact_force_matrix(contact_sensor: Any | None) -> list[list[float]] | None:
+    if contact_sensor is None or not hasattr(contact_sensor, "data"):
+        return None
+    forces = getattr(contact_sensor.data, "force_matrix_w", None)
+    if forces is None:
+        return None
+    try:
+        forces = forces.detach().cpu().numpy()
+    except AttributeError:
+        pass
+    if getattr(forces, "ndim", 0) == 4:
+        if len(forces) == 0:
+            return None
+        forces = forces[0]
+    if getattr(forces, "ndim", 0) == 3:
+        if len(forces) == 0:
+            return None
+        forces = forces[0]
+    if getattr(forces, "ndim", 0) != 2:
+        return None
+    rows: list[list[float]] = []
+    for row in forces:
+        if len(row) != 3:
+            return None
+        rows.append([float(component) for component in row])
+    return rows
+
+
+def _is_disabled_body_pair(
+    left: str,
+    right: str,
+    disabled_pairs: set[frozenset[str]],
+) -> bool:
+    return frozenset((left, right)) in disabled_pairs
 
 
 def _blocked_body_pair_payload() -> dict[str, Any]:

@@ -67,8 +67,9 @@ Contact families are intentionally separated:
 - `foot_slide_speed_mps`, `foot_slide_flags`, `foot_skate_distance_m`, `foot_skate_flags`, `foot_float_clearance_m`, and `foot_float_flags` are produced by exporter-local `FootArtifactTracker` rolling state. They are available only when the current per-foot `/World/Ground` contact source is verified through filtered `force_matrix_w`; if foot-ground contact is blocked, these fields are `null` per foot with `foot_artifact_status=blocked`.
 - Foot slide uses horizontal foot speed only when the current and previous frames for that side are both verified in contact. Foot skate is rolling horizontal displacement within the current verified contact segment. Foot float is foot clearance during a verified contact frame. These are foot-ground artifacts only, not body-body collision evidence.
 - `contact_pairs` is a compatibility alias for `foot_ground_contact_pairs`; it is not a body-body or self-collision source.
-- `body_pair_contacts` is `null` with `body_pair_contact_status=blocked` until a verified body-body extractor is bound.
-- `self_collision_count` is `null` with `self_collision_status=blocked` until it is computed from verified body-body contacts after disabled-pair filtering.
+- `body_pair_contacts` is produced only from separate single-body body-pair sensors filtered to candidate robot bodies through IsaacLab `force_matrix_w`. Aggregate `net_forces_w`, foot-ground support pairs, and `/World/Ground` filters are not accepted as body-pair evidence.
+- `body_pair_contact_status=blocked` means at least one required body-body filtered matrix is absent or unusable; in that case `body_pair_contacts` and `self_collision_count` stay `null`.
+- `self_collision_count` is computed only after all configured body-body filtered matrices are verified and disabled pairs are excluded. A numeric `0` is valid only in that available state, when every remaining filtered body-body pair is below threshold.
 - `cross_ratio` and `cross_ratio_guard` are `null` with `cross_ratio_status=blocked` until an SRC geometry checker is bound.
 
 ## Packet Metric Aggregator
@@ -78,7 +79,7 @@ Contact families are intentionally separated:
 - Foot-ground contact: foot-ground availability rate, per-foot contact rate, force summary, and support pair count.
 - Footskate / slide: `foot_slide_speed_mps`, `foot_skate_distance_m`, and their flags summarized as max/mean/rate where values are available.
 - Floating/support: `floating_guard`, `support_margin_m`, and `foot_float_clearance_m` summarized as guard violation/pass rates and clearance/support statistics. This does not attempt an airborne/action mask.
-- Blocked/null accounting: `body_pair_contacts`, `self_collision_count`, `cross_ratio`, and `cross_ratio_guard` are summarized only through status counts and null/non-null counts. Blocked/null values are never converted into numeric zero metrics.
+- Blocked/null accounting: `body_pair_contacts`, `self_collision_count`, `cross_ratio`, and `cross_ratio_guard` are summarized through status counts and null/non-null counts. Blocked/null values are never converted into numeric zero metrics. `self_collision_count=0` is meaningful only when `self_collision_status=available`.
 
 ## Isaac Binding
 
@@ -88,8 +89,10 @@ The non-dry implementation is now bound to IsaacLab behind the existing CLI. It:
 - Ensure the spawner activates PhysX contact reporters/contact sensors; IsaacLab contact sensors require contact reporter activation on the rigid bodies.
 - Instantiate one `ContactSensorCfg` per declared foot link, using a single foot body prim per sensor, and filter each sensor to `/World/Ground`.
 - Compute foot-ground support only from filtered `force_matrix_w`; if IsaacLab does not provide that filtered matrix, leave foot-ground support blocked instead of falling back to aggregate `net_forces_w`.
+- Instantiate separate single-body `ContactSensorCfg` body-pair sensors for unique candidate body pairs. Each source-body sensor filters only to candidate robot target bodies after excluding `/World/Ground`, configured contact filter prims, duplicate reverse pairs, and configured disabled collision pairs.
+- Compute `body_pair_contacts` and `self_collision_count` only from those body-pair filtered `force_matrix_w` matrices. If any required filtered body-body matrix is missing, leave the body-pair/self-collision fields blocked/null. If all matrices are present and no filtered pair exceeds threshold, emit `body_pair_contacts=[]` and `self_collision_count=0`.
 - Compute footskate/slide/floating artifact fields only from verified foot-ground flags plus foot body poses; do not infer them from aggregate forces or proxy collision geometry.
 - Replay `pred_g1_state` and `target_g1_state` from `paired_g1_state.h5` in SONIC joint order.
-- Serialize `packet_schema.json`-compatible JSONL for LR-235 consumption, with body-pair/self-collision/SRC fields blocked/null unless their verified sources are present.
+- Serialize `packet_schema.json`-compatible JSONL for LR-235 consumption, with SRC/cross-ratio fields blocked/null unless their verified source is present. The exporter does not substitute FK/body-origin/sphere proxy metrics for formal SRC or cross-ratio values.
 
 Non-dry execution still requires Code Reviewer approval before running on the 10h LR-239 artifacts. Before review, use only dry-run or import/preflight smoke checks. The implementation fails closed with a blocked manifest if IsaacLab/SRC imports, the G1 USD, or required HDF5 state fields are unavailable; it does not fabricate contact, self-collision, support, or cross-ratio values on machines that cannot run the Isaac/SRC contact path.
