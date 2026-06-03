@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import sys
+import tempfile
 from pathlib import Path
 import unittest
+from unittest import mock
+
+from scripts import render_somamesh_source
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +25,30 @@ class LR177VisualizationContractTests(unittest.TestCase):
         self.assertIn('"triangles_loaded"', text)
         self.assertIn('"renderer"', text)
         self.assertIn('"not_capsule_bvh_visualizer"', text)
+
+    def test_somamesh_renderer_resolves_src_layout_retargeter_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            retargeter_root = Path(tmp) / "soma-retargeter"
+            package_root = retargeter_root / "src" / "soma_retargeter"
+            package_root.mkdir(parents=True)
+
+            paths = render_somamesh_source.soma_retargeter_python_paths(retargeter_root)
+
+            self.assertEqual(paths, [retargeter_root, retargeter_root / "src"])
+            with mock.patch.object(sys, "path", []):
+                render_somamesh_source.load_soma_retargeter(retargeter_root)
+                self.assertIn(str(retargeter_root), sys.path)
+                self.assertIn(str(retargeter_root / "src"), sys.path)
+
+    def test_training_visual_gate_passes_somamesh_pythonpath_env(self) -> None:
+        text = (REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py").read_text(encoding="utf-8")
+
+        self.assertIn("env = _somamesh_renderer_env(cfg)", text)
+        self.assertIn("env=env", text)
+        self.assertIn("def _somamesh_renderer_env", text)
+        self.assertIn('retargeter_root / "src"', text)
+        self.assertIn("paths.extend([str(ROOT), str(SRC_ROOT)])", text)
+        self.assertIn('env["PYTHONPATH"] = os.pathsep.join(deduped_paths)', text)
 
     def test_isaac_renderer_exposes_ground_and_framing_contract(self) -> None:
         text = ISAAC_RENDERER.read_text(encoding="utf-8")

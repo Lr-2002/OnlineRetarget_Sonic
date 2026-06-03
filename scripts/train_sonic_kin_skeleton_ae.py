@@ -3680,10 +3680,12 @@ def _render_somamesh_shapes_source_video(
         command.extend(["--soma-usd", str(cfg.get("somamesh_usd") or cfg.get("soma_usd"))])
 
     timeout = float(cfg.get("somamesh_render_timeout_sec", 900.0))
+    env = _somamesh_renderer_env(cfg)
     try:
         result = subprocess.run(
             command,
             cwd=ROOT,
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -3779,6 +3781,28 @@ def _render_somamesh_shapes_source_video(
             if failed
         ]
     return report
+
+
+def _somamesh_renderer_env(cfg: Mapping[str, Any]) -> dict[str, str]:
+    env = os.environ.copy()
+    paths: list[str] = []
+    retargeter_root_value = cfg.get("soma_retargeter_root")
+    if retargeter_root_value:
+        retargeter_root = Path(str(retargeter_root_value))
+        for candidate in (retargeter_root, retargeter_root / "src"):
+            if candidate.exists():
+                paths.append(str(candidate))
+    paths.extend([str(ROOT), str(SRC_ROOT)])
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        paths.extend([path for path in existing_pythonpath.split(os.pathsep) if path])
+
+    deduped_paths: list[str] = []
+    for path in paths:
+        if path not in deduped_paths:
+            deduped_paths.append(path)
+    env["PYTHONPATH"] = os.pathsep.join(deduped_paths)
+    return env
 
 
 def _path_sha256(path: Path) -> str:

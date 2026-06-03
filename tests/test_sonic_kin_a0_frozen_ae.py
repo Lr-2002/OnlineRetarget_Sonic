@@ -683,6 +683,59 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
             self.assertFalse(manifest["acceptance_backend_complete"])
             self.assertFalse(manifest["visual_backend"]["active_backend_is_acceptance_backend"])
 
+    def test_somamesh_renderer_subprocess_gets_repo_and_src_layout_pythonpath(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_bvh = root / "source.bvh"
+            source_bvh.write_text("HIERARCHY\n", encoding="utf-8")
+            retargeter_root = root / "soma-retargeter"
+            (retargeter_root / "src" / "soma_retargeter").mkdir(parents=True)
+            report_path = root / "soma.json"
+            video_path = root / "soma.mp4"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "vertices": 12,
+                        "triangles_loaded": 20,
+                        "triangles_drawn_per_frame": 7,
+                        "renderer": "fake",
+                        "not_capsule_bvh_visualizer": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            video_path.write_bytes(b"mp4")
+            captured = {}
+
+            def fake_run(*args, **kwargs):
+                captured["command"] = args[0]
+                captured["cwd"] = kwargs.get("cwd")
+                captured["env"] = kwargs.get("env", {})
+                return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+            with mock.patch.object(sonic_train.subprocess, "run", side_effect=fake_run):
+                report = sonic_train._render_somamesh_shapes_source_video(
+                    cfg={"soma_retargeter_root": str(retargeter_root)},
+                    source_bvh=source_bvh,
+                    video_path=video_path,
+                    report_path=report_path,
+                    fps=50.0,
+                    frame_count=2,
+                    width=64,
+                    height=48,
+                    title="src-layout",
+                )
+
+            pythonpath = captured["env"]["PYTHONPATH"].split(os.pathsep)
+            self.assertEqual(report["status"], "ok")
+            self.assertEqual(captured["cwd"], sonic_train.ROOT)
+            self.assertIn(str(retargeter_root), pythonpath)
+            self.assertIn(str(retargeter_root / "src"), pythonpath)
+            self.assertIn(str(sonic_train.ROOT), pythonpath)
+            self.assertIn(str(sonic_train.SRC_ROOT), pythonpath)
+            self.assertIn("--retargeter-root", captured["command"])
+
     def test_expected_feature_dims_rejects_frozen_and_no_encoder_mismatches(self) -> None:
         frozen = {
             "features": {

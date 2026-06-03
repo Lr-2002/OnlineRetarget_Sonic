@@ -40,8 +40,22 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def soma_retargeter_python_paths(root: Path) -> list[Path]:
+    """Return import roots for both flat and src-layout soma-retargeter checkouts."""
+
+    candidates = [root, root / "src"]
+    paths: list[Path] = []
+    for candidate in candidates:
+        if candidate.exists() and candidate not in paths:
+            paths.append(candidate)
+    return paths
+
+
 def load_soma_retargeter(root: Path) -> None:
-    sys.path.insert(0, str(root))
+    for path in reversed(soma_retargeter_python_paths(root)):
+        path_text = str(path)
+        if path_text not in sys.path:
+            sys.path.insert(0, path_text)
 
 
 def quat_xyzw_to_matrix(q: np.ndarray) -> np.ndarray:
