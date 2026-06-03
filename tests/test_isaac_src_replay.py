@@ -19,6 +19,7 @@ from online_retarget.isaac_src_replay import (
     run_dry_or_blocked_export,
     validate_artifact_summary,
     validate_replay_config,
+    foot_ground_contact_sensor_prim_paths,
 )
 
 
@@ -37,7 +38,19 @@ class IsaacSrcReplayContractTests(unittest.TestCase):
             config.contact.foot_links,
             ("left_ankle_roll_link", "right_ankle_roll_link"),
         )
+        self.assertEqual(
+            foot_ground_contact_sensor_prim_paths(config),
+            {
+                "left_ankle_roll_link": "/World/Robot/left_ankle_roll_link",
+                "right_ankle_roll_link": "/World/Robot/right_ankle_roll_link",
+            },
+        )
+        self.assertIn("foot_ground_contact_pairs", schema["state_packet_fields"])
+        self.assertIn("body_pair_contacts", schema["state_packet_fields"])
+        self.assertIn("body_pair_contact_status", schema["state_packet_fields"])
         self.assertIn("self_collision_count", schema["state_packet_fields"])
+        self.assertIn("self_collision_status", schema["state_packet_fields"])
+        self.assertIn("cross_ratio_status", schema["state_packet_fields"])
         self.assertIn("cross_ratio_contract", schema)
 
     def test_validation_rejects_visual_playback_contact_settings(self) -> None:
@@ -56,7 +69,7 @@ class IsaacSrcReplayContractTests(unittest.TestCase):
         errors = validate_replay_config(config)
 
         self.assertIn(
-            "contact.enable_self_collisions must be true for self_collision_count packets",
+            "contact.enable_self_collisions must be true for body-body contact readiness",
             errors,
         )
         self.assertIn(
@@ -218,7 +231,20 @@ class IsaacSrcReplayContractTests(unittest.TestCase):
         self.assertEqual(manifest["status"], "completed")
         self.assertEqual(manifest["export_result"]["packets_written"], 2)
         self.assertEqual(len(packets), 2)
-        self.assertEqual(packets[0]["pred"]["contact_pairs"][0]["body_a"], "left_ankle_roll_link")
+        self.assertEqual(
+            packets[0]["pred"]["foot_ground_contact_pairs"][0]["body_a"],
+            "left_ankle_roll_link",
+        )
+        self.assertEqual(
+            packets[0]["pred"]["contact_pairs"],
+            packets[0]["pred"]["foot_ground_contact_pairs"],
+        )
+        self.assertIsNone(packets[0]["pred"]["body_pair_contacts"])
+        self.assertEqual(packets[0]["pred"]["body_pair_contact_status"], "blocked")
+        self.assertIsNone(packets[0]["pred"]["self_collision_count"])
+        self.assertEqual(packets[0]["pred"]["self_collision_status"], "blocked")
+        self.assertIsNone(packets[0]["pred"]["cross_ratio"])
+        self.assertEqual(packets[0]["pred"]["cross_ratio_status"], "blocked")
         self.assertAlmostEqual(packets[0]["target"]["body_pos_world_m"][0][2], 0.8)
 
 def _write_valid_paired_h5(path: Path, *, frames: int) -> None:
@@ -263,18 +289,34 @@ class _FakeReplayBackend:
             "foot_in_contact": [True, False],
             "support_margin_m": 0.0,
             "floating_guard": False,
-            "self_collision_count": 0,
+            "foot_ground_contact_pairs": [
+                {
+                    "body_a": "left_ankle_roll_link",
+                    "body_b": "/World/Ground",
+                    "force_n": 42.0,
+                    "position_world_m": list(state.root_pos_world_m),
+                    "source": "fake_single_body_foot_ground_contact_sensor",
+                }
+            ],
             "contact_pairs": [
                 {
                     "body_a": "left_ankle_roll_link",
                     "body_b": "/World/Ground",
                     "force_n": 42.0,
                     "position_world_m": list(state.root_pos_world_m),
-                    "source": "fake_contact_sensor",
+                    "source": "fake_single_body_foot_ground_contact_sensor",
                 }
             ],
+            "body_pair_contacts": None,
+            "body_pair_contact_status": "blocked",
+            "body_pair_contact_reason": "fake backend has no verified body-body source",
+            "self_collision_count": None,
+            "self_collision_status": "blocked",
+            "self_collision_reason": "fake backend has no verified body-body source",
             "cross_ratio": None,
             "cross_ratio_guard": None,
+            "cross_ratio_status": "blocked",
+            "cross_ratio_reason": "fake backend has no SRC geometry checker",
         }
 
     def report(self):
