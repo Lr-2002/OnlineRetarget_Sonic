@@ -3574,7 +3574,7 @@ def _render_motionlib_acceptance_visual_validation_clip(
         fps=int(round(fps)),
         layout="vertical",
     )
-    metadata, acceptance_ok, _failure_reasons = build_accepted_vertical_v2_metadata(
+    metadata, acceptance_ok, failure_reasons = build_accepted_vertical_v2_metadata(
         visual_renderer=visual_renderer,
         step=step,
         index=index,
@@ -3598,6 +3598,7 @@ def _render_motionlib_acceptance_visual_validation_clip(
         checkpoint_step=int(cfg.get("checkpoint_step", step)),
     )
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    gated_combined_status = metadata["combine"].get("status", "failed")
     return {
         "index": index,
         "filename": row.get("filename", ""),
@@ -3607,9 +3608,12 @@ def _render_motionlib_acceptance_visual_validation_clip(
         "source_status": source_report.get("status"),
         "dataset_status": target_report.get("status"),
         "inference_status": inference_report.get("status"),
-        "combined_status": combine_report.get("status"),
+        "combined_status": gated_combined_status,
         "combined_video": str(combined_video),
         "metadata": str(metadata_path),
+        "acceptance_ok": bool(acceptance_ok),
+        "accepted_vertical_v2_status": metadata["visual_backend"].get("accepted_vertical_v2_status"),
+        "acceptance_failure_reasons": failure_reasons,
         "active_backend_is_acceptance_backend": bool(
             metadata["visual_backend"]["active_backend_is_acceptance_backend"]
         ),

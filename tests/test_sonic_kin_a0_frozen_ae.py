@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 import unittest
 
 import numpy as np
@@ -541,6 +542,146 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
         self.assertEqual(tuple(skeleton.shape), (2, 0))
         self.assertEqual(tuple(target.shape), (2, 670))
         self.assertEqual(tuple(pred.shape), (3, 670))
+
+    def test_accepted_vertical_v2_failed_acceptance_is_not_counted_or_uploaded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_bvh = root / "source.bvh"
+            source_bvh.write_text("HIERARCHY\n", encoding="utf-8")
+            frames = 3
+            arrays = {
+                "soma_joints": np.zeros((frames, 26, 3), dtype=np.float32),
+                "soma_root_quat": np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (frames, 1)),
+                "joint_pos": np.zeros((frames, 29), dtype=np.float32),
+                "joint_vel": np.zeros((frames, 29), dtype=np.float32),
+                "root_pos": np.zeros((frames, 3), dtype=np.float32),
+                "root_rot": np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (frames, 1)),
+                "fps": 50.0,
+            }
+            robot_root = {
+                "root_pos": np.zeros((frames, 3), dtype=np.float32),
+                "root_quat": np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (frames, 1)),
+            }
+            prediction = {
+                "joint_pos": np.zeros((frames, 29), dtype=np.float32),
+                "root_pos": np.zeros((frames, 3), dtype=np.float32),
+                "root_quat": np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (frames, 1)),
+            }
+            row = {
+                "filename": "acceptance_gate",
+                "relative_path": "acceptance_gate.pkl",
+                "frame_count": frames,
+                "robot_relative_path": "robot.pkl",
+                "soma_relative_path": "soma.pkl",
+                "source_soma_proportional_path": str(source_bvh),
+            }
+            config = {
+                "input_data": {"format": "soma_motionlib"},
+                "variant": {"name": "A0_acceptance_gate_test"},
+                "training": {"seed": 123},
+                "features": {
+                    "future_window_frames": 2,
+                    "future_step": 1,
+                    "include_root_pos_target": True,
+                },
+                "visual_validation": {
+                    "enabled": True,
+                    "num_videos": 1,
+                    "duration_sec": 0.04,
+                    "width": 64,
+                    "height": 48,
+                    "checkpoint_path": "/remote/step_00002000.pt",
+                    "checkpoint_step": 2000,
+                },
+            }
+
+            def fake_somamesh_renderer(**kwargs):
+                Path(kwargs["video_path"]).write_bytes(b"soma mp4")
+                return {
+                    "status": "ok",
+                    "backend": "SomaMeshShapes",
+                    "render_backend": "accepted_somamesh_global_soma_display",
+                    "soma_backend": "SomaMeshShapes",
+                    "skeleton_fallback_used": False,
+                    "mesh_skinning_metadata": {
+                        "vertices": 42,
+                        "triangles_loaded": 84,
+                        "not_capsule_bvh_visualizer": True,
+                    },
+                }
+
+            def fake_isaaclab_playback(self, **kwargs):
+                output = Path(kwargs["output_path"])
+                output.write_bytes(b"g1 mp4")
+                if "row2_g1_target" in output.name:
+                    return {"status": "failed", "backend": "IsaacLab", "message": "target panel failed"}
+                return {"status": "ok", "backend": "IsaacLab"}
+
+            def fake_combine(inputs, output, *, fps, layout="horizontal"):
+                self.assertEqual(layout, "vertical")
+                output.write_bytes(b"combined mp4")
+                return {
+                    "status": "ok",
+                    "video_path": str(output),
+                    "fps": fps,
+                    "layout": layout,
+                    "panel_count": len(inputs),
+                }
+
+            class WandbRun:
+                def __init__(self) -> None:
+                    self.logged = []
+
+                def log(self, payload, step=None) -> None:
+                    self.logged.append((payload, step))
+
+            wandb_run = WandbRun()
+            with (
+                mock.patch.object(sonic_train, "load_soma_motionlib_arrays", return_value=arrays),
+                mock.patch.object(sonic_train, "_load_motionlib_robot_root", return_value=robot_root),
+                mock.patch.object(sonic_train, "_predict_motionlib_visual_g1_state", return_value=prediction),
+                mock.patch.object(sonic_train, "_render_somamesh_shapes_source_video", side_effect=fake_somamesh_renderer),
+                mock.patch.object(
+                    sonic_train.A0VisualValidationRenderer,
+                    "render_g1_isaaclab_playback",
+                    fake_isaaclab_playback,
+                ),
+                mock.patch.object(sonic_train, "_combine_panel_videos", side_effect=fake_combine),
+            ):
+                metrics = sonic_train.run_visual_validation(
+                    model=torch.nn.Linear(1, 1),
+                    validation_rows=[row],
+                    stats={},
+                    device=torch.device("cpu"),
+                    config=config,
+                    output_dir=root / "outputs",
+                    step=2000,
+                    joint_dim=29,
+                    wandb_run=wandb_run,
+                    acceptance_backend=True,
+                )
+
+            self.assertEqual(metrics["visual_validation/videos_ok"], 0.0)
+            self.assertEqual(metrics["visual_validation/videos_failed"], 1.0)
+            self.assertEqual(wandb_run.logged, [])
+
+            summary = json.loads(
+                (root / "outputs" / "visual_validation" / "step_00002000" / "summary.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(summary["status"], "failed")
+            self.assertEqual(summary["videos_ok"], 0)
+            self.assertEqual(summary["videos_failed"], 1)
+            report = summary["reports"][0]
+            self.assertEqual(report["combined_status"], "failed")
+            self.assertFalse(report["acceptance_ok"])
+            self.assertEqual(report["accepted_vertical_v2_status"], "failed")
+            self.assertIn("g1_target_status=failed", report["acceptance_failure_reasons"])
+            manifest = json.loads(Path(report["metadata"]).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["combine"]["status"], "failed")
+            self.assertFalse(manifest["acceptance_backend_complete"])
+            self.assertFalse(manifest["visual_backend"]["active_backend_is_acceptance_backend"])
 
     def test_expected_feature_dims_rejects_frozen_and_no_encoder_mismatches(self) -> None:
         frozen = {
