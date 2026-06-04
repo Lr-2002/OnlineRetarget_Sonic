@@ -242,6 +242,98 @@ class IsaacSrcMetricAggregationTests(unittest.TestCase):
             "pred.body_pos_world_m is missing or not a list",
         )
 
+    def test_body_position_mpjpe_requires_pred_and_target_body_names(self) -> None:
+        for missing_side in ("pred", "target"):
+            with self.subTest(missing_side=missing_side):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    packets_path = root / "isaac_src_packets.jsonl"
+                    output_dir = root / "metrics"
+                    pred_state = _state(
+                        foot_in_contact=[False, False],
+                        foot_contact_force_n=[0.0, 0.0],
+                        support_pair_count=0,
+                        support_margin_m=0.0,
+                        floating_guard=False,
+                        foot_slide_speed_mps=[None, None],
+                        foot_slide_flags=[None, None],
+                        foot_skate_distance_m=[None, None],
+                        foot_skate_flags=[None, None],
+                        foot_float_clearance_m=[None, None],
+                        foot_float_flags=[None, None],
+                    )
+                    target_state = dict(pred_state)
+                    if missing_side == "pred":
+                        pred_state.pop("body_names")
+                    else:
+                        target_state.pop("body_names")
+                    packets_path.write_text(
+                        json.dumps(
+                            _packet(frame_idx=0, pred=pred_state, target=target_state)
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+
+                    summary = aggregate_packet_metrics(input_jsonl=packets_path, output_dir=output_dir)
+                    pair_rows = _read_csv(output_dir / "per_frame_pair_body_metrics.csv")
+
+                reason = f"{missing_side}.body_names is missing or not a list"
+                mpjpe = summary["body_position_metrics"]["mpjpe"]
+                self.assertEqual(mpjpe["status"], "unavailable")
+                self.assertIsNone(mpjpe["mean_m"])
+                self.assertEqual(mpjpe["available_frame_count"], 0)
+                self.assertEqual(mpjpe["unavailable_frame_count"], 1)
+                self.assertEqual(mpjpe["unavailable_reason_counts"], {reason: 1})
+                self.assertEqual(pair_rows[0]["mpjpe_status"], "unavailable")
+                self.assertEqual(pair_rows[0]["mpjpe_reason"], reason)
+
+    def test_body_position_mpjpe_rejects_swapped_body_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            packets_path = root / "isaac_src_packets.jsonl"
+            output_dir = root / "metrics"
+            pred_state = _state(
+                foot_in_contact=[False, False],
+                foot_contact_force_n=[0.0, 0.0],
+                support_pair_count=0,
+                support_margin_m=0.0,
+                floating_guard=False,
+                foot_slide_speed_mps=[None, None],
+                foot_slide_flags=[None, None],
+                foot_skate_distance_m=[None, None],
+                foot_skate_flags=[None, None],
+                foot_float_clearance_m=[None, None],
+                foot_float_flags=[None, None],
+            )
+            target_state = dict(pred_state)
+            pred_state["body_names"] = ["pelvis", "torso_link"]
+            target_state["body_names"] = ["torso_link", "pelvis"]
+            pred_state["body_pos_world_m"] = [[0.0, 0.0, 0.8], [0.0, 0.0, 1.0]]
+            target_state["body_pos_world_m"] = [[0.0, 0.0, 0.8], [0.0, 0.0, 1.0]]
+            packets_path.write_text(
+                json.dumps(_packet(frame_idx=0, pred=pred_state, target=target_state)) + "\n",
+                encoding="utf-8",
+            )
+
+            summary = aggregate_packet_metrics(input_jsonl=packets_path, output_dir=output_dir)
+            pair_rows = _read_csv(output_dir / "per_frame_pair_body_metrics.csv")
+
+        mpjpe = summary["body_position_metrics"]["mpjpe"]
+        self.assertEqual(mpjpe["status"], "unavailable")
+        self.assertIsNone(mpjpe["mean_m"])
+        self.assertEqual(mpjpe["available_frame_count"], 0)
+        self.assertEqual(mpjpe["unavailable_frame_count"], 1)
+        self.assertEqual(
+            mpjpe["unavailable_reason_counts"],
+            {"pred.body_names and target.body_names do not match": 1},
+        )
+        self.assertEqual(pair_rows[0]["mpjpe_status"], "unavailable")
+        self.assertEqual(
+            pair_rows[0]["mpjpe_reason"],
+            "pred.body_names and target.body_names do not match",
+        )
+
     def test_blocked_foot_ground_does_not_fabricate_contact_or_force_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

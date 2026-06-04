@@ -467,9 +467,10 @@ def aggregate_packet_metrics(
         "metric_rules": {
             "body_position_mpjpe_policy": (
                 "mpjpe is computed only from paired pred/target body_pos_world_m "
-                "arrays in the same body order; missing, malformed, or misaligned "
-                "body-position inputs are reported as unavailable and are not "
-                "converted to zero or inferred from joints"
+                "arrays with required pred/target body_names in the same length "
+                "and order; missing, malformed, or misaligned body-position "
+                "inputs are reported as unavailable and are not converted to "
+                "zero or inferred from joints"
             ),
             "weighted_body_position_mpjpe_policy": (
                 "w_mpjpe requires explicit body_position_weights matching "
@@ -654,10 +655,10 @@ def _body_names_or_reason(
     expected_count: int,
 ) -> tuple[tuple[str, ...] | None, str]:
     if "body_names" not in state_packet:
-        return None, ""
+        return None, f"{side}.body_names is missing or not a list"
     raw_names = state_packet.get("body_names")
     if not isinstance(raw_names, list):
-        return None, f"{side}.body_names is not a list"
+        return None, f"{side}.body_names is missing or not a list"
     names = tuple(str(name) for name in raw_names)
     if len(names) != expected_count:
         return (
