@@ -334,10 +334,11 @@ class A0FrozenAEConfigTests(unittest.TestCase):
         for token in (
             "PRIMARY_VISUAL_BACKEND",
             "ACCEPTANCE_SOURCE_BACKEND",
-            "accepted_somamesh_global_soma_display",
+            "accepted_somamesh_shapes_lbs_source",
+            "SomaMesh LBS",
             "isaaclab_usd_g1_kinematic_playback",
             "active_backend_is_acceptance_backend",
-            "render_somamesh_global_source_video",
+            "soma_motionlib_source_frames",
             "render_g1_isaaclab_playback",
             "write_g1_motion_npz",
             "rerender_cli_command",
@@ -369,8 +370,12 @@ class A0FrozenAEConfigTests(unittest.TestCase):
         self.assertIn("vstack", script_text)
         self.assertIn("{sample_id}__{step_id}__row2_g1_target_isaaclab_input.npz", module_text)
         self.assertIn("{sample_id}__{step_id}__row3_g1_kinematics_isaaclab_input.npz", module_text)
-        self.assertIn('"data_source": "motionlib_target"', script_text)
-        self.assertIn('"data_source": "model_prediction"', script_text)
+        self.assertIn("ACCEPTANCE_ROW2_DATA_SOURCE", script_text)
+        self.assertIn("ACCEPTANCE_ROW3_DATA_SOURCE", script_text)
+        self.assertIn('ACCEPTANCE_ROW2_DATA_SOURCE = "motionlib_target"', module_text)
+        self.assertIn('ACCEPTANCE_ROW3_DATA_SOURCE = "model_prediction"', module_text)
+        self.assertIn("ACCEPTANCE_ROW2_ROLE", script_text)
+        self.assertIn("ACCEPTANCE_ROW3_ROLE", script_text)
         self.assertNotIn('"dataset_status": "not_requested"', script_text)
         self.assertIn("resolve_g1_usd_path", module_text)
         self.assertIn("G1_USD_RELATIVE_PATH", module_text)
@@ -599,15 +604,30 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
                 Path(kwargs["video_path"]).write_bytes(b"soma mp4")
                 return {
                     "status": "ok",
-                    "backend": "SomaMeshShapes",
-                    "render_backend": "accepted_somamesh_global_soma_display",
+                    "backend": "accepted_somamesh_shapes_lbs_source",
+                    "render_backend": "accepted_somamesh_shapes_lbs_source",
+                    "source_renderer": "SomaMesh LBS",
                     "soma_backend": "SomaMeshShapes",
-                    "skeleton_fallback_used": False,
-                    "mesh_skinning_metadata": {
-                        "vertices": 42,
-                        "triangles_loaded": 84,
-                        "not_capsule_bvh_visualizer": True,
+                    "source_provenance": {
+                        "source_type": "source_bvh",
+                        "source_bvh": str(source_bvh),
+                        "source_bvh_sha256": "a" * 64,
+                        "soma_usd": "/assets/soma_base_skel_minimal.usd",
+                        "retargeter_root": "/opt/soma-retargeter",
                     },
+                    "source_bvh": str(source_bvh),
+                    "source_bvh_sha256": "a" * 64,
+                    "soma_usd": "/assets/soma_base_skel_minimal.usd",
+                    "retargeter_root": "/opt/soma-retargeter",
+                    "frames": frames,
+                    "changed_frames": 1,
+                    "vertices": 1234,
+                    "triangles_loaded": 2468,
+                    "triangles_drawn_per_frame": 823,
+                    "not_capsule_bvh_visualizer": True,
+                    "source_display_conversion": "(x, y, z)_display = (x, -z, y)_soma",
+                    "source_coordinate_convention": "SOMA/BVH native Y-up LBS; Z-up conversion is display-only",
+                    "camera_reference_joint": "Hips",
                 }
 
             def fake_isaaclab_playback(self, **kwargs):
@@ -690,17 +710,24 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
             source_bvh.write_text("HIERARCHY\n", encoding="utf-8")
             retargeter_root = root / "soma-retargeter"
             (retargeter_root / "src" / "soma_retargeter").mkdir(parents=True)
+            soma_usd = root / "soma_base_skel_minimal.usd"
+            soma_usd.write_text("#usda\n", encoding="utf-8")
             report_path = root / "soma.json"
             video_path = root / "soma.mp4"
             report_path.write_text(
                 json.dumps(
                     {
                         "status": "ok",
+                        "frames": 2,
+                        "changed_frames": 1,
                         "vertices": 12,
                         "triangles_loaded": 20,
                         "triangles_drawn_per_frame": 7,
-                        "renderer": "fake",
+                        "renderer": "fake SomaMesh LBS renderer",
                         "not_capsule_bvh_visualizer": True,
+                        "source_display_conversion": "(x, y, z)_display = (x, -z, y)_soma",
+                        "source_coordinate_convention": "SOMA/BVH native Y-up LBS; Z-up conversion is display-only",
+                        "camera_reference_joint": "Hips",
                     }
                 ),
                 encoding="utf-8",
@@ -716,7 +743,7 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
 
             with mock.patch.object(sonic_train.subprocess, "run", side_effect=fake_run):
                 report = sonic_train._render_somamesh_shapes_source_video(
-                    cfg={"soma_retargeter_root": str(retargeter_root)},
+                    cfg={"soma_retargeter_root": str(retargeter_root), "somamesh_usd": str(soma_usd)},
                     source_bvh=source_bvh,
                     video_path=video_path,
                     report_path=report_path,
@@ -724,17 +751,40 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
                     frame_count=2,
                     width=64,
                     height=48,
-                    title="src-layout",
+                    sample_id="src-layout",
                 )
 
             pythonpath = captured["env"]["PYTHONPATH"].split(os.pathsep)
             self.assertEqual(report["status"], "ok")
+            self.assertEqual(report["backend"], "accepted_somamesh_shapes_lbs_source")
+            self.assertEqual(report["source_renderer"], "SomaMesh LBS")
+            self.assertEqual(report["soma_backend"], "SomaMeshShapes")
+            self.assertEqual(report["source_provenance"]["source_type"], "source_bvh")
+            self.assertEqual(report["source_provenance"]["soma_usd"], str(soma_usd))
+            self.assertEqual(report["source_provenance"]["retargeter_root"], str(retargeter_root))
             self.assertEqual(captured["cwd"], sonic_train.ROOT)
             self.assertIn(str(retargeter_root), pythonpath)
             self.assertIn(str(retargeter_root / "src"), pythonpath)
             self.assertIn(str(sonic_train.ROOT), pythonpath)
             self.assertIn(str(sonic_train.SRC_ROOT), pythonpath)
             self.assertIn("--retargeter-root", captured["command"])
+            self.assertIn("--soma-usd", captured["command"])
+
+    def test_accepted_somamesh_preflight_requires_configured_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeError, "unresolved soma_retargeter_root placeholder"):
+                sonic_train.preflight_acceptance_skeleton_visual_validation(
+                    {
+                        "input_data": {"format": "soma_motionlib"},
+                        "visual_validation": {
+                            "enabled": True,
+                            "acceptance_backend": True,
+                            "soma_retargeter_root": "MUST_CONFIGURE_5090_SOMA_RETARGETER_ROOT",
+                            "somamesh_usd": "MUST_CONFIGURE_5090_SOMA_BASE_SKEL_MINIMAL_USD",
+                        },
+                    },
+                    Path(tmp),
+                )
 
     def test_expected_feature_dims_rejects_frozen_and_no_encoder_mismatches(self) -> None:
         frozen = {

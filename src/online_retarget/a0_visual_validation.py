@@ -33,12 +33,17 @@ ONLINE_RETARGET_ROOT_ENV_KEYS = (
     "ONLINERETARGET_RUNTIME_ROOT",
     "ONLINE_RETARGET_ROOT",
 )
-PRIMARY_VISUAL_BACKEND = "somamesh_global_soma_plus_isaaclab_g1_target_and_kinematic_playback"
-ACCEPTANCE_SOURCE_BACKEND = "accepted_somamesh_global_soma_display"
+PRIMARY_VISUAL_BACKEND = "somamesh_shapes_plus_isaaclab_g1_target_and_kinematic_playback"
+ACCEPTANCE_SOURCE_BACKEND = "accepted_somamesh_shapes_lbs_source"
+ACCEPTANCE_SOURCE_RENDERER = "SomaMesh LBS"
 ACCEPTANCE_G1_BACKEND = "isaaclab_usd_g1_kinematic_playback"
+ACCEPTANCE_ROW2_DATA_SOURCE = "motionlib_target"
+ACCEPTANCE_ROW3_DATA_SOURCE = "model_prediction"
+ACCEPTANCE_ROW2_ROLE = "row2_target"
+ACCEPTANCE_ROW3_ROLE = "row3_prediction"
 DEBUG_CAPSULE_BACKEND = "software_capsule_debug_fallback"
 FAILED_ACCEPTED_VISUAL_BACKEND = "failed_accepted_vertical_v2_incomplete"
-SOMA_DISPLAY_TRANSFORM = "(x,y,z)_display=(x,-z,y)_soma"
+SOMA_DISPLAY_TRANSFORM = "(x, y, z)_display = (x, -z, y)_soma"
 ACCEPTANCE_OVERLAYS = ("world_axes", "root_axes", "semantic_left_right")
 
 
@@ -123,6 +128,10 @@ def build_accepted_vertical_v2_metadata(
 
     source_bvh_text = str(source_bvh) if source_bvh is not None else ""
     checkpoint_step_value = int(step if checkpoint_step is None else checkpoint_step)
+    target_data_source = str(target_motion_asset.get("data_source", ""))
+    inference_data_source = str(motion_asset.get("data_source", ""))
+    target_row_role = str(target_motion_asset.get("row_role", ""))
+    inference_row_role = str(motion_asset.get("row_role", ""))
     metadata = {
         "step": int(step),
         "index": int(index),
@@ -145,33 +154,60 @@ def build_accepted_vertical_v2_metadata(
             "artifact_version": "accepted_vertical_v2",
             "artifact_dir": str(clip_dir),
             "combined_artifact": str(combined_video),
-            "panel_order": ["Soma", "G1 Target Playback", "G1 Kinematics Playback"],
+            "panel_order": ["SOMA Shapes / SomaMesh", "G1 Target Playback", "G1 Kinematics Playback"],
             "panels": [
                 {
-                    "name": "Soma",
+                    "name": "SOMA Shapes / SomaMesh",
                     "artifact": str(source_video),
-                    "backend": "SomaMeshShapes",
-                    "soma_backend": "SomaMeshShapes",
-                    "skeleton_fallback_used": bool(source_report_dict.get("skeleton_fallback_used", False)),
-                    "mesh_skinning_metadata": source_report_dict.get("mesh_skinning_metadata", {}),
+                    "backend": source_report_dict.get("backend", ACCEPTANCE_SOURCE_BACKEND),
+                    "render_backend": source_report_dict.get("render_backend", ACCEPTANCE_SOURCE_BACKEND),
+                    "source_renderer": source_report_dict.get("source_renderer", ""),
+                    "soma_backend": source_report_dict.get("soma_backend", "SomaMeshShapes"),
+                    "source_provenance": source_report_dict.get("source_provenance", {}),
+                    "source_bvh": source_report_dict.get("source_bvh", source_report_dict.get("bvh_path", "")),
+                    "source_bvh_sha256": source_report_dict.get("source_bvh_sha256", ""),
+                    "soma_usd": source_report_dict.get("soma_usd", ""),
+                    "retargeter_root": source_report_dict.get("retargeter_root", ""),
+                    "mesh_skinning_metadata": {
+                        "vertices": source_report_dict.get("vertices", 0),
+                        "triangles_loaded": source_report_dict.get("triangles_loaded", 0),
+                        "triangles_drawn_per_frame": source_report_dict.get("triangles_drawn_per_frame", 0),
+                        "not_capsule_bvh_visualizer": source_report_dict.get("not_capsule_bvh_visualizer", False),
+                    },
+                    "source_display_conversion": source_report_dict.get("source_display_conversion", ""),
+                    "source_coordinate_convention": source_report_dict.get("source_coordinate_convention", ""),
+                    "camera_reference_joint": source_report_dict.get("camera_reference_joint", ""),
+                    "changed_frames": source_report_dict.get("changed_frames", ""),
                 },
                 {
                     "name": "G1 Target Playback",
                     "artifact": str(target_video),
                     "backend": "IsaacLab",
                     "render_backend": ACCEPTANCE_G1_BACKEND,
-                    "data_source": "motionlib_target",
+                    "data_source": target_data_source,
                     "motion_path": target_motion_asset.get("path", ""),
                     "motion_sha256": target_motion_asset.get("sha256", ""),
+                    "input_provenance": {
+                        "row_role": target_row_role,
+                        "data_source": target_data_source,
+                        "motion_path": target_motion_asset.get("path", ""),
+                        "motion_sha256": target_motion_asset.get("sha256", ""),
+                    },
                 },
                 {
                     "name": "G1 Kinematics Playback",
                     "artifact": str(inference_video),
                     "backend": "IsaacLab",
                     "render_backend": ACCEPTANCE_G1_BACKEND,
-                    "data_source": "model_prediction",
+                    "data_source": inference_data_source,
                     "motion_path": motion_asset.get("path", ""),
                     "motion_sha256": motion_asset.get("sha256", ""),
+                    "input_provenance": {
+                        "row_role": inference_row_role,
+                        "data_source": inference_data_source,
+                        "motion_path": motion_asset.get("path", ""),
+                        "motion_sha256": motion_asset.get("sha256", ""),
+                    },
                     "checkpoint": str(checkpoint_path or ""),
                     "checkpoint_step": checkpoint_step_value,
                 },
@@ -187,7 +223,6 @@ def build_accepted_vertical_v2_metadata(
         "visual_backend": visual_backend,
         "root_composition": visual_renderer.root_composition_metadata(),
         "acceptance_backend_complete": bool(acceptance_ok),
-        "soma_skeleton_capsule_fallback": "disabled",
     }
     return metadata, bool(acceptance_ok), failure_reasons
 
@@ -213,19 +248,58 @@ def accepted_vertical_v2_failure_reasons(
         if report.get("status") != "ok":
             reasons.append(f"{label}_status={report.get('status', 'missing')}")
 
-    source_meta = source_report.get("mesh_skinning_metadata", {})
-    if not isinstance(source_meta, Mapping):
-        source_meta = {}
-    if source_report.get("soma_backend") != "SomaMeshShapes":
-        reasons.append("soma_backend_not_somameshshapes")
-    if bool(source_report.get("skeleton_fallback_used", False)):
-        reasons.append("soma_skeleton_fallback_used")
-    if int(source_meta.get("vertices", 0) or 0) <= 0:
-        reasons.append("soma_mesh_vertices_missing")
-    if int(source_meta.get("triangles_loaded", 0) or 0) <= 0:
-        reasons.append("soma_mesh_triangles_missing")
-    if source_meta.get("not_capsule_bvh_visualizer") is not True:
-        reasons.append("soma_not_capsule_marker_missing")
+    soma_backend = str(source_report.get("soma_backend", ""))
+    if soma_backend not in {"SomaMeshShapes", "SOMA Shapes"}:
+        reasons.append("soma_backend_not_somamesh_shapes")
+    if source_report.get("render_backend") != ACCEPTANCE_SOURCE_BACKEND:
+        reasons.append("somamesh_lbs_backend_missing")
+    source_renderer = str(source_report.get("source_renderer", source_report.get("renderer", "")))
+    if ACCEPTANCE_SOURCE_RENDERER not in source_renderer:
+        reasons.append("somamesh_source_renderer_missing")
+    if any(
+        forbidden in str(source_report.get(key, "")).lower()
+        for key in ("backend", "render_backend", "soma_backend", "skeleton_fallback_reason", "debug_fallback_backend")
+        for forbidden in ("skeleton", "capsule", "stick", "point-line")
+    ):
+        reasons.append("somamesh_forbidden_fallback_marker")
+    source_provenance = source_report.get("source_provenance", {})
+    if not isinstance(source_provenance, Mapping):
+        source_provenance = {}
+    if str(source_provenance.get("source_type", "")) != "source_bvh":
+        reasons.append("somamesh_source_provenance_not_bvh")
+    if not str(source_report.get("source_bvh", source_report.get("bvh_path", source_provenance.get("source_bvh", "")))):
+        reasons.append("somamesh_source_bvh_missing")
+    if not str(source_report.get("source_bvh_sha256", source_provenance.get("source_bvh_sha256", ""))):
+        reasons.append("somamesh_source_bvh_sha256_missing")
+    if not str(source_report.get("soma_usd", source_provenance.get("soma_usd", ""))):
+        reasons.append("somamesh_soma_usd_missing")
+    if not str(source_report.get("retargeter_root", source_provenance.get("retargeter_root", ""))):
+        reasons.append("somamesh_retargeter_root_missing")
+
+    vertices = _positive_int(source_report.get("vertices", 0))
+    triangles_loaded = _positive_int(source_report.get("triangles_loaded", 0))
+    triangles_drawn = _positive_int(source_report.get("triangles_drawn_per_frame", 0))
+    if vertices <= 0:
+        reasons.append("somamesh_vertices_missing")
+    if triangles_loaded <= 0:
+        reasons.append("somamesh_triangles_loaded_missing")
+    if triangles_drawn <= 0:
+        reasons.append("somamesh_triangles_drawn_missing")
+    if source_report.get("not_capsule_bvh_visualizer") is not True:
+        reasons.append("somamesh_not_capsule_marker_missing")
+    if str(source_report.get("source_display_conversion", "")) != SOMA_DISPLAY_TRANSFORM:
+        reasons.append("somamesh_display_conversion_missing")
+    coordinate_convention = str(source_report.get("source_coordinate_convention", ""))
+    if "Y-up" not in coordinate_convention or "LBS" not in coordinate_convention:
+        reasons.append("somamesh_coordinate_convention_missing")
+    if str(source_report.get("camera_reference_joint", "")) not in {"Hips", "Pelvis", "pelvis", "hips"}:
+        reasons.append("somamesh_pelvis_camera_reference_missing")
+    source_frames = _positive_int(source_report.get("frames", 0))
+    if source_frames <= 0:
+        reasons.append("somamesh_frames_missing")
+    changed_frames = _positive_int(source_report.get("changed_frames", 0))
+    if source_frames > 1 and changed_frames <= 0:
+        reasons.append("somamesh_changed_frames_missing")
 
     for label, path in (
         ("soma_video", source_video),
@@ -252,6 +326,23 @@ def accepted_vertical_v2_failure_reasons(
             reasons.append(f"{label}_sha256_missing")
         elif _file_sha256(path) != sha_text:
             reasons.append(f"{label}_sha256_mismatch")
+
+    target_motion_path = str(target_motion_asset_report.get("path", ""))
+    inference_motion_path = str(motion_asset_report.get("path", ""))
+    if target_motion_path and inference_motion_path and os.path.abspath(target_motion_path) == os.path.abspath(inference_motion_path):
+        reasons.append("row2_row3_motion_path_reused")
+    if str(target_report.get("data_source", "")) != ACCEPTANCE_ROW2_DATA_SOURCE:
+        reasons.append("row2_render_provenance_not_motionlib_target")
+    if str(inference_report.get("data_source", "")) != ACCEPTANCE_ROW3_DATA_SOURCE:
+        reasons.append("row3_render_provenance_not_model_prediction")
+    if str(target_motion_asset_report.get("data_source", "")) != ACCEPTANCE_ROW2_DATA_SOURCE:
+        reasons.append("row2_motion_provenance_not_motionlib_target")
+    if str(motion_asset_report.get("data_source", "")) != ACCEPTANCE_ROW3_DATA_SOURCE:
+        reasons.append("row3_motion_provenance_not_model_prediction")
+    if str(target_motion_asset_report.get("row_role", "")) != ACCEPTANCE_ROW2_ROLE:
+        reasons.append("row2_motion_role_not_target")
+    if str(motion_asset_report.get("row_role", "")) != ACCEPTANCE_ROW3_ROLE:
+        reasons.append("row3_motion_role_not_prediction")
 
     if combine_report.get("status") != "ok":
         reasons.append(f"combined_status={combine_report.get('status', 'missing')}")
@@ -877,6 +968,22 @@ def _positive_float(value: float | None, default: float) -> float:
     except (TypeError, ValueError):
         parsed = float(default)
     return parsed if parsed > 0 else float(default)
+
+
+def _positive_float_or_zero(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return parsed if math.isfinite(parsed) and parsed > 0 else 0.0
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
 
 
 def _file_sha256(path: Path) -> str:

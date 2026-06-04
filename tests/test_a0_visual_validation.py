@@ -12,7 +12,12 @@ import numpy as np
 
 from online_retarget.a0_visual_validation import (
     ACCEPTANCE_G1_BACKEND,
+    ACCEPTANCE_ROW2_DATA_SOURCE,
+    ACCEPTANCE_ROW2_ROLE,
+    ACCEPTANCE_ROW3_DATA_SOURCE,
+    ACCEPTANCE_ROW3_ROLE,
     ACCEPTANCE_SOURCE_BACKEND,
+    ACCEPTANCE_SOURCE_RENDERER,
     DEBUG_CAPSULE_BACKEND,
     DEFAULT_G1_USD,
     FAILED_ACCEPTED_VISUAL_BACKEND,
@@ -27,15 +32,30 @@ from online_retarget.a0_visual_validation import (
 def _fake_somamesh_report() -> dict[str, object]:
     return {
         "status": "ok",
-        "backend": "SomaMeshShapes",
+        "backend": ACCEPTANCE_SOURCE_BACKEND,
         "render_backend": ACCEPTANCE_SOURCE_BACKEND,
+        "source_renderer": ACCEPTANCE_SOURCE_RENDERER,
         "soma_backend": "SomaMeshShapes",
-        "skeleton_fallback_used": False,
-        "mesh_skinning_metadata": {
-            "vertices": 42,
-            "triangles_loaded": 84,
-            "not_capsule_bvh_visualizer": True,
+        "source_provenance": {
+            "source_type": "source_bvh",
+            "source_bvh": "/data/source.bvh",
+            "source_bvh_sha256": "a" * 64,
+            "soma_usd": "/assets/soma_base_skel_minimal.usd",
+            "retargeter_root": "/opt/soma-retargeter",
         },
+        "source_bvh": "/data/source.bvh",
+        "source_bvh_sha256": "a" * 64,
+        "soma_usd": "/assets/soma_base_skel_minimal.usd",
+        "retargeter_root": "/opt/soma-retargeter",
+        "frames": 2,
+        "changed_frames": 1,
+        "vertices": 1234,
+        "triangles_loaded": 2468,
+        "triangles_drawn_per_frame": 823,
+        "not_capsule_bvh_visualizer": True,
+        "source_display_conversion": SOMA_DISPLAY_TRANSFORM,
+        "source_coordinate_convention": "SOMA/BVH native Y-up LBS; Z-up conversion is display-only",
+        "camera_reference_joint": "Hips",
     }
 
 
@@ -258,6 +278,7 @@ class A0VisualValidationRendererTests(unittest.TestCase):
                     fps=50.0,
                     joint_names=["left", "right"],
                 )
+                row2_report.update({"data_source": ACCEPTANCE_ROW2_DATA_SOURCE, "row_role": ACCEPTANCE_ROW2_ROLE})
                 row3_report = renderer.write_g1_motion_npz(
                     path=paths["row3_motion_npz"],
                     joint_pos=np.full((2, 2), value + 10.0, dtype=np.float32),
@@ -266,6 +287,7 @@ class A0VisualValidationRendererTests(unittest.TestCase):
                     fps=50.0,
                     joint_names=["left", "right"],
                 )
+                row3_report.update({"data_source": ACCEPTANCE_ROW3_DATA_SOURCE, "row_role": ACCEPTANCE_ROW3_ROLE})
                 manifest = {
                     "sample_id": sample_id,
                     "accepted_visual_contract": {
@@ -317,6 +339,71 @@ class A0VisualValidationRendererTests(unittest.TestCase):
                 self.assertEqual(manifest["g1_isaaclab_target_motion_asset"]["path"], str(row2_path))
                 self.assertEqual(manifest["g1_isaaclab_motion_asset"]["path"], str(row3_path))
 
+    def test_accepted_vertical_v2_allows_identical_motion_only_with_distinct_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            renderer = A0VisualValidationRenderer({})
+            paths = accepted_vertical_v2_artifact_paths(
+                root / "visual_validation" / "step_00002000",
+                sample_id="same_motion",
+                step=2000,
+            )
+            paths["artifact_dir"].mkdir(parents=True)
+            for key in ("row1_video", "row2_video", "row3_video", "combined_video"):
+                paths[key].write_bytes(f"{key}.mp4".encode("utf-8"))
+            shared_joint_pos = np.full((2, 2), 3.0, dtype=np.float32)
+            shared_root_pos = np.asarray([[0.0, 0.0, 0.8], [0.1, 0.0, 0.8]], dtype=np.float32)
+            shared_root_quat = np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (2, 1))
+            row2_report = renderer.write_g1_motion_npz(
+                path=paths["row2_motion_npz"],
+                joint_pos=shared_joint_pos,
+                root_pos=shared_root_pos,
+                root_quat=shared_root_quat,
+                fps=50.0,
+                joint_names=["left", "right"],
+            )
+            row2_report.update({"data_source": ACCEPTANCE_ROW2_DATA_SOURCE, "row_role": ACCEPTANCE_ROW2_ROLE})
+            row3_report = renderer.write_g1_motion_npz(
+                path=paths["row3_motion_npz"],
+                joint_pos=shared_joint_pos,
+                root_pos=shared_root_pos,
+                root_quat=shared_root_quat,
+                fps=50.0,
+                joint_names=["left", "right"],
+            )
+            row3_report.update({"data_source": ACCEPTANCE_ROW3_DATA_SOURCE, "row_role": ACCEPTANCE_ROW3_ROLE})
+
+            metadata, accepted, failure_reasons = build_accepted_vertical_v2_metadata(
+                visual_renderer=renderer,
+                step=2000,
+                index=0,
+                row={"filename": "same_motion", "relative_path": "same_motion.npz"},
+                sample_id="same_motion",
+                source_bvh=root / "source.bvh",
+                fps=50.0,
+                frame_count=2,
+                clip_dir=paths["artifact_dir"],
+                source_video=paths["row1_video"],
+                target_video=paths["row2_video"],
+                inference_video=paths["row3_video"],
+                combined_video=paths["combined_video"],
+                source_report=_fake_somamesh_report(),
+                target_report={"status": "ok", "backend": "IsaacLab", "data_source": ACCEPTANCE_ROW2_DATA_SOURCE},
+                inference_report={"status": "ok", "backend": "IsaacLab", "data_source": ACCEPTANCE_ROW3_DATA_SOURCE},
+                target_motion_asset_report=row2_report,
+                motion_asset_report=row3_report,
+                combine_report={"status": "ok", "video_path": str(paths["combined_video"])},
+            )
+
+            self.assertTrue(accepted)
+            self.assertEqual(failure_reasons, [])
+            row2 = metadata["accepted_visual_contract"]["panels"][1]
+            row3 = metadata["accepted_visual_contract"]["panels"][2]
+            self.assertEqual(row2["data_source"], ACCEPTANCE_ROW2_DATA_SOURCE)
+            self.assertEqual(row3["data_source"], ACCEPTANCE_ROW3_DATA_SOURCE)
+            self.assertNotEqual(row2["motion_path"], row3["motion_path"])
+            self.assertEqual(row2["motion_sha256"], row3["motion_sha256"])
+
     def test_accepted_vertical_v2_metadata_accepts_complete_fake_reports(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -337,6 +424,7 @@ class A0VisualValidationRendererTests(unittest.TestCase):
                 fps=50.0,
                 joint_names=["left", "right"],
             )
+            row2_report.update({"data_source": ACCEPTANCE_ROW2_DATA_SOURCE, "row_role": ACCEPTANCE_ROW2_ROLE})
             row3_report = renderer.write_g1_motion_npz(
                 path=paths["row3_motion_npz"],
                 joint_pos=np.full((2, 2), 11.0, dtype=np.float32),
@@ -345,6 +433,7 @@ class A0VisualValidationRendererTests(unittest.TestCase):
                 fps=50.0,
                 joint_names=["left", "right"],
             )
+            row3_report.update({"data_source": ACCEPTANCE_ROW3_DATA_SOURCE, "row_role": ACCEPTANCE_ROW3_ROLE})
 
             metadata, accepted, failure_reasons = build_accepted_vertical_v2_metadata(
                 visual_renderer=renderer,
@@ -361,8 +450,18 @@ class A0VisualValidationRendererTests(unittest.TestCase):
                 inference_video=paths["row3_video"],
                 combined_video=paths["combined_video"],
                 source_report=_fake_somamesh_report(),
-                target_report={"status": "ok", "backend": "IsaacLab", "robot_asset": "g1.usd"},
-                inference_report={"status": "ok", "backend": "IsaacLab", "robot_asset": "g1.usd"},
+                target_report={
+                    "status": "ok",
+                    "backend": "IsaacLab",
+                    "robot_asset": "g1.usd",
+                    "data_source": ACCEPTANCE_ROW2_DATA_SOURCE,
+                },
+                inference_report={
+                    "status": "ok",
+                    "backend": "IsaacLab",
+                    "robot_asset": "g1.usd",
+                    "data_source": ACCEPTANCE_ROW3_DATA_SOURCE,
+                },
                 target_motion_asset_report=row2_report,
                 motion_asset_report=row3_report,
                 combine_report={"status": "ok", "video_path": str(paths["combined_video"])},
@@ -401,27 +500,45 @@ class A0VisualValidationRendererTests(unittest.TestCase):
             self.assertEqual(metadata["accepted_visual_contract"]["combined_artifact"], str(paths["combined_video"]))
             self.assertEqual(
                 metadata["accepted_visual_contract"]["panel_order"],
-                ["Soma", "G1 Target Playback", "G1 Kinematics Playback"],
+                ["SOMA Shapes / SomaMesh", "G1 Target Playback", "G1 Kinematics Playback"],
             )
             row1 = metadata["accepted_visual_contract"]["panels"][0]
             row2 = metadata["accepted_visual_contract"]["panels"][1]
             row3 = metadata["accepted_visual_contract"]["panels"][2]
-            self.assertEqual(row1["name"], "Soma")
+            self.assertEqual(row1["name"], "SOMA Shapes / SomaMesh")
             self.assertEqual(row1["artifact"], str(paths["row1_video"]))
+            self.assertEqual(row1["backend"], ACCEPTANCE_SOURCE_BACKEND)
+            self.assertEqual(row1["render_backend"], ACCEPTANCE_SOURCE_BACKEND)
+            self.assertEqual(row1["source_renderer"], ACCEPTANCE_SOURCE_RENDERER)
             self.assertEqual(row1["soma_backend"], "SomaMeshShapes")
-            self.assertFalse(row1["skeleton_fallback_used"])
+            self.assertEqual(row1["source_provenance"]["source_type"], "source_bvh")
+            self.assertEqual(row1["source_bvh_sha256"], "a" * 64)
+            self.assertEqual(row1["soma_usd"], "/assets/soma_base_skel_minimal.usd")
+            self.assertEqual(row1["retargeter_root"], "/opt/soma-retargeter")
+            self.assertEqual(row1["mesh_skinning_metadata"]["vertices"], 1234)
+            self.assertEqual(row1["mesh_skinning_metadata"]["triangles_loaded"], 2468)
+            self.assertEqual(row1["mesh_skinning_metadata"]["triangles_drawn_per_frame"], 823)
+            self.assertTrue(row1["mesh_skinning_metadata"]["not_capsule_bvh_visualizer"])
+            self.assertEqual(row1["source_display_conversion"], SOMA_DISPLAY_TRANSFORM)
+            self.assertEqual(row1["source_coordinate_convention"], "SOMA/BVH native Y-up LBS; Z-up conversion is display-only")
+            self.assertEqual(row1["camera_reference_joint"], "Hips")
+            self.assertEqual(row1["changed_frames"], 1)
             self.assertEqual(row2["name"], "G1 Target Playback")
             self.assertEqual(row2["artifact"], str(paths["row2_video"]))
             self.assertEqual(row2["backend"], "IsaacLab")
-            self.assertEqual(row2["data_source"], "motionlib_target")
+            self.assertEqual(row2["data_source"], ACCEPTANCE_ROW2_DATA_SOURCE)
             self.assertEqual(row2["motion_path"], row2_report["path"])
             self.assertEqual(row2["motion_sha256"], row2_report["sha256"])
+            self.assertEqual(row2["input_provenance"]["row_role"], ACCEPTANCE_ROW2_ROLE)
+            self.assertEqual(row2["input_provenance"]["data_source"], ACCEPTANCE_ROW2_DATA_SOURCE)
             self.assertEqual(row3["name"], "G1 Kinematics Playback")
             self.assertEqual(row3["artifact"], str(paths["row3_video"]))
             self.assertEqual(row3["backend"], "IsaacLab")
-            self.assertEqual(row3["data_source"], "model_prediction")
+            self.assertEqual(row3["data_source"], ACCEPTANCE_ROW3_DATA_SOURCE)
             self.assertEqual(row3["motion_path"], row3_report["path"])
             self.assertEqual(row3["motion_sha256"], row3_report["sha256"])
+            self.assertEqual(row3["input_provenance"]["row_role"], ACCEPTANCE_ROW3_ROLE)
+            self.assertEqual(row3["input_provenance"]["data_source"], ACCEPTANCE_ROW3_DATA_SOURCE)
             self.assertNotEqual(row2["motion_path"], row3["motion_path"])
             self.assertNotEqual(row2["motion_sha256"], row3["motion_sha256"])
             self.assertEqual(metadata["g1_isaaclab_target_motion_asset"]["path"], row2_report["path"])
@@ -429,13 +546,136 @@ class A0VisualValidationRendererTests(unittest.TestCase):
             self.assertEqual(row3["checkpoint"], "/remote/step_00002000.pt")
             self.assertEqual(row3["checkpoint_step"], 2000)
 
+    def test_accepted_vertical_v2_metadata_fails_reused_or_swapped_row2_row3_assets(self) -> None:
+        for case_name, reuse_path, row2_data_source, row3_data_source, expected_reason in (
+            (
+                "reused_path",
+                True,
+                ACCEPTANCE_ROW2_DATA_SOURCE,
+                ACCEPTANCE_ROW3_DATA_SOURCE,
+                "row2_row3_motion_path_reused",
+            ),
+            (
+                "swapped_asset_provenance",
+                False,
+                ACCEPTANCE_ROW3_DATA_SOURCE,
+                ACCEPTANCE_ROW2_DATA_SOURCE,
+                "row2_motion_provenance_not_motionlib_target",
+            ),
+            (
+                "swapped_render_provenance",
+                False,
+                ACCEPTANCE_ROW2_DATA_SOURCE,
+                ACCEPTANCE_ROW3_DATA_SOURCE,
+                "row2_render_provenance_not_motionlib_target",
+            ),
+            (
+                "swapped_paths_with_expected_provenance",
+                False,
+                ACCEPTANCE_ROW2_DATA_SOURCE,
+                ACCEPTANCE_ROW3_DATA_SOURCE,
+                "row2_motion_role_not_target",
+            ),
+        ):
+            with self.subTest(case_name=case_name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                renderer = A0VisualValidationRenderer({})
+                paths = accepted_vertical_v2_artifact_paths(
+                    root / "visual_validation" / "step_00002000",
+                    sample_id=case_name,
+                    step=2000,
+                )
+                paths["artifact_dir"].mkdir(parents=True)
+                for key in ("row1_video", "row2_video", "row3_video", "combined_video"):
+                    paths[key].write_bytes(f"{key}.mp4".encode("utf-8"))
+                row2_report = renderer.write_g1_motion_npz(
+                    path=paths["row2_motion_npz"],
+                    joint_pos=np.full((2, 2), 1.0, dtype=np.float32),
+                    root_pos=np.asarray([[0.0, 0.0, 0.8], [0.1, 0.0, 0.8]], dtype=np.float32),
+                    root_quat=np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (2, 1)),
+                    fps=50.0,
+                    joint_names=["left", "right"],
+                )
+                row2_role = ACCEPTANCE_ROW2_ROLE if row2_data_source == ACCEPTANCE_ROW2_DATA_SOURCE else ACCEPTANCE_ROW3_ROLE
+                row2_report.update({"data_source": row2_data_source, "row_role": row2_role})
+                row3_report = renderer.write_g1_motion_npz(
+                    path=paths["row2_motion_npz"] if reuse_path else paths["row3_motion_npz"],
+                    joint_pos=np.full((2, 2), 11.0, dtype=np.float32),
+                    root_pos=np.asarray([[0.2, 0.0, 0.8], [0.3, 0.0, 0.8]], dtype=np.float32),
+                    root_quat=np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (2, 1)),
+                    fps=50.0,
+                    joint_names=["left", "right"],
+                )
+                row3_role = ACCEPTANCE_ROW3_ROLE if row3_data_source == ACCEPTANCE_ROW3_DATA_SOURCE else ACCEPTANCE_ROW2_ROLE
+                row3_report.update({"data_source": row3_data_source, "row_role": row3_role})
+                target_data_source = ACCEPTANCE_ROW2_DATA_SOURCE
+                inference_data_source = ACCEPTANCE_ROW3_DATA_SOURCE
+                if case_name == "swapped_render_provenance":
+                    target_data_source = ACCEPTANCE_ROW3_DATA_SOURCE
+                    inference_data_source = ACCEPTANCE_ROW2_DATA_SOURCE
+                if case_name == "swapped_paths_with_expected_provenance":
+                    row2_report, row3_report = row3_report, row2_report
+                    row2_report["data_source"] = ACCEPTANCE_ROW2_DATA_SOURCE
+                    row3_report["data_source"] = ACCEPTANCE_ROW3_DATA_SOURCE
+
+                metadata, accepted, failure_reasons = build_accepted_vertical_v2_metadata(
+                    visual_renderer=renderer,
+                    step=2000,
+                    index=0,
+                    row={"filename": case_name, "relative_path": f"{case_name}.npz"},
+                    sample_id=case_name,
+                    source_bvh=root / "source.bvh",
+                    fps=50.0,
+                    frame_count=2,
+                    clip_dir=paths["artifact_dir"],
+                    source_video=paths["row1_video"],
+                    target_video=paths["row2_video"],
+                    inference_video=paths["row3_video"],
+                    combined_video=paths["combined_video"],
+                    source_report=_fake_somamesh_report(),
+                    target_report={"status": "ok", "backend": "IsaacLab", "data_source": target_data_source},
+                    inference_report={"status": "ok", "backend": "IsaacLab", "data_source": inference_data_source},
+                    target_motion_asset_report=row2_report,
+                    motion_asset_report=row3_report,
+                    combine_report={"status": "ok", "video_path": str(paths["combined_video"])},
+                )
+
+                self.assertFalse(accepted)
+                self.assertIn(expected_reason, failure_reasons)
+                self.assertFalse(metadata["acceptance_backend_complete"])
+                self.assertEqual(metadata["visual_backend"]["active_backend"], FAILED_ACCEPTED_VISUAL_BACKEND)
+                self.assertEqual(metadata["combine"]["status"], "failed")
+
     def test_accepted_vertical_v2_metadata_fails_missing_somamesh_evidence(self) -> None:
         for case_name, source_report, write_source_video, expected_reason in (
             (
-                "missing_mesh_metadata",
-                {"status": "ok", "soma_backend": "SomaMeshShapes", "skeleton_fallback_used": False},
+                "missing_source_provenance",
+                {
+                    **_fake_somamesh_report(),
+                    "source_provenance": {},
+                },
                 True,
-                "soma_mesh_vertices_missing",
+                "somamesh_source_provenance_not_bvh",
+            ),
+            (
+                "static_somamesh_clip",
+                {
+                    **_fake_somamesh_report(),
+                    "changed_frames": 0,
+                },
+                True,
+                "somamesh_changed_frames_missing",
+            ),
+            (
+                "forbidden_skeleton_capsule_marker",
+                {
+                    **_fake_somamesh_report(),
+                    "backend": "accepted_soma_skeleton_capsule_display",
+                    "render_backend": "accepted_soma_skeleton_capsule_display",
+                    "skeleton_fallback_reason": "software capsule debug fallback",
+                },
+                True,
+                "somamesh_forbidden_fallback_marker",
             ),
             (
                 "missing_source_mp4",
@@ -465,6 +705,7 @@ class A0VisualValidationRendererTests(unittest.TestCase):
                     fps=50.0,
                     joint_names=["left", "right"],
                 )
+                row2_report.update({"data_source": ACCEPTANCE_ROW2_DATA_SOURCE, "row_role": ACCEPTANCE_ROW2_ROLE})
                 row3_report = renderer.write_g1_motion_npz(
                     path=paths["row3_motion_npz"],
                     joint_pos=np.full((2, 2), 11.0, dtype=np.float32),
@@ -473,6 +714,7 @@ class A0VisualValidationRendererTests(unittest.TestCase):
                     fps=50.0,
                     joint_names=["left", "right"],
                 )
+                row3_report.update({"data_source": ACCEPTANCE_ROW3_DATA_SOURCE, "row_role": ACCEPTANCE_ROW3_ROLE})
 
                 metadata, accepted, failure_reasons = build_accepted_vertical_v2_metadata(
                     visual_renderer=renderer,
@@ -489,8 +731,18 @@ class A0VisualValidationRendererTests(unittest.TestCase):
                     inference_video=paths["row3_video"],
                     combined_video=paths["combined_video"],
                     source_report=source_report,
-                    target_report={"status": "ok", "backend": "IsaacLab", "robot_asset": "g1.usd"},
-                    inference_report={"status": "ok", "backend": "IsaacLab", "robot_asset": "g1.usd"},
+                    target_report={
+                        "status": "ok",
+                        "backend": "IsaacLab",
+                        "robot_asset": "g1.usd",
+                        "data_source": ACCEPTANCE_ROW2_DATA_SOURCE,
+                    },
+                    inference_report={
+                        "status": "ok",
+                        "backend": "IsaacLab",
+                        "robot_asset": "g1.usd",
+                        "data_source": ACCEPTANCE_ROW3_DATA_SOURCE,
+                    },
                     target_motion_asset_report=row2_report,
                     motion_asset_report=row3_report,
                     combine_report={"status": "ok", "video_path": str(paths["combined_video"])},
