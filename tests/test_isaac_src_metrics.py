@@ -105,6 +105,13 @@ class IsaacSrcMetricAggregationTests(unittest.TestCase):
         self.assertEqual(pred["blocked_null_accounting"]["self_collision_count_null_count"], 2)
         self.assertEqual(pred["blocked_null_accounting"]["self_collision_count_non_null_count"], 0)
         self.assertEqual(pred["self_collision_status_counts"], {"blocked": 2})
+        self.assertEqual(summary["body_position_metrics"]["mpjpe"]["status"], "available")
+        self.assertEqual(summary["body_position_metrics"]["mpjpe"]["available_frame_count"], 2)
+        self.assertEqual(summary["body_position_metrics"]["mpjpe"]["mean_m"], 0.0)
+        self.assertEqual(
+            summary["body_position_metrics"]["w_mpjpe"]["status"],
+            "unavailable",
+        )
         target = summary["by_side"]["target"]
         self.assertEqual(target["floating_guard"]["true_count"], 2)
         self.assertEqual(target["floating_guard"]["floating_guard_violation_rate"], 1.0)
@@ -112,6 +119,128 @@ class IsaacSrcMetricAggregationTests(unittest.TestCase):
         self.assertEqual(len(side_rows), 4)
         self.assertEqual(len(foot_rows), 8)
         self.assertEqual(side_rows[0]["self_collision_count_is_null"], "True")
+
+    def test_body_position_mpjpe_uses_real_pred_target_body_positions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            packets_path = root / "isaac_src_packets.jsonl"
+            output_dir = root / "metrics"
+            pred_state_0 = _state(
+                foot_in_contact=[False, False],
+                foot_contact_force_n=[0.0, 0.0],
+                support_pair_count=0,
+                support_margin_m=0.0,
+                floating_guard=False,
+                foot_slide_speed_mps=[None, None],
+                foot_slide_flags=[None, None],
+                foot_skate_distance_m=[None, None],
+                foot_skate_flags=[None, None],
+                foot_float_clearance_m=[None, None],
+                foot_float_flags=[None, None],
+            )
+            target_state_0 = _state(
+                foot_in_contact=[False, False],
+                foot_contact_force_n=[0.0, 0.0],
+                support_pair_count=0,
+                support_margin_m=0.0,
+                floating_guard=False,
+                foot_slide_speed_mps=[None, None],
+                foot_slide_flags=[None, None],
+                foot_skate_distance_m=[None, None],
+                foot_skate_flags=[None, None],
+                foot_float_clearance_m=[None, None],
+                foot_float_flags=[None, None],
+            )
+            pred_state_0["body_names"] = ["pelvis", "torso_link"]
+            target_state_0["body_names"] = ["pelvis", "torso_link"]
+            pred_state_0["body_pos_world_m"] = [[0.0, 0.0, 0.8], [0.0, 0.0, 1.0]]
+            target_state_0["body_pos_world_m"] = [[0.0, 0.0, 0.9], [0.0, 0.2, 1.0]]
+
+            pred_state_1 = dict(pred_state_0)
+            target_state_1 = dict(target_state_0)
+            pred_state_1["body_pos_world_m"] = [[1.0, 0.0, 0.8], [1.0, 0.0, 1.0]]
+            target_state_1["body_pos_world_m"] = [[1.0, 0.0, 0.8], [1.3, 0.4, 1.0]]
+            packets_path.write_text(
+                "".join(
+                    json.dumps(packet, sort_keys=True) + "\n"
+                    for packet in [
+                        _packet(frame_idx=0, pred=pred_state_0, target=target_state_0),
+                        _packet(
+                            frame_idx=1,
+                            pred=pred_state_1,
+                            target=target_state_1,
+                            body_position_weights=[1.0, 3.0],
+                        ),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            summary = aggregate_packet_metrics(input_jsonl=packets_path, output_dir=output_dir)
+            pair_rows = _read_csv(output_dir / "per_frame_pair_body_metrics.csv")
+
+        mpjpe = summary["body_position_metrics"]["mpjpe"]
+        self.assertEqual(mpjpe["status"], "available")
+        self.assertEqual(mpjpe["available_frame_count"], 2)
+        self.assertEqual(mpjpe["body_sample_count"], 4)
+        self.assertAlmostEqual(mpjpe["mean_m"], 0.2)
+        self.assertAlmostEqual(mpjpe["frame_m"]["mean"], 0.2)
+        w_mpjpe = summary["body_position_metrics"]["w_mpjpe"]
+        self.assertEqual(w_mpjpe["status"], "available")
+        self.assertEqual(w_mpjpe["available_frame_count"], 1)
+        self.assertEqual(w_mpjpe["unavailable_frame_count"], 1)
+        self.assertEqual(
+            w_mpjpe["unavailable_reason_counts"],
+            {"body_position_weights missing; w_mpjpe unavailable": 1},
+        )
+        self.assertAlmostEqual(w_mpjpe["mean_m"], 0.375)
+        self.assertEqual(len(pair_rows), 2)
+        self.assertEqual(pair_rows[0]["mpjpe_status"], "available")
+        self.assertEqual(pair_rows[0]["mpjpe_body_sample_count"], "2")
+        self.assertEqual(pair_rows[1]["w_mpjpe_status"], "available")
+
+    def test_body_position_mpjpe_stays_unavailable_when_positions_are_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            packets_path = root / "isaac_src_packets.jsonl"
+            output_dir = root / "metrics"
+            pred_state = _state(
+                foot_in_contact=[False, False],
+                foot_contact_force_n=[0.0, 0.0],
+                support_pair_count=0,
+                support_margin_m=0.0,
+                floating_guard=False,
+                foot_slide_speed_mps=[None, None],
+                foot_slide_flags=[None, None],
+                foot_skate_distance_m=[None, None],
+                foot_skate_flags=[None, None],
+                foot_float_clearance_m=[None, None],
+                foot_float_flags=[None, None],
+            )
+            target_state = dict(pred_state)
+            pred_state.pop("body_pos_world_m")
+            packets_path.write_text(
+                json.dumps(_packet(frame_idx=0, pred=pred_state, target=target_state)) + "\n",
+                encoding="utf-8",
+            )
+
+            summary = aggregate_packet_metrics(input_jsonl=packets_path, output_dir=output_dir)
+            pair_rows = _read_csv(output_dir / "per_frame_pair_body_metrics.csv")
+
+        mpjpe = summary["body_position_metrics"]["mpjpe"]
+        self.assertEqual(mpjpe["status"], "unavailable")
+        self.assertIsNone(mpjpe["mean_m"])
+        self.assertEqual(mpjpe["available_frame_count"], 0)
+        self.assertEqual(mpjpe["unavailable_frame_count"], 1)
+        self.assertEqual(
+            mpjpe["unavailable_reason_counts"],
+            {"pred.body_pos_world_m is missing or not a list": 1},
+        )
+        self.assertEqual(pair_rows[0]["mpjpe_status"], "unavailable")
+        self.assertEqual(
+            pair_rows[0]["mpjpe_reason"],
+            "pred.body_pos_world_m is missing or not a list",
+        )
 
     def test_blocked_foot_ground_does_not_fabricate_contact_or_force_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -154,8 +283,14 @@ class IsaacSrcMetricAggregationTests(unittest.TestCase):
         self.assertEqual(pred["feet"][0]["force_n"]["null_count"], 1)
 
 
-def _packet(*, frame_idx: int, pred: dict[str, object], target: dict[str, object]) -> dict[str, object]:
-    return {
+def _packet(
+    *,
+    frame_idx: int,
+    pred: dict[str, object],
+    target: dict[str, object],
+    body_position_weights: list[float] | None = None,
+) -> dict[str, object]:
+    packet: dict[str, object] = {
         "schema_version": "lr239.isaac_src_contact_packets.v1",
         "variant": "soma_uniform",
         "frame_idx": frame_idx,
@@ -165,6 +300,9 @@ def _packet(*, frame_idx: int, pred: dict[str, object], target: dict[str, object
         "target": target,
         "contract": "test-contract",
     }
+    if body_position_weights is not None:
+        packet["body_position_weights"] = body_position_weights
+    return packet
 
 
 def _state(

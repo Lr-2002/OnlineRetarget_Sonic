@@ -49,6 +49,9 @@ PYTHONPATH=src:. python3 scripts/summarize_lr239_isaac_src_packets.py \
 Expected metric artifacts:
 
 - `packet_metric_summary.json`
+- `per_frame_pair_body_metrics.json`
+- `per_frame_pair_body_metrics.jsonl`
+- `per_frame_pair_body_metrics.csv`
 - `per_frame_side_metrics.json`
 - `per_frame_side_metrics.jsonl`
 - `per_frame_side_metrics.csv`
@@ -76,6 +79,7 @@ Contact families are intentionally separated:
 
 `online_retarget.isaac_src_metrics` consumes `isaac_src_packets.jsonl` and writes summary plus per-frame/per-side CSV/JSON artifacts for review and LR-235 ingestion. The first implementation aggregates only the clear metric families:
 
+- Body-position MPJPE: `body_position_metrics.mpjpe.mean_m` is computed only from paired `pred.body_pos_world_m` and `target.body_pos_world_m` arrays in matching body order. Missing, malformed, mismatched, or unaligned body-position inputs are recorded as `unavailable` with reason counts and per-frame rows; they are not proxied from joints and are not zero-filled. `body_position_metrics.w_mpjpe` is emitted only when explicit `body_position_weights` are present and valid.
 - Foot-ground contact: foot-ground availability rate, per-foot contact rate, force summary, and support pair count.
 - Footskate / slide: `foot_slide_speed_mps`, `foot_skate_distance_m`, and their flags summarized as max/mean/rate where values are available.
 - Floating/support: `floating_guard`, `support_margin_m`, and `foot_float_clearance_m` summarized as guard violation/pass rates and clearance/support statistics. This does not attempt an airborne/action mask.

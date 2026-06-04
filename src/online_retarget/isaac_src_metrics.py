@@ -7,6 +7,7 @@ from collections import Counter
 import csv
 import json
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -20,6 +21,9 @@ SIDES: tuple[str, str] = ("pred", "target")
 @dataclass(frozen=True)
 class PacketMetricOutputs:
     summary_json: Path
+    per_frame_pair_json: Path
+    per_frame_pair_jsonl: Path
+    per_frame_pair_csv: Path
     per_frame_side_json: Path
     per_frame_side_jsonl: Path
     per_frame_side_csv: Path
@@ -28,6 +32,9 @@ class PacketMetricOutputs:
     def to_payload(self) -> dict[str, str]:
         return {
             "summary_json": str(self.summary_json),
+            "per_frame_pair_json": str(self.per_frame_pair_json),
+            "per_frame_pair_jsonl": str(self.per_frame_pair_jsonl),
+            "per_frame_pair_csv": str(self.per_frame_pair_csv),
             "per_frame_side_json": str(self.per_frame_side_json),
             "per_frame_side_jsonl": str(self.per_frame_side_jsonl),
             "per_frame_side_csv": str(self.per_frame_side_csv),
@@ -151,6 +158,99 @@ class FootStats:
             "skate_flags": self.skate_flags.payload(true_rate_name="skate_violation_rate"),
             "float_clearance_m": self.float_clearance_m.payload(),
             "float_flags": self.float_flags.payload(true_rate_name="float_violation_rate"),
+        }
+
+
+class BodyPositionMetricStats:
+    def __init__(self) -> None:
+        self.frame_count = 0
+        self.mpjpe_available_frame_count = 0
+        self.mpjpe_unavailable_frame_count = 0
+        self.mpjpe_error_sum_m = 0.0
+        self.mpjpe_body_sample_count = 0
+        self.mpjpe_frame_m = NumericStats()
+        self.mpjpe_reason_counts: Counter[str] = Counter()
+        self.w_mpjpe_available_frame_count = 0
+        self.w_mpjpe_unavailable_frame_count = 0
+        self.w_mpjpe_weighted_error_sum_m = 0.0
+        self.w_mpjpe_weight_sum = 0.0
+        self.w_mpjpe_frame_m = NumericStats()
+        self.w_mpjpe_reason_counts: Counter[str] = Counter()
+
+    def add(self, row: Mapping[str, object]) -> None:
+        self.frame_count += 1
+        if row.get("mpjpe_status") == "available":
+            error_sum = _number_or_none(row.get("mpjpe_error_sum_m"))
+            sample_count = _int_or_none(row.get("mpjpe_body_sample_count"))
+            if error_sum is None or sample_count is None or sample_count <= 0:
+                self.mpjpe_unavailable_frame_count += 1
+                self.mpjpe_reason_counts["mpjpe accounting fields are invalid"] += 1
+            else:
+                self.mpjpe_available_frame_count += 1
+                self.mpjpe_error_sum_m += error_sum
+                self.mpjpe_body_sample_count += sample_count
+                self.mpjpe_frame_m.add(row.get("mpjpe_m"))
+        else:
+            self.mpjpe_unavailable_frame_count += 1
+            self.mpjpe_reason_counts[_reason(row.get("mpjpe_reason"))] += 1
+
+        if row.get("w_mpjpe_status") == "available":
+            weighted_sum = _number_or_none(row.get("w_mpjpe_weighted_error_sum_m"))
+            weight_sum = _number_or_none(row.get("w_mpjpe_weight_sum"))
+            if weighted_sum is None or weight_sum is None or weight_sum <= 0:
+                self.w_mpjpe_unavailable_frame_count += 1
+                self.w_mpjpe_reason_counts["w_mpjpe accounting fields are invalid"] += 1
+            else:
+                self.w_mpjpe_available_frame_count += 1
+                self.w_mpjpe_weighted_error_sum_m += weighted_sum
+                self.w_mpjpe_weight_sum += weight_sum
+                self.w_mpjpe_frame_m.add(row.get("w_mpjpe_m"))
+        else:
+            self.w_mpjpe_unavailable_frame_count += 1
+            self.w_mpjpe_reason_counts[_reason(row.get("w_mpjpe_reason"))] += 1
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "mpjpe": {
+                "status": (
+                    "available"
+                    if self.mpjpe_body_sample_count > 0
+                    else "unavailable"
+                ),
+                "mean_m": (
+                    None
+                    if self.mpjpe_body_sample_count == 0
+                    else self.mpjpe_error_sum_m / self.mpjpe_body_sample_count
+                ),
+                "frame_m": self.mpjpe_frame_m.payload(),
+                "available_frame_count": self.mpjpe_available_frame_count,
+                "unavailable_frame_count": self.mpjpe_unavailable_frame_count,
+                "body_sample_count": self.mpjpe_body_sample_count,
+                "unavailable_reason_counts": _counter_payload(
+                    self.mpjpe_reason_counts
+                ),
+            },
+            "w_mpjpe": {
+                "status": (
+                    "available"
+                    if self.w_mpjpe_weight_sum > 0
+                    else "unavailable"
+                ),
+                "mean_m": (
+                    None
+                    if self.w_mpjpe_weight_sum == 0
+                    else self.w_mpjpe_weighted_error_sum_m / self.w_mpjpe_weight_sum
+                ),
+                "frame_m": self.w_mpjpe_frame_m.payload(),
+                "available_frame_count": self.w_mpjpe_available_frame_count,
+                "unavailable_frame_count": self.w_mpjpe_unavailable_frame_count,
+                "weight_sum": (
+                    None if self.w_mpjpe_weight_sum == 0 else self.w_mpjpe_weight_sum
+                ),
+                "unavailable_reason_counts": _counter_payload(
+                    self.w_mpjpe_reason_counts
+                ),
+            },
         }
 
 
@@ -307,14 +407,19 @@ def aggregate_packet_metrics(
     output_dir.mkdir(parents=True, exist_ok=True)
     outputs = PacketMetricOutputs(
         summary_json=output_dir / "packet_metric_summary.json",
+        per_frame_pair_json=output_dir / "per_frame_pair_body_metrics.json",
+        per_frame_pair_jsonl=output_dir / "per_frame_pair_body_metrics.jsonl",
+        per_frame_pair_csv=output_dir / "per_frame_pair_body_metrics.csv",
         per_frame_side_json=output_dir / "per_frame_side_metrics.json",
         per_frame_side_jsonl=output_dir / "per_frame_side_metrics.jsonl",
         per_frame_side_csv=output_dir / "per_frame_side_metrics.csv",
         per_frame_side_foot_csv=output_dir / "per_frame_side_foot_metrics.csv",
     )
     stats = {side: SideStats(side, foot_links) for side in SIDES}
+    body_position_stats = BodyPositionMetricStats()
     variant_counts: Counter[str] = Counter()
     frame_indices: list[int] = []
+    pair_rows: list[dict[str, object]] = []
     side_rows: list[dict[str, object]] = []
     foot_rows: list[dict[str, object]] = []
 
@@ -324,6 +429,9 @@ def aggregate_packet_metrics(
             frame_indices.append(frame_idx)
         variant = str(packet.get("variant", ""))
         variant_counts[variant] += 1
+        pair_row = _body_position_metric_row(packet)
+        body_position_stats.add(pair_row)
+        pair_rows.append(pair_row)
         for side in SIDES:
             state_packet = packet.get(side)
             if not isinstance(state_packet, Mapping):
@@ -333,6 +441,9 @@ def aggregate_packet_metrics(
             side_rows.append(side_row)
             foot_rows.extend(_foot_rows(side_row, state_packet, foot_links))
 
+    _write_json(outputs.per_frame_pair_json, {"rows": pair_rows})
+    _write_jsonl(outputs.per_frame_pair_jsonl, pair_rows)
+    _write_csv(outputs.per_frame_pair_csv, pair_rows)
     _write_json(outputs.per_frame_side_json, {"rows": side_rows})
     _write_jsonl(outputs.per_frame_side_jsonl, side_rows)
     _write_csv(outputs.per_frame_side_csv, side_rows)
@@ -351,8 +462,19 @@ def aggregate_packet_metrics(
             "unique_count": len(set(frame_indices)),
             "consecutive": _consecutive(frame_indices),
         },
+        "body_position_metrics": body_position_stats.payload(),
         "by_side": {side: stats[side].payload() for side in SIDES},
         "metric_rules": {
+            "body_position_mpjpe_policy": (
+                "mpjpe is computed only from paired pred/target body_pos_world_m "
+                "arrays in the same body order; missing, malformed, or misaligned "
+                "body-position inputs are reported as unavailable and are not "
+                "converted to zero or inferred from joints"
+            ),
+            "weighted_body_position_mpjpe_policy": (
+                "w_mpjpe requires explicit body_position_weights matching "
+                "body_pos_world_m; weights are not inferred"
+            ),
             "body_self_src_numeric_policy": (
                 "body_pair_contacts, self_collision_count, cross_ratio, and "
                 "cross_ratio_guard are summarized only as status/null availability; "
@@ -366,6 +488,229 @@ def aggregate_packet_metrics(
     }
     _write_json(outputs.summary_json, summary)
     return summary
+
+
+def _body_position_metric_row(frame_packet: Mapping[str, object]) -> dict[str, object]:
+    row: dict[str, object] = {
+        "schema_version": frame_packet.get("schema_version"),
+        "variant": frame_packet.get("variant"),
+        "frame_idx": frame_packet.get("frame_idx"),
+        "t": frame_packet.get("t"),
+        "dt": frame_packet.get("dt"),
+        "mpjpe_status": "unavailable",
+        "mpjpe_reason": "",
+        "mpjpe_m": None,
+        "mpjpe_error_sum_m": None,
+        "mpjpe_body_sample_count": 0,
+        "body_count": None,
+        "w_mpjpe_status": "unavailable",
+        "w_mpjpe_reason": "",
+        "w_mpjpe_m": None,
+        "w_mpjpe_weighted_error_sum_m": None,
+        "w_mpjpe_weight_sum": None,
+    }
+    pred_state = frame_packet.get("pred")
+    target_state = frame_packet.get("target")
+    if not isinstance(pred_state, Mapping) or not isinstance(target_state, Mapping):
+        reason = "pred and target state packets must both be present"
+        row["mpjpe_reason"] = reason
+        row["w_mpjpe_reason"] = f"mpjpe unavailable: {reason}"
+        return row
+
+    pred_positions, pred_reason = _body_positions_or_reason(pred_state, "pred")
+    if pred_positions is None:
+        row["mpjpe_reason"] = pred_reason
+        row["w_mpjpe_reason"] = f"mpjpe unavailable: {pred_reason}"
+        return row
+    target_positions, target_reason = _body_positions_or_reason(target_state, "target")
+    if target_positions is None:
+        row["mpjpe_reason"] = target_reason
+        row["w_mpjpe_reason"] = f"mpjpe unavailable: {target_reason}"
+        return row
+    if len(pred_positions) != len(target_positions):
+        reason = (
+            "body_pos_world_m body count mismatch: "
+            f"pred {len(pred_positions)} != target {len(target_positions)}"
+        )
+        row["mpjpe_reason"] = reason
+        row["w_mpjpe_reason"] = f"mpjpe unavailable: {reason}"
+        return row
+    names_reason = _body_names_alignment_reason(
+        pred_state,
+        target_state,
+        len(pred_positions),
+        len(target_positions),
+    )
+    if names_reason:
+        row["mpjpe_reason"] = names_reason
+        row["w_mpjpe_reason"] = f"mpjpe unavailable: {names_reason}"
+        return row
+
+    errors = [
+        math.dist(pred_position, target_position)
+        for pred_position, target_position in zip(
+            pred_positions,
+            target_positions,
+            strict=True,
+        )
+    ]
+    error_sum = sum(errors)
+    body_count = len(errors)
+    row.update(
+        {
+            "mpjpe_status": "available",
+            "mpjpe_reason": "",
+            "mpjpe_m": error_sum / body_count,
+            "mpjpe_error_sum_m": error_sum,
+            "mpjpe_body_sample_count": body_count,
+            "body_count": body_count,
+        }
+    )
+
+    weights, weights_reason = _body_position_weights_or_reason(
+        frame_packet,
+        pred_state,
+        target_state,
+        body_count,
+    )
+    if weights is None:
+        row["w_mpjpe_reason"] = weights_reason
+        return row
+
+    weighted_error_sum = sum(error * weight for error, weight in zip(errors, weights, strict=True))
+    weight_sum = sum(weights)
+    row.update(
+        {
+            "w_mpjpe_status": "available",
+            "w_mpjpe_reason": "",
+            "w_mpjpe_m": weighted_error_sum / weight_sum,
+            "w_mpjpe_weighted_error_sum_m": weighted_error_sum,
+            "w_mpjpe_weight_sum": weight_sum,
+        }
+    )
+    return row
+
+
+def _body_positions_or_reason(
+    state_packet: Mapping[str, object],
+    side: str,
+) -> tuple[list[tuple[float, float, float]] | None, str]:
+    raw_positions = state_packet.get("body_pos_world_m")
+    if not isinstance(raw_positions, list):
+        return None, f"{side}.body_pos_world_m is missing or not a list"
+    if not raw_positions:
+        return None, f"{side}.body_pos_world_m is empty"
+    positions: list[tuple[float, float, float]] = []
+    for body_index, raw_position in enumerate(raw_positions):
+        if not isinstance(raw_position, list) or len(raw_position) != 3:
+            return (
+                None,
+                f"{side}.body_pos_world_m[{body_index}] is not a 3D vector",
+            )
+        coords: list[float] = []
+        for axis_index, raw_value in enumerate(raw_position):
+            value = _finite_number_or_none(raw_value)
+            if value is None:
+                return (
+                    None,
+                    (
+                        f"{side}.body_pos_world_m[{body_index}][{axis_index}] "
+                        "is not a finite number"
+                    ),
+                )
+            coords.append(value)
+        positions.append((coords[0], coords[1], coords[2]))
+    return positions, ""
+
+
+def _body_names_alignment_reason(
+    pred_state: Mapping[str, object],
+    target_state: Mapping[str, object],
+    pred_body_count: int,
+    target_body_count: int,
+) -> str:
+    pred_names, pred_reason = _body_names_or_reason(
+        pred_state,
+        "pred",
+        pred_body_count,
+    )
+    if pred_reason:
+        return pred_reason
+    target_names, target_reason = _body_names_or_reason(
+        target_state,
+        "target",
+        target_body_count,
+    )
+    if target_reason:
+        return target_reason
+    if pred_names is not None and target_names is not None and pred_names != target_names:
+        return "pred.body_names and target.body_names do not match"
+    return ""
+
+
+def _body_names_or_reason(
+    state_packet: Mapping[str, object],
+    side: str,
+    expected_count: int,
+) -> tuple[tuple[str, ...] | None, str]:
+    if "body_names" not in state_packet:
+        return None, ""
+    raw_names = state_packet.get("body_names")
+    if not isinstance(raw_names, list):
+        return None, f"{side}.body_names is not a list"
+    names = tuple(str(name) for name in raw_names)
+    if len(names) != expected_count:
+        return (
+            None,
+            (
+                f"{side}.body_names length {len(names)} does not match "
+                f"body_pos_world_m length {expected_count}"
+            ),
+        )
+    return names, ""
+
+
+def _body_position_weights_or_reason(
+    frame_packet: Mapping[str, object],
+    pred_state: Mapping[str, object],
+    target_state: Mapping[str, object],
+    body_count: int,
+) -> tuple[list[float] | None, str]:
+    for source_name, source in (
+        ("frame", frame_packet),
+        ("pred", pred_state),
+        ("target", target_state),
+    ):
+        if "body_position_weights" in source:
+            return _weights_or_reason(
+                source.get("body_position_weights"),
+                f"{source_name}.body_position_weights",
+                body_count,
+            )
+    return None, "body_position_weights missing; w_mpjpe unavailable"
+
+
+def _weights_or_reason(
+    raw_weights: object,
+    source_name: str,
+    body_count: int,
+) -> tuple[list[float] | None, str]:
+    if not isinstance(raw_weights, list):
+        return None, f"{source_name} is not a list"
+    if len(raw_weights) != body_count:
+        return (
+            None,
+            f"{source_name} length {len(raw_weights)} does not match body_count {body_count}",
+        )
+    weights: list[float] = []
+    for index, raw_weight in enumerate(raw_weights):
+        weight = _finite_number_or_none(raw_weight)
+        if weight is None or weight < 0:
+            return None, f"{source_name}[{index}] is not a non-negative finite number"
+        weights.append(weight)
+    if sum(weights) <= 0:
+        return None, f"{source_name} sum must be positive"
+    return weights, ""
 
 
 def _side_row(
@@ -507,6 +852,13 @@ def _number_or_none(value: object) -> float | None:
     return None
 
 
+def _finite_number_or_none(value: object) -> float | None:
+    number = _number_or_none(value)
+    if number is None or not math.isfinite(number):
+        return None
+    return number
+
+
 def _int_or_none(value: object) -> int | None:
     if isinstance(value, bool):
         return None
@@ -527,6 +879,12 @@ def _status(value: object) -> str:
     if isinstance(value, str) and value:
         return value
     return "missing"
+
+
+def _reason(value: object) -> str:
+    if isinstance(value, str) and value:
+        return value
+    return "missing reason"
 
 
 def _rate(numerator: int, denominator: int) -> float | None:
