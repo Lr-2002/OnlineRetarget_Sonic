@@ -48,7 +48,12 @@ if SRC_ROOT.exists() and str(SRC_ROOT) not in sys.path:
 
 from online_retarget.a0_visual_validation import (  # noqa: E402
     ACCEPTANCE_G1_BACKEND,
+    ACCEPTANCE_ROW2_DATA_SOURCE,
+    ACCEPTANCE_ROW2_ROLE,
+    ACCEPTANCE_ROW3_DATA_SOURCE,
+    ACCEPTANCE_ROW3_ROLE,
     ACCEPTANCE_SOURCE_BACKEND,
+    ACCEPTANCE_SOURCE_RENDERER,
     DEBUG_CAPSULE_BACKEND,
     PRIMARY_VISUAL_BACKEND,
     A0VisualValidationRenderer,
@@ -1358,6 +1363,113 @@ def cleanup_distributed_runtime(runtime: Mapping[str, Any]) -> None:
 def distributed_barrier(runtime: Mapping[str, Any]) -> None:
     if runtime.get("distributed") and torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.barrier()
+
+
+RANK0_STAGE_TERMINAL_STATUSES = {"ok", "failed"}
+
+
+def rank0_stage_status_path(output_dir: Path, stage: str, *, step: int | None = None) -> Path:
+    suffix = f"step_{int(step):08d}" if step is not None else "final"
+    return output_dir / "logs" / "a0_rank0_stage_status" / f"{stage}_{suffix}.json"
+
+
+def write_rank0_stage_status(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(json.dumps(dict(payload), indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def wait_for_rank0_stage_status(
+    path: Path,
+    *,
+    timeout_sec: float,
+    poll_sec: float = 5.0,
+    stage_trace: StageTracer | None = None,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    last_error = ""
+    while True:
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                last_error = repr(exc)
+            else:
+                if str(payload.get("status", "")) in RANK0_STAGE_TERMINAL_STATUSES:
+                    return dict(payload)
+                last_error = f"non_terminal_status={payload.get('status', '')}"
+        elapsed = time.perf_counter() - started
+        if elapsed >= timeout_sec:
+            if stage_trace is not None:
+                stage_trace.log(
+                    "rank0_stage_status_wait",
+                    "timeout",
+                    path=str(path),
+                    timeout_sec=timeout_sec,
+                    last_error=last_error,
+                )
+            raise TimeoutError(
+                f"rank0 stage status did not reach a terminal state within {timeout_sec:g}s: "
+                f"{path}; last_error={last_error}"
+            )
+        if stage_trace is not None and (not path.exists() or last_error):
+            stage_trace.log(
+                "rank0_stage_status_wait",
+                "poll",
+                path=str(path),
+                elapsed_sec=round(elapsed, 3),
+                last_error=last_error,
+            )
+        time.sleep(max(0.1, float(poll_sec)))
+
+
+def rank0_stage_sync_timeout(config: Mapping[str, Any], stage: str) -> float:
+    visual_cfg = config.get("visual_validation", {})
+    if not isinstance(visual_cfg, Mapping):
+        visual_cfg = {}
+    stage_key = f"{stage}_sync_timeout_sec"
+    if stage_key in visual_cfg:
+        return float(visual_cfg[stage_key])
+    if "distributed_sync_timeout_sec" in visual_cfg:
+        return float(visual_cfg["distributed_sync_timeout_sec"])
+    if stage == "visual_validation":
+        per_clip_timeout = float(visual_cfg.get("somamesh_render_timeout_sec", 900.0)) + float(
+            visual_cfg.get("isaaclab_render_timeout_sec", 900.0)
+        )
+        requested = max(1, int(visual_cfg.get("num_videos", 8)))
+        return max(3600.0, per_clip_timeout * requested + 600.0)
+    return 1800.0
+
+
+def rank0_stage_sync_poll(config: Mapping[str, Any]) -> float:
+    visual_cfg = config.get("visual_validation", {})
+    if isinstance(visual_cfg, Mapping) and "distributed_sync_poll_sec" in visual_cfg:
+        return float(visual_cfg["distributed_sync_poll_sec"])
+    return 5.0
+
+
+def finish_wandb_run(wandb_run: Any, *, exit_code: int = 0) -> None:
+    if wandb_run is None:
+        return
+    try:
+        wandb_run.finish(exit_code=exit_code)
+    except TypeError:
+        wandb_run.finish()
+
+
+def accepted_visual_metrics_failed(visual_metrics: Mapping[str, Any], visual_cfg: Mapping[str, Any]) -> bool:
+    if not bool(visual_cfg.get("acceptance_backend", False)):
+        return False
+    try:
+        failed = float(visual_metrics.get("visual_validation/videos_failed", 0.0))
+    except (TypeError, ValueError):
+        failed = 1.0
+    try:
+        ok = float(visual_metrics.get("visual_validation/videos_ok", 0.0))
+    except (TypeError, ValueError):
+        ok = 0.0
+    return failed > 0.0 or ok <= 0.0
 
 
 def is_main_process(runtime: Mapping[str, Any]) -> bool:
@@ -2876,7 +2988,7 @@ def run_visual_validation(
             }
             report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             return {"visual_validation/videos_ok": 0.0, "visual_validation/videos_failed": float(len(rows))}
-        render_deps: Mapping[str, Any] = {}
+        render_deps = {}
         g1_model = None
     else:
         try:
@@ -3429,7 +3541,7 @@ def _render_motionlib_acceptance_visual_validation_clip(
     isaac_render_script: Path | str | None = None,
     execute_isaaclab: bool = True,
 ) -> dict[str, Any]:
-    del render_deps, g1_model
+    del g1_model
     cfg = config.get("visual_validation", {})
     clip_name = _safe_filename(str(row.get("filename") or Path(str(row["relative_path"])).stem))
     sample_id = clip_name
@@ -3455,7 +3567,6 @@ def _render_motionlib_acceptance_visual_validation_clip(
     frame_count = min(total_frames, requested_frames)
     render_width = int(cfg.get("width", 640))
     render_height = int(cfg.get("height", 360))
-
     source_bvh = _resolve_source_bvh(row, config, output_dir)
     source_report = _render_somamesh_shapes_source_video(
         cfg=cfg,
@@ -3466,22 +3577,7 @@ def _render_motionlib_acceptance_visual_validation_clip(
         frame_count=frame_count,
         width=render_width,
         height=render_height,
-        title="Soma",
-    )
-    source_report.update(
-        {
-            "panel": "Soma",
-            "sample_id": sample_id,
-            "source_coordinate_frame": "global_soma_display",
-            "source_display_transform": SOMA_DISPLAY_TRANSFORM,
-            "backend": "SomaMeshShapes",
-            "render_backend": ACCEPTANCE_SOURCE_BACKEND,
-            "soma_backend": "SomaMeshShapes",
-            "skeleton_fallback_used": False,
-            "skeleton_capsule_fallback": "disabled",
-            "source_bvh": str(source_bvh) if source_bvh is not None else "",
-            "source_bvh_sha256": _path_sha256(source_bvh) if source_bvh is not None and source_bvh.exists() else "",
-        }
+        sample_id=sample_id,
     )
 
     root_pos = robot_root["root_pos"][:frame_count]
@@ -3494,6 +3590,7 @@ def _render_motionlib_acceptance_visual_validation_clip(
         fps=fps,
         joint_names=G1_SONIC_JOINT_NAMES[:joint_dim],
     )
+    target_motion_asset_report.update({"data_source": ACCEPTANCE_ROW2_DATA_SOURCE, "row_role": ACCEPTANCE_ROW2_ROLE})
     isaac_python = isaac_python_bin or cfg.get("isaac_python_bin") or "/workspace/isaaclab/_isaac_sim/python.sh"
     isaac_script = isaac_render_script or cfg.get("isaac_render_script") or ROOT / "scripts" / "render_g1_isaac_pair.py"
     target_report = visual_renderer.render_g1_isaaclab_playback(
@@ -3513,7 +3610,7 @@ def _render_motionlib_acceptance_visual_validation_clip(
             "sample_id": sample_id,
             "backend": "IsaacLab",
             "render_backend": ACCEPTANCE_G1_BACKEND,
-            "data_source": "motionlib_target",
+            "data_source": ACCEPTANCE_ROW2_DATA_SOURCE,
             "target_motion_path": target_motion_asset_report["path"],
             "target_motion_sha256": target_motion_asset_report["sha256"],
             "capsule_renderer_used": False,
@@ -3542,6 +3639,7 @@ def _render_motionlib_acceptance_visual_validation_clip(
         fps=fps,
         joint_names=G1_SONIC_JOINT_NAMES[:joint_dim],
     )
+    motion_asset_report.update({"data_source": ACCEPTANCE_ROW3_DATA_SOURCE, "row_role": ACCEPTANCE_ROW3_ROLE})
     inference_report = visual_renderer.render_g1_isaaclab_playback(
         python_bin=isaac_python,
         script_path=isaac_script,
@@ -3559,7 +3657,7 @@ def _render_motionlib_acceptance_visual_validation_clip(
             "sample_id": sample_id,
             "backend": "IsaacLab",
             "render_backend": ACCEPTANCE_G1_BACKEND,
-            "data_source": "model_prediction",
+            "data_source": ACCEPTANCE_ROW3_DATA_SOURCE,
             "prediction_motion_path": motion_asset_report["path"],
             "prediction_motion_sha256": motion_asset_report["sha256"],
             "checkpoint": str(cfg.get("checkpoint_path", "")),
@@ -3630,28 +3728,21 @@ def _render_somamesh_shapes_source_video(
     frame_count: int,
     width: int,
     height: int,
-    title: str,
+    sample_id: str,
 ) -> dict[str, Any]:
-    if source_bvh is None:
-        return {
-            "status": "failed",
-            "message": "accepted Soma row requires a resolvable source BVH for SomaMeshShapes rendering",
-            "soma_backend": "SomaMeshShapes",
-            "skeleton_fallback_used": False,
-            "failure_reasons": ["source_bvh_missing"],
-        }
-    if not source_bvh.exists():
-        return {
-            "status": "failed",
-            "message": f"accepted Soma source BVH is missing: {source_bvh}",
-            "soma_backend": "SomaMeshShapes",
-            "skeleton_fallback_used": False,
-            "failure_reasons": ["source_bvh_missing"],
-            "source_bvh": str(source_bvh),
-        }
+    if source_bvh is None or not source_bvh.exists():
+        return _failed_somamesh_source_report(
+            "accepted SOMA Shapes Row 1 requires a resolvable source BVH for SomaMesh LBS rendering",
+            ["source_bvh_missing"],
+        )
+    try:
+        retargeter_root = _required_somamesh_path(cfg, ("soma_retargeter_root",), "soma_retargeter_root")
+        soma_usd = _required_somamesh_path(cfg, ("somamesh_usd", "soma_usd"), "SOMA USD")
+        script_path = _somamesh_renderer_script_path(cfg)
+    except (RuntimeError, FileNotFoundError) as exc:
+        return _failed_somamesh_source_report(str(exc), ["somamesh_dependency_missing"])
 
     python_bin = str(cfg.get("soma_python_bin") or cfg.get("somamesh_python_bin") or sys.executable)
-    script_path = Path(str(cfg.get("soma_render_script") or cfg.get("somamesh_render_script") or ROOT / "scripts" / "render_somamesh_source.py"))
     command = [
         python_bin,
         str(script_path),
@@ -3661,6 +3752,10 @@ def _render_somamesh_shapes_source_video(
         str(video_path),
         "--report",
         str(report_path),
+        "--retargeter-root",
+        str(retargeter_root),
+        "--soma-usd",
+        str(soma_usd),
         "--fps",
         f"{float(fps):g}",
         "--frame-count",
@@ -3672,15 +3767,11 @@ def _render_somamesh_shapes_source_video(
         "--stride-triangles",
         str(int(cfg.get("somamesh_triangle_stride", 3))),
         "--title",
-        str(title),
+        str(sample_id),
     ]
-    if cfg.get("soma_retargeter_root"):
-        command.extend(["--retargeter-root", str(cfg["soma_retargeter_root"])])
-    if cfg.get("somamesh_usd") or cfg.get("soma_usd"):
-        command.extend(["--soma-usd", str(cfg.get("somamesh_usd") or cfg.get("soma_usd"))])
 
     timeout = float(cfg.get("somamesh_render_timeout_sec", 900.0))
-    env = _somamesh_renderer_env(cfg)
+    env = _somamesh_renderer_env(cfg, retargeter_root=retargeter_root)
     try:
         result = subprocess.run(
             command,
@@ -3692,103 +3783,221 @@ def _render_somamesh_shapes_source_video(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        return {
-            "status": "failed",
-            "message": "SomaMeshShapes renderer timed out",
-            "soma_backend": "SomaMeshShapes",
-            "skeleton_fallback_used": False,
-            "command": command,
-            "stdout_tail": str(exc.stdout or "")[-1000:],
-            "stderr_tail": str(exc.stderr or "")[-1000:],
-            "failure_reasons": ["somamesh_renderer_timeout"],
-        }
+        return _failed_somamesh_source_report(
+            "SomaMesh LBS renderer timed out",
+            ["somamesh_renderer_timeout"],
+            command=command,
+            stdout_tail=str(exc.stdout or "")[-1000:],
+            stderr_tail=str(exc.stderr or "")[-1000:],
+        )
+    except OSError as exc:
+        return _failed_somamesh_source_report(
+            f"SomaMesh LBS renderer could not start: {exc}",
+            ["somamesh_renderer_start_failed"],
+            command=command,
+        )
 
     if result.returncode != 0:
-        return {
-            "status": "failed",
-            "message": "SomaMeshShapes renderer failed",
-            "soma_backend": "SomaMeshShapes",
-            "skeleton_fallback_used": False,
-            "command": command,
-            "returncode": int(result.returncode),
-            "stdout_tail": result.stdout[-1000:],
-            "stderr_tail": result.stderr[-1000:],
-            "failure_reasons": [f"somamesh_renderer_returncode={result.returncode}"],
-        }
+        return _failed_somamesh_source_report(
+            "SomaMesh LBS renderer failed",
+            [f"somamesh_renderer_returncode={result.returncode}"],
+            command=command,
+            returncode=int(result.returncode),
+            stdout_tail=result.stdout[-1000:],
+            stderr_tail=result.stderr[-1000:],
+        )
     if not report_path.exists():
-        return {
-            "status": "failed",
-            "message": "SomaMeshShapes renderer did not write a report",
-            "soma_backend": "SomaMeshShapes",
-            "skeleton_fallback_used": False,
-            "command": command,
-            "returncode": int(result.returncode),
-            "failure_reasons": ["somamesh_report_missing"],
-        }
+        return _failed_somamesh_source_report(
+            "SomaMesh LBS renderer did not write a report",
+            ["somamesh_report_missing"],
+            command=command,
+            returncode=int(result.returncode),
+        )
 
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        return {
-            "status": "failed",
-            "message": f"SomaMeshShapes renderer report is unreadable: {exc}",
-            "soma_backend": "SomaMeshShapes",
-            "skeleton_fallback_used": False,
-            "command": command,
-            "returncode": int(result.returncode),
-            "failure_reasons": ["somamesh_report_unreadable"],
-        }
+        return _failed_somamesh_source_report(
+            f"SomaMesh LBS renderer report is unreadable: {exc}",
+            ["somamesh_report_unreadable"],
+            command=command,
+            returncode=int(result.returncode),
+        )
 
-    renderer_status = report.get("status")
-    vertices = int(report.get("vertices", 0) or 0)
-    triangles = int(report.get("triangles_loaded", 0) or 0)
-    not_capsule = bool(report.get("not_capsule_bvh_visualizer", False))
-    video_exists = video_path.exists() and video_path.stat().st_size > 0
-    mesh_ok = renderer_status == "ok" and vertices > 0 and triangles > 0 and not_capsule and video_exists
     report.update(
         {
-            "status": "ok" if mesh_ok else "failed",
-            "soma_backend": "SomaMeshShapes",
-            "backend": "SomaMeshShapes",
+            "panel": "SOMA Shapes / SomaMesh",
+            "sample_id": sample_id,
+            "source_renderer": ACCEPTANCE_SOURCE_RENDERER,
+            "backend": ACCEPTANCE_SOURCE_BACKEND,
             "render_backend": ACCEPTANCE_SOURCE_BACKEND,
-            "skeleton_fallback_used": False,
+            "soma_backend": "SomaMeshShapes",
+            "source_provenance": {
+                "source_type": "source_bvh",
+                "source_bvh": str(source_bvh),
+                "source_bvh_sha256": _path_sha256(source_bvh),
+                "soma_usd": str(soma_usd),
+                "retargeter_root": str(retargeter_root),
+            },
             "source_bvh": str(source_bvh),
             "source_bvh_sha256": _path_sha256(source_bvh),
+            "soma_usd": str(soma_usd),
+            "retargeter_root": str(retargeter_root),
             "video_path": str(video_path),
             "report_path": str(report_path),
             "command": command,
             "returncode": int(result.returncode),
-            "mesh_skinning_metadata": {
-                "vertices": vertices,
-                "triangles_loaded": triangles,
-                "triangles_drawn_per_frame": int(report.get("triangles_drawn_per_frame", 0) or 0),
-                "renderer": str(report.get("renderer", "")),
-                "not_capsule_bvh_visualizer": not_capsule,
-            },
         }
     )
-    if not mesh_ok:
-        report["message"] = "SomaMeshShapes renderer did not produce required mesh/skinning metadata"
-        report["failure_reasons"] = [
-            reason
-            for reason, failed in (
-                ("somamesh_source_status_not_ok", renderer_status != "ok"),
-                ("somamesh_vertices_missing", vertices <= 0),
-                ("somamesh_triangles_missing", triangles <= 0),
-                ("somamesh_not_capsule_marker_missing", not not_capsule),
-                ("somamesh_video_missing", not video_exists),
-            )
-            if failed
-        ]
     return report
 
 
-def _somamesh_renderer_env(cfg: Mapping[str, Any]) -> dict[str, str]:
+def _failed_somamesh_source_report(
+    message: str,
+    failure_reasons: Sequence[str],
+    **extra: Any,
+) -> dict[str, Any]:
+    return {
+        "status": "failed",
+        "message": message,
+        "backend": ACCEPTANCE_SOURCE_BACKEND,
+        "render_backend": ACCEPTANCE_SOURCE_BACKEND,
+        "source_renderer": ACCEPTANCE_SOURCE_RENDERER,
+        "soma_backend": "SomaMeshShapes",
+        "source_provenance": {},
+        "failure_reasons": list(failure_reasons),
+        **extra,
+    }
+
+
+def preflight_acceptance_somamesh_visual_validation(
+    config: Mapping[str, Any],
+    output_dir: Path,
+    runtime: Mapping[str, Any] | None = None,
+) -> None:
+    cfg = config.get("visual_validation", {})
+    if not isinstance(cfg, Mapping) or not cfg.get("enabled", False) or not cfg.get("acceptance_backend", False):
+        return
+    if config.get("input_data", {}).get("format") != "soma_motionlib":
+        raise RuntimeError("accepted SomaMesh/SOMA Shapes visual validation requires input_data.format=soma_motionlib")
+
+    retargeter_root = _required_somamesh_path(cfg, ("soma_retargeter_root",), "soma_retargeter_root")
+    soma_usd = _required_somamesh_path(cfg, ("somamesh_usd", "soma_usd"), "SOMA USD")
+    script_path = _somamesh_renderer_script_path(cfg)
+    python_bin = str(cfg.get("soma_python_bin") or cfg.get("somamesh_python_bin") or sys.executable)
+    rank = int(runtime.get("rank", 0)) if runtime is not None else 0
+    preflight_dir = output_dir / "logs" / "somamesh_preflight"
+    preflight_dir.mkdir(parents=True, exist_ok=True)
+    report_path = preflight_dir / f"rank_{rank:02d}.json"
+    output_path = preflight_dir / f"rank_{rank:02d}.mp4"
+    command = [
+        python_bin,
+        str(script_path),
+        "--preflight-only",
+        "--output",
+        str(output_path),
+        "--report",
+        str(report_path),
+        "--retargeter-root",
+        str(retargeter_root),
+        "--soma-usd",
+        str(soma_usd),
+    ]
+    timeout = float(cfg.get("somamesh_preflight_timeout_sec", 60.0))
+    try:
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            env=_somamesh_renderer_env(cfg, retargeter_root=retargeter_root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "accepted SomaMesh/SOMA Shapes renderer preflight timed out before training; "
+            f"command={command}; stdout_tail={str(exc.stdout or '')[-1000:]}; "
+            f"stderr_tail={str(exc.stderr or '')[-1000:]}"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(
+            "accepted SomaMesh/SOMA Shapes renderer preflight could not start before training; "
+            f"command={command}; error={exc}"
+        ) from exc
+    if result.returncode != 0:
+        report: dict[str, Any] = {}
+        if report_path.exists():
+            try:
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                report = {}
+        raise RuntimeError(
+            "accepted SomaMesh/SOMA Shapes renderer preflight blocked before training; "
+            f"returncode={result.returncode}; command={command}; report={report}; "
+            f"stdout_tail={result.stdout[-1000:]}; stderr_tail={result.stderr[-1000:]}"
+        )
+
+
+def preflight_acceptance_skeleton_visual_validation(
+    config: Mapping[str, Any],
+    output_dir: Path,
+    runtime: Mapping[str, Any] | None = None,
+) -> None:
+    """Compatibility alias; accepted Row 1 is now SomaMesh/SOMA Shapes."""
+
+    preflight_acceptance_somamesh_visual_validation(config, output_dir, runtime)
+
+
+def _is_unresolved_somamesh_path(value: str) -> bool:
+    normalized = value.strip().lower()
+    return (
+        not normalized
+        or "must_configure" in normalized
+        or normalized.startswith("<")
+        or normalized.startswith("${")
+        or normalized in {"todo", "required", "none", "null"}
+    )
+
+
+def _required_somamesh_path(cfg: Mapping[str, Any], keys: Sequence[str], label: str) -> Path:
+    selected_key = ""
+    selected_value: Any = None
+    for key in keys:
+        if cfg.get(key):
+            selected_key = key
+            selected_value = cfg[key]
+            break
+    if selected_value is None:
+        names = " or ".join(f"visual_validation.{key}" for key in keys)
+        raise RuntimeError(f"{names} is required for accepted SomaMesh/SOMA Shapes visual validation")
+
+    value = str(selected_value)
+    if _is_unresolved_somamesh_path(value):
+        raise RuntimeError(f"visual_validation.{selected_key} is an unresolved {label} placeholder: {value}")
+    path = Path(value)
+    if not path.exists():
+        raise FileNotFoundError(f"visual_validation.{selected_key} is missing: {path}")
+    return path
+
+
+def _somamesh_renderer_script_path(cfg: Mapping[str, Any]) -> Path:
+    script_path = Path(
+        str(cfg.get("soma_render_script") or cfg.get("somamesh_render_script") or ROOT / "scripts" / "render_somamesh_source.py")
+    )
+    if not script_path.is_absolute():
+        script_path = ROOT / script_path
+    if not script_path.exists():
+        raise FileNotFoundError(f"visual_validation.soma_render_script is missing: {script_path}")
+    return script_path
+
+
+def _somamesh_renderer_env(cfg: Mapping[str, Any], *, retargeter_root: Path | None = None) -> dict[str, str]:
     env = os.environ.copy()
     paths: list[str] = []
-    retargeter_root_value = cfg.get("soma_retargeter_root")
-    if retargeter_root_value:
-        retargeter_root = Path(str(retargeter_root_value))
+    if retargeter_root is None and cfg.get("soma_retargeter_root"):
+        retargeter_root = Path(str(cfg["soma_retargeter_root"]))
+    if retargeter_root is not None:
         for candidate in (retargeter_root, retargeter_root / "src"):
             if candidate.exists():
                 paths.append(str(candidate))
@@ -3796,12 +4005,7 @@ def _somamesh_renderer_env(cfg: Mapping[str, Any]) -> dict[str, str]:
     existing_pythonpath = env.get("PYTHONPATH", "")
     if existing_pythonpath:
         paths.extend([path for path in existing_pythonpath.split(os.pathsep) if path])
-
-    deduped_paths: list[str] = []
-    for path in paths:
-        if path not in deduped_paths:
-            deduped_paths.append(path)
-    env["PYTHONPATH"] = os.pathsep.join(deduped_paths)
+    env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(paths))
     return env
 
 
@@ -4632,6 +4836,8 @@ def validate_runtime(
                 path = Path(str(cfg[key]))
                 if not path.exists():
                     raise FileNotFoundError(f"skeleton_ae.{key} is missing: {path}")
+    if not index_only:
+        preflight_acceptance_skeleton_visual_validation(config, output_dir, runtime)
     if runtime is not None and not is_main_process(runtime):
         return
     if config["runtime"].get("require_committed_code", True):
@@ -5247,10 +5453,22 @@ def main() -> None:
                 now = time.perf_counter()
                 if visual_validation_due(config, step, now=now, last_time=last_visual_validation_time):
                     visual_metrics: dict[str, float] = {}
+                    visual_status_path = rank0_stage_status_path(output_dir, "visual_validation", step=step)
                     if is_main:
                         visual_cfg = config.get("visual_validation", {})
                         if not isinstance(visual_cfg, Mapping):
                             visual_cfg = {}
+                        write_rank0_stage_status(
+                            visual_status_path,
+                            {
+                                "status": "running",
+                                "stage": "visual_validation",
+                                "step": int(step),
+                                "rank": int(rank),
+                                "pid": os.getpid(),
+                                "started_at": utc_now(),
+                            },
+                        )
                         try:
                             visual_metrics = run_visual_validation(
                                 model=unwrap_model(model),
@@ -5279,13 +5497,79 @@ def main() -> None:
                                 "message": str(exc),
                             }
                             print(json.dumps(visual_error, sort_keys=True), flush=True)
+                            wandb_finish_error = ""
+                            if wandb_run is not None and visual_metrics:
+                                try:
+                                    wandb_run.log(visual_metrics, step=step)
+                                    finish_wandb_run(wandb_run, exit_code=1)
+                                except Exception as finish_exc:
+                                    wandb_finish_error = repr(finish_exc)
+                                    visual_error["wandb_finish_error"] = wandb_finish_error
+                            write_rank0_stage_status(
+                                visual_status_path,
+                                {
+                                    "status": "failed",
+                                    "stage": "visual_validation",
+                                    "step": int(step),
+                                    "rank": int(rank),
+                                    "pid": os.getpid(),
+                                    "finished_at": utc_now(),
+                                    "error_type": type(exc).__name__,
+                                    "message": str(exc),
+                                    "metrics": visual_metrics,
+                                    "wandb_finish_error": wandb_finish_error,
+                                },
+                            )
+                            raise RuntimeError(f"rank0 visual validation failed at step {step}: {exc}") from exc
                         else:
                             print(
                                 json.dumps({"event": "visual_validation", "step": step, **visual_metrics}, sort_keys=True),
                                 flush=True,
                             )
-                        if wandb_run is not None and visual_metrics:
-                            wandb_run.log(visual_metrics, step=step)
+                            wandb_log_error = ""
+                            if wandb_run is not None and visual_metrics:
+                                try:
+                                    wandb_run.log(visual_metrics, step=step)
+                                except Exception as exc:
+                                    wandb_log_error = repr(exc)
+                            accepted_failed = accepted_visual_metrics_failed(visual_metrics, visual_cfg)
+                            stage_failed = accepted_failed or bool(wandb_log_error)
+                            status_payload = {
+                                "status": "failed" if stage_failed else "ok",
+                                "stage": "visual_validation",
+                                "step": int(step),
+                                "rank": int(rank),
+                                "pid": os.getpid(),
+                                "finished_at": utc_now(),
+                                "metrics": visual_metrics,
+                            }
+                            if accepted_failed:
+                                status_payload["message"] = "accepted visual validation returned failed metrics"
+                            if wandb_log_error:
+                                status_payload["wandb_log_error"] = wandb_log_error
+                                status_payload["message"] = "visual validation W&B metric log failed"
+                            if stage_failed and wandb_run is not None:
+                                try:
+                                    finish_wandb_run(wandb_run, exit_code=1)
+                                except Exception as exc:
+                                    status_payload["wandb_finish_error"] = repr(exc)
+                            write_rank0_stage_status(visual_status_path, status_payload)
+                            if stage_failed:
+                                raise RuntimeError(
+                                    f"rank0 visual validation finalize failed at step {step}: {status_payload}"
+                                )
+                    else:
+                        rank0_status = wait_for_rank0_stage_status(
+                            visual_status_path,
+                            timeout_sec=rank0_stage_sync_timeout(config, "visual_validation"),
+                            poll_sec=rank0_stage_sync_poll(config),
+                            stage_trace=stage_trace,
+                        )
+                        if rank0_status.get("status") != "ok":
+                            raise RuntimeError(
+                                f"rank0 visual validation failed at step {step}: "
+                                f"{rank0_status.get('message', rank0_status)}"
+                            )
                     distributed_barrier(runtime)
                     last_visual_validation_time = now
 
@@ -5296,12 +5580,70 @@ def main() -> None:
             epoch += 1
 
         final_metrics = {"step": step, "elapsed_sec": time.perf_counter() - start, "finished": True}
+        finalize_status_path = rank0_stage_status_path(output_dir, "training_finalize")
         if is_main:
-            save_checkpoint(output_dir, unwrap_model(model), optimizer, step, final_metrics, keep_last)
-            if wandb_run is not None:
-                wandb_run.summary.update(final_metrics)
-                wandb_run.finish()
-            print(json.dumps({"event": "finished", **final_metrics}, sort_keys=True), flush=True)
+            write_rank0_stage_status(
+                finalize_status_path,
+                {
+                    "status": "running",
+                    "stage": "training_finalize",
+                    "step": int(step),
+                    "rank": int(rank),
+                    "pid": os.getpid(),
+                    "started_at": utc_now(),
+                },
+            )
+            try:
+                save_checkpoint(output_dir, unwrap_model(model), optimizer, step, final_metrics, keep_last)
+                if wandb_run is not None:
+                    wandb_run.summary.update(final_metrics)
+                    finish_wandb_run(wandb_run, exit_code=0)
+                print(json.dumps({"event": "finished", **final_metrics}, sort_keys=True), flush=True)
+            except Exception as exc:
+                wandb_finish_error = ""
+                if wandb_run is not None:
+                    try:
+                        finish_wandb_run(wandb_run, exit_code=1)
+                    except Exception as finish_exc:
+                        wandb_finish_error = repr(finish_exc)
+                write_rank0_stage_status(
+                    finalize_status_path,
+                    {
+                        "status": "failed",
+                        "stage": "training_finalize",
+                        "step": int(step),
+                        "rank": int(rank),
+                        "pid": os.getpid(),
+                        "finished_at": utc_now(),
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                        "wandb_finish_error": wandb_finish_error,
+                    },
+                )
+                raise
+            write_rank0_stage_status(
+                finalize_status_path,
+                {
+                    "status": "ok",
+                    "stage": "training_finalize",
+                    "step": int(step),
+                    "rank": int(rank),
+                    "pid": os.getpid(),
+                    "finished_at": utc_now(),
+                    "metrics": final_metrics,
+                },
+            )
+        else:
+            rank0_status = wait_for_rank0_stage_status(
+                finalize_status_path,
+                timeout_sec=rank0_stage_sync_timeout(config, "training_finalize"),
+                poll_sec=rank0_stage_sync_poll(config),
+                stage_trace=stage_trace,
+            )
+            if rank0_status.get("status") != "ok":
+                raise RuntimeError(
+                    f"rank0 training finalize failed: {rank0_status.get('message', rank0_status)}"
+                )
         distributed_barrier(runtime)
     finally:
         cleanup_distributed_runtime(runtime)

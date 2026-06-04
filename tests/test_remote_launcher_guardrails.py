@@ -181,11 +181,24 @@ class A0TwoGpuAcceptedVisualizationConfigTests(unittest.TestCase):
                 self.assertEqual(config["training"]["required_gpu_count"], 2)
                 self.assertEqual(config["runtime"]["required_gpu_count"], 2)
                 self.assertEqual(config["variant"]["gpu_topology"], "single_2gpu_ddp_job")
+                self.assertIn("accepted SomaMesh/SOMA Shapes + G1 Isaac visual validation", config["purpose"])
+                self.assertNotIn("accepted SOMA Skeleton", config["purpose"])
                 self.assertEqual(visual["every_steps"], 2000)
                 self.assertEqual(visual["every_minutes"], 0)
                 self.assertIs(visual["acceptance_backend"], True)
                 self.assertEqual(visual["isaac_python_bin"], "/workspace/isaaclab/_isaac_sim/python.sh")
                 self.assertEqual(visual["isaac_render_script"], "scripts/render_g1_isaac_pair.py")
+                self.assertEqual(
+                    visual["soma_retargeter_root"],
+                    "/home/user/project/ContextRetarget/third_party/soma-retargeter",
+                )
+                self.assertEqual(
+                    visual["somamesh_usd"],
+                    "/home/user/data/motion_data/soma_shapes/soma_base_rig/soma_base_skel_minimal.usd",
+                )
+                self.assertIn("source_bvh_roots", visual)
+                self.assertIn("source_bvh_cache", visual)
+                self.assertIn("source_bvh_tar", visual)
                 self.assertIn("g1_robot_usd", visual)
                 self.assertIn("--nproc-per-node=2", config["validation_command"])
                 self.assertIn(f"--config configs/{path.name}", config["validation_command"])
@@ -299,6 +312,24 @@ class SupervisedTrainerDdpGuardrailTests(unittest.TestCase):
         self.assertIn("run_visual_validation", text)
         self.assertIn("save_checkpoint(output_dir, unwrap_model(model)", text)
         self.assertIn("distributed_barrier(runtime)", text)
+
+    def test_trainer_waits_on_rank0_visual_status_before_ddp_barrier(self) -> None:
+        text = self.trainer_text
+        self.assertIn("rank0_stage_status_path", text)
+        self.assertIn("write_rank0_stage_status", text)
+        self.assertIn("wait_for_rank0_stage_status", text)
+        self.assertIn("rank0_stage_sync_timeout", text)
+        self.assertIn("accepted_visual_metrics_failed", text)
+
+        visual_block_start = text.index('rank0_stage_status_path(output_dir, "visual_validation", step=step)')
+        visual_wait = text.index("rank0_status = wait_for_rank0_stage_status", visual_block_start)
+        visual_barrier = text.index("distributed_barrier(runtime)", visual_wait)
+        self.assertLess(visual_wait, visual_barrier)
+
+        finalize_block_start = text.index('rank0_stage_status_path(output_dir, "training_finalize")')
+        finalize_wait = text.index("rank0_status = wait_for_rank0_stage_status", finalize_block_start)
+        finalize_barrier = text.index("distributed_barrier(runtime)", finalize_wait)
+        self.assertLess(finalize_wait, finalize_barrier)
 
     def test_trainer_passes_configured_acceptance_backend_to_visual_hook(self) -> None:
         text = self.trainer_text

@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+import tempfile
 
 import numpy as np
 
@@ -278,4 +280,56 @@ class SonicKinTrainTimingTests(unittest.TestCase):
         )
         self.assertTrue(
             sonic_train.visual_validation_due(config, 500, now=3600.0, last_time=0.0)
+        )
+
+    def test_rank0_stage_status_round_trip_and_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            path = sonic_train.rank0_stage_status_path(output_dir, "visual_validation", step=2000)
+            sonic_train.write_rank0_stage_status(
+                path,
+                {
+                    "status": "ok",
+                    "stage": "visual_validation",
+                    "step": 2000,
+                    "metrics": {"visual_validation/videos_ok": 4.0},
+                },
+            )
+
+            payload = sonic_train.wait_for_rank0_stage_status(path, timeout_sec=0.2, poll_sec=0.01)
+
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["stage"], "visual_validation")
+            self.assertEqual(payload["step"], 2000)
+            missing = sonic_train.rank0_stage_status_path(output_dir, "training_finalize")
+            with self.assertRaises(TimeoutError):
+                sonic_train.wait_for_rank0_stage_status(missing, timeout_sec=0.01, poll_sec=0.01)
+
+    def test_accepted_visual_metrics_failed_only_for_acceptance_backend(self):
+        failed_metrics = {
+            "visual_validation/videos_ok": 4.0,
+            "visual_validation/videos_failed": 1.0,
+        }
+        ok_metrics = {
+            "visual_validation/videos_ok": 4.0,
+            "visual_validation/videos_failed": 0.0,
+        }
+
+        self.assertTrue(
+            sonic_train.accepted_visual_metrics_failed(
+                failed_metrics,
+                {"acceptance_backend": True},
+            )
+        )
+        self.assertFalse(
+            sonic_train.accepted_visual_metrics_failed(
+                failed_metrics,
+                {"acceptance_backend": False},
+            )
+        )
+        self.assertFalse(
+            sonic_train.accepted_visual_metrics_failed(
+                ok_metrics,
+                {"acceptance_backend": True},
+            )
         )
