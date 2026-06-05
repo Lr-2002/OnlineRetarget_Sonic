@@ -74,11 +74,29 @@ from online_retarget.metric_validation_artifacts import (  # noqa: E402
     metric_validation_wandb_payload,
     write_metric_validation_artifact,
 )
+from online_retarget.metrics import compute_metric_bundle  # noqa: E402
 
 
 REQUIRED_NPZ_KEYS = ("joint_pos", "joint_vel", "body_pos_w", "body_quat_w")
 REQUIRED_ROBOT_MOTIONLIB_KEYS = ("dof", "root_rot", "fps")
 REQUIRED_SOMA_MOTIONLIB_KEYS = ("soma_joints", "soma_root_quat", "fps")
+A0_TRACKING_BODY_NAMES = (
+    "pelvis",
+    "left_hip_roll_link",
+    "left_knee_link",
+    "left_ankle_roll_link",
+    "right_hip_roll_link",
+    "right_knee_link",
+    "right_ankle_roll_link",
+    "torso_link",
+    "left_shoulder_roll_link",
+    "left_elbow_link",
+    "left_wrist_yaw_link",
+    "right_shoulder_roll_link",
+    "right_elbow_link",
+    "right_wrist_yaw_link",
+)
+A0_TRACKING_WEIGHT_POLICY = "uniform_14_tracking_bodies"
 SOMA_JOINT_NAMES = (
     "Hips",
     "Spine1",
@@ -2993,8 +3011,21 @@ def run_visual_validation(
             }
             report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             return {"visual_validation/videos_ok": 0.0, "visual_validation/videos_failed": float(len(rows))}
-        render_deps = {}
-        g1_model = None
+        try:
+            render_deps = _load_metric_fk_deps()
+            model_xml = Path(str(cfg.get("g1_model_xml", "")))
+            if not model_xml.exists():
+                raise FileNotFoundError(f"visual_validation.g1_model_xml is missing: {model_xml}")
+            g1_model = render_deps["load_g1_kinematic_model"](model_xml)
+        except Exception as exc:
+            summary = {
+                "step": step,
+                "status": "blocked",
+                "message": f"body-position metric FK dependencies are unavailable: {exc}",
+                "reports": [],
+            }
+            report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            return {"visual_validation/videos_ok": 0.0, "visual_validation/videos_failed": float(len(rows))}
     else:
         try:
             render_deps = _load_visual_render_deps()
@@ -3074,15 +3105,19 @@ def run_visual_validation(
 
     ok_count = sum(1 for report in reports if report.get("combined_status") == "ok")
     failed_count = len(reports) - ok_count
+    body_position_metrics = _aggregate_body_position_metrics(reports)
+    body_metrics_available = body_position_metrics.get("status") == "available"
+    status = "ok" if ok_count and (body_metrics_available or not acceptance_backend) else "failed"
     summary = {
         "step": step,
-        "status": "ok" if ok_count else "failed",
+        "status": status,
         "variant": config["variant"]["name"],
         "duration_sec": float(cfg.get("duration_sec", 4.0)),
         "requested_videos": int(cfg.get("num_videos", 8)),
         "videos_ok": ok_count,
         "videos_failed": failed_count,
         "elapsed_sec": time.perf_counter() - started,
+        "body_position_metrics": body_position_metrics,
         "reports": reports,
     }
     report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -3091,6 +3126,101 @@ def run_visual_validation(
         "visual_validation/videos_failed": float(failed_count),
         "visual_validation/elapsed_sec": float(summary["elapsed_sec"]),
     }
+
+
+def _load_metric_fk_deps() -> dict[str, Any]:
+    from online_retarget.data.g1_quality import g1_fk_body_positions, load_g1_kinematic_model
+
+    return {
+        "g1_fk_body_positions": g1_fk_body_positions,
+        "load_g1_kinematic_model": load_g1_kinematic_model,
+    }
+
+
+def _aggregate_body_position_metrics(reports: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    available: list[Mapping[str, Any]] = []
+    for report in reports:
+        body_metrics = report.get("body_position_metrics")
+        if not isinstance(body_metrics, Mapping):
+            continue
+        metric_results = body_metrics.get("metric_results")
+        if not isinstance(metric_results, Mapping):
+            continue
+        mpjpe_result = metric_results.get("mpjpe")
+        w_mpjpe_result = metric_results.get("w_mpjpe")
+        if (
+            isinstance(mpjpe_result, Mapping)
+            and isinstance(w_mpjpe_result, Mapping)
+            and mpjpe_result.get("status") == "available"
+            and w_mpjpe_result.get("status") == "available"
+        ):
+            available.append(body_metrics)
+    if not available:
+        return {
+            "status": "unavailable",
+            "reason": "no visual validation report produced numeric body-position metrics",
+            "metric_results": {},
+        }
+
+    count_total = sum(float(item.get("sample_count") or 0.0) for item in available)
+    weight_total = sum(float(item.get("weighted_sample_weight") or 0.0) for item in available)
+    if count_total <= 0.0 or weight_total <= 0.0:
+        return {
+            "status": "unavailable",
+            "reason": "body-position metric reports have zero sample weight",
+            "metric_results": {},
+        }
+
+    first = available[0]
+    first_results = first["metric_results"]
+    mpjpe = sum(
+        float(item["metric_results"]["mpjpe"]["value"]) * float(item.get("sample_count") or 0.0)
+        for item in available
+    ) / count_total
+    w_mpjpe = sum(
+        float(item["metric_results"]["w_mpjpe"]["value"]) * float(item.get("weighted_sample_weight") or 0.0)
+        for item in available
+    ) / weight_total
+    source_artifact_paths = [
+        artifact
+        for item in available
+        for artifact in _metric_source_artifacts(item).values()
+        if artifact
+    ]
+    return {
+        "status": "available",
+        "sample_count": count_total,
+        "weighted_sample_weight": weight_total,
+        "report_count": len(available),
+        "body_count": int(first.get("body_count") or len(A0_TRACKING_BODY_NAMES)),
+        "frame_count": int(sum(int(item.get("frame_count") or 0) for item in available)),
+        "body_names": list(first.get("body_names") or A0_TRACKING_BODY_NAMES),
+        "body_position_weights": list(first.get("body_position_weights") or [1.0] * len(A0_TRACKING_BODY_NAMES)),
+        "weight_policy": str(first.get("weight_policy") or A0_TRACKING_WEIGHT_POLICY),
+        "metric_contract": dict(first.get("metric_contract") or {}),
+        "source_artifact_paths": source_artifact_paths,
+        "metric_results": {
+            "mpjpe": {
+                **dict(first_results["mpjpe"]),
+                "value": mpjpe,
+                "status": "available",
+                "reason": "",
+            },
+            "w_mpjpe": {
+                **dict(first_results["w_mpjpe"]),
+                "value": w_mpjpe,
+                "status": "available",
+                "reason": "",
+            },
+        },
+    }
+
+
+def _metric_source_artifacts(body_metrics: Mapping[str, Any]) -> dict[str, str]:
+    artifacts = body_metrics.get("source_artifacts")
+    if not isinstance(artifacts, Mapping):
+        return {}
+    return {str(key): str(value) for key, value in artifacts.items() if value}
 
 
 def _load_visual_render_deps() -> dict[str, Any]:
@@ -3546,7 +3676,6 @@ def _render_motionlib_acceptance_visual_validation_clip(
     isaac_render_script: Path | str | None = None,
     execute_isaaclab: bool = True,
 ) -> dict[str, Any]:
-    del g1_model
     cfg = config.get("visual_validation", {})
     clip_name = _safe_filename(str(row.get("filename") or Path(str(row["relative_path"])).stem))
     sample_id = clip_name
@@ -3669,6 +3798,19 @@ def _render_motionlib_acceptance_visual_validation_clip(
             "capsule_renderer_used": False,
         }
     )
+    body_position_metrics = _accepted_body_position_metric_report(
+        target_joint_pos=arrays["joint_pos"][:frame_count],
+        target_root_pos=root_pos,
+        target_root_quat=root_quat,
+        predicted_joint_pos=prediction["joint_pos"][:frame_count],
+        predicted_root_pos=prediction["root_pos"][:frame_count],
+        predicted_root_quat=inference_root_quat[:frame_count],
+        fps=fps,
+        g1_model=g1_model,
+        render_deps=render_deps,
+        target_motion_path=target_motion,
+        prediction_motion_path=inference_motion,
+    )
 
     combine_report = _combine_panel_videos(
         (source_video, target_video, inference_video),
@@ -3699,6 +3841,7 @@ def _render_motionlib_acceptance_visual_validation_clip(
         checkpoint_path=cfg.get("checkpoint_path", ""),
         checkpoint_step=int(cfg.get("checkpoint_step", step)),
     )
+    metadata["body_position_metrics"] = body_position_metrics
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     gated_combined_status = metadata["combine"].get("status", "failed")
     return {
@@ -3713,6 +3856,7 @@ def _render_motionlib_acceptance_visual_validation_clip(
         "combined_status": gated_combined_status,
         "combined_video": str(combined_video),
         "metadata": str(metadata_path),
+        "body_position_metrics": body_position_metrics,
         "acceptance_ok": bool(acceptance_ok),
         "accepted_vertical_v2_status": metadata["visual_backend"].get("accepted_vertical_v2_status"),
         "acceptance_failure_reasons": failure_reasons,
@@ -4390,6 +4534,139 @@ def _soma_motionlib_source_frames(
 def _soma_edges(joint_names: Any) -> tuple[tuple[str, str], ...]:
     names = set(joint_names) if joint_names else set(SOMA_JOINT_NAMES)
     return tuple((start, end) for start, end in SOMA_CAPSULE_EDGES if start in names and end in names)
+
+
+def _accepted_body_position_metric_report(
+    *,
+    target_joint_pos: np.ndarray,
+    target_root_pos: np.ndarray,
+    target_root_quat: np.ndarray,
+    predicted_joint_pos: np.ndarray,
+    predicted_root_pos: np.ndarray,
+    predicted_root_quat: np.ndarray,
+    fps: float,
+    g1_model: Any,
+    render_deps: Mapping[str, Any],
+    target_motion_path: Path,
+    prediction_motion_path: Path,
+) -> dict[str, Any]:
+    weights = [1.0] * len(A0_TRACKING_BODY_NAMES)
+    contract = {
+        "pinned": True,
+        "name": "a0_accepted_v2_world_g1_fk_14_tracking_bodies",
+        "units": "m",
+        "coordinate_frame": "world_z_up",
+        "root_alignment": "world_g1_root_no_pelvis_subtraction",
+        "scale_align": False,
+        "frame_alignment": "accepted_v2_clip_common_frame_range",
+        "root_quat_format": "wxyz",
+        "body_order": list(A0_TRACKING_BODY_NAMES),
+        "weight_policy": A0_TRACKING_WEIGHT_POLICY,
+    }
+    source_artifacts = {
+        "target_motion_npz": str(target_motion_path),
+        "prediction_motion_npz": str(prediction_motion_path),
+    }
+    base = {
+        "body_names": list(A0_TRACKING_BODY_NAMES),
+        "body_position_weights": weights,
+        "weight_policy": A0_TRACKING_WEIGHT_POLICY,
+        "metric_contract": contract,
+        "source_artifacts": source_artifacts,
+    }
+    try:
+        target = _g1_tracking_body_frames(
+            target_joint_pos,
+            root_pos=target_root_pos,
+            root_quat=target_root_quat,
+            g1_model=g1_model,
+            render_deps=render_deps,
+        )
+        predicted = _g1_tracking_body_frames(
+            predicted_joint_pos,
+            root_pos=predicted_root_pos,
+            root_quat=predicted_root_quat,
+            g1_model=g1_model,
+            render_deps=render_deps,
+        )
+        frame_count = min(len(target), len(predicted))
+        if frame_count <= 0:
+            raise ValueError("accepted-v2 body-position metrics require at least one frame")
+        target = target[:frame_count]
+        predicted = predicted[:frame_count]
+        fields = {
+            "target_g1_body_pos": target,
+            "predicted_g1_body_pos": predicted,
+            "body_position_weights": weights,
+            "g1_body_position_contract": contract,
+        }
+        bundle = compute_metric_bundle(fields, ("mpjpe", "w_mpjpe"))
+        metric_results = {name: result.to_dict() for name, result in bundle.items()}
+        status = (
+            "available"
+            if all(result.get("status") == "available" for result in metric_results.values())
+            else "unavailable"
+        )
+        reasons = [
+            str(result.get("reason"))
+            for result in metric_results.values()
+            if isinstance(result, Mapping) and result.get("reason")
+        ]
+        return {
+            **base,
+            "status": status,
+            "reason": "; ".join(reasons),
+            "metric_results": metric_results,
+            "frame_count": int(frame_count),
+            "body_count": len(A0_TRACKING_BODY_NAMES),
+            "sample_count": float(frame_count * len(A0_TRACKING_BODY_NAMES)),
+            "weighted_sample_weight": float(frame_count * sum(weights)),
+            "fps": float(fps),
+        }
+    except Exception as exc:
+        return {
+            **base,
+            "status": "unavailable",
+            "reason": str(exc),
+            "metric_results": {},
+        }
+
+
+def _g1_tracking_body_frames(
+    joint_pos: np.ndarray,
+    *,
+    root_pos: np.ndarray,
+    root_quat: np.ndarray | None = None,
+    root_euler: np.ndarray | None = None,
+    g1_model: Any,
+    render_deps: Mapping[str, Any],
+) -> list[list[list[float]]]:
+    fk = render_deps["g1_fk_body_positions"]
+    if root_euler is None:
+        if root_quat is None:
+            raise ValueError("root_quat or root_euler is required")
+        root_euler = np.asarray([_quat_wxyz_to_euler_xyz(quat) for quat in root_quat], dtype=np.float32)
+    frames: list[list[list[float]]] = []
+    for joints, root, euler in zip(joint_pos, root_pos, root_euler):
+        body_points = fk(
+            g1_model,
+            [float(value) for value in joints],
+            root_position=[float(value) for value in root],
+            root_euler=[float(value) for value in euler],
+            include_empty_body_origin=True,
+        )
+        frame: list[list[float]] = []
+        missing: list[str] = []
+        for name in A0_TRACKING_BODY_NAMES:
+            points = body_points.get(name, ())
+            if not points:
+                missing.append(name)
+                continue
+            frame.append([float(value) for value in _centroid(points)])
+        if missing:
+            raise ValueError(f"G1 FK output is missing tracking bodies: {', '.join(missing)}")
+        frames.append(frame)
+    return frames
 
 
 def _g1_prediction_frames(

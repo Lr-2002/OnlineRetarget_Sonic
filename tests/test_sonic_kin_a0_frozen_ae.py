@@ -332,6 +332,142 @@ class A0FrozenAEConfigTests(unittest.TestCase):
             self.assertEqual(wandb_payload["metric_validation/visual_validation/videos_ok"], 8.0)
             self.assertNotIn("validation/root_pos_rmse_raw", wandb_payload)
 
+    def test_metric_validation_writer_promotes_numeric_body_position_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            visual_summary = output_dir / "visual_validation" / "step_00002000" / "summary.json"
+            visual_summary.parent.mkdir(parents=True)
+            body_names = [
+                "pelvis",
+                "left_hip_roll_link",
+                "left_knee_link",
+                "left_ankle_roll_link",
+                "right_hip_roll_link",
+                "right_knee_link",
+                "right_ankle_roll_link",
+                "torso_link",
+                "left_shoulder_roll_link",
+                "left_elbow_link",
+                "left_wrist_yaw_link",
+                "right_shoulder_roll_link",
+                "right_elbow_link",
+                "right_wrist_yaw_link",
+            ]
+            contract = {
+                "pinned": True,
+                "name": "a0_accepted_v2_world_g1_fk_14_tracking_bodies",
+                "units": "m",
+                "coordinate_frame": "world_z_up",
+                "root_alignment": "world_g1_root_no_pelvis_subtraction",
+                "scale_align": False,
+                "frame_alignment": "accepted_v2_clip_common_frame_range",
+                "weight_policy": "uniform_14_tracking_bodies",
+            }
+            visual_summary.write_text(
+                json.dumps(
+                    {
+                        "step": 2000,
+                        "status": "ok",
+                        "requested_videos": 8,
+                        "videos_ok": 8,
+                        "videos_failed": 0,
+                        "body_position_metrics": {
+                            "status": "available",
+                            "sample_count": 224.0,
+                            "weighted_sample_weight": 224.0,
+                            "frame_count": 16,
+                            "body_count": 14,
+                            "report_count": 2,
+                            "body_names": body_names,
+                            "body_position_weights": [1.0] * 14,
+                            "weight_policy": "uniform_14_tracking_bodies",
+                            "metric_contract": contract,
+                            "source_artifact_paths": [
+                                "visual_validation/step_00002000/a/row2_g1_target_motion.npz",
+                                "visual_validation/step_00002000/a/row3_g1_kinematics_motion.npz",
+                            ],
+                            "metric_results": {
+                                "mpjpe": {
+                                    "name": "mpjpe",
+                                    "status": "available",
+                                    "value": 0.045,
+                                    "reason": "",
+                                    "metadata": {"name": "mpjpe", "unit": "m"},
+                                },
+                                "w_mpjpe": {
+                                    "name": "w_mpjpe",
+                                    "status": "available",
+                                    "value": 0.045,
+                                    "reason": "",
+                                    "metadata": {"name": "w_mpjpe", "unit": "m"},
+                                },
+                            },
+                        },
+                        "reports": [{"combined_status": "ok", "accepted_vertical_v2_status": "ok"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = {
+                "variant": {"name": "A0_metric_writer_numeric"},
+                "evaluation_metrics": EXPECTED_EVAL_METRICS,
+                "metric_validation": {
+                    "enabled": True,
+                    "every_steps": 2000,
+                    "output_dir": "metrics",
+                    "primary": "mpjpe",
+                    "requested_metrics": ["mpjpe", "w_mpjpe", "context_compositing"],
+                },
+            }
+
+            artifact = metric_validation_artifacts.write_metric_validation_artifact(
+                output_dir=output_dir,
+                step=2000,
+                config=config,
+                validation_metrics={"validation/g1_joint_pos_rmse_rad": 0.1234},
+                train_metrics={"train/g1_joint_pos_rmse_rad": 0.2345},
+            )
+            payload = json.loads(artifact.read_text(encoding="utf-8"))
+
+            self.assertEqual(payload["primary_metric_status"], "available")
+            self.assertEqual(payload["primary_metric_value"], 0.045)
+            self.assertEqual(payload["validation/mpjpe"], 0.045)
+            self.assertEqual(payload["validation/mpjpe_status"], "available")
+            self.assertEqual(payload["validation/w_mpjpe"], 0.045)
+            self.assertEqual(payload["validation/w_mpjpe_status"], "available")
+            self.assertEqual(payload["validation/context_compositing"], 1.0)
+            self.assertEqual(payload["body_position_metrics"]["body_names"], body_names)
+            self.assertEqual(payload["body_position_metrics"]["weight_policy"], "uniform_14_tracking_bodies")
+            self.assertEqual(
+                payload["body_position_metrics"]["metric_contract"]["root_alignment"],
+                "world_g1_root_no_pelvis_subtraction",
+            )
+            self.assertEqual(
+                payload["requested_metric_results"]["mpjpe"]["source_artifact_paths"][0],
+                "visual_validation/step_00002000/a/row2_g1_target_motion.npz",
+            )
+
+            wandb_payload = metric_validation_artifacts.metric_validation_wandb_payload(
+                payload,
+                artifact_path=artifact,
+            )
+            self.assertEqual(wandb_payload["metric_validation/primary_metric_value"], 0.045)
+            self.assertEqual(wandb_payload["validation/mpjpe"], 0.045)
+            self.assertEqual(wandb_payload["metric_validation/mpjpe_status"], "available")
+            self.assertEqual(wandb_payload["metric_validation/w_mpjpe_status"], "available")
+            self.assertEqual(
+                wandb_payload["metric_validation/body_position_metrics/weight_policy"],
+                "uniform_14_tracking_bodies",
+            )
+            self.assertEqual(
+                wandb_payload["metric_validation/body_position_metrics/body_names"],
+                "|".join(body_names),
+            )
+            self.assertEqual(
+                wandb_payload["metric_validation/body_position_metrics/contract/root_alignment"],
+                "world_g1_root_no_pelvis_subtraction",
+            )
+
     def test_a0_expected_dims_guard_is_in_normal_dry_run_and_formal_path(self) -> None:
         text = (REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py").read_text(encoding="utf-8")
         for token in (

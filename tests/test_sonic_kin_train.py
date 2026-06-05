@@ -266,6 +266,49 @@ class SonicKinTrainTimingTests(unittest.TestCase):
         np.testing.assert_allclose(state["root_pos"], fallback_root_pos)
         np.testing.assert_allclose(state["root_quat"], fallback_root_quat)
 
+    def test_accepted_body_position_metric_report_uses_uniform_tracking_body_contract(self):
+        def fake_fk(_model, _joints, root_position, root_euler, include_empty_body_origin=True):
+            del root_euler, include_empty_body_origin
+            return {
+                name: ((float(root_position[0]), float(index), 0.0),)
+                for index, name in enumerate(sonic_train.A0_TRACKING_BODY_NAMES)
+            }
+
+        frames = 2
+        identity = np.zeros((frames, 4), dtype=np.float32)
+        identity[:, 0] = 1.0
+        zero_joints = np.zeros((frames, 29), dtype=np.float32)
+        target_root = np.zeros((frames, 3), dtype=np.float32)
+        predicted_root = np.zeros((frames, 3), dtype=np.float32)
+        predicted_root[:, 0] = 0.5
+
+        report = sonic_train._accepted_body_position_metric_report(
+            target_joint_pos=zero_joints,
+            target_root_pos=target_root,
+            target_root_quat=identity,
+            predicted_joint_pos=zero_joints,
+            predicted_root_pos=predicted_root,
+            predicted_root_quat=identity,
+            fps=50.0,
+            g1_model=object(),
+            render_deps={"g1_fk_body_positions": fake_fk},
+            target_motion_path=Path("row2_g1_target_motion.npz"),
+            prediction_motion_path=Path("row3_g1_kinematics_motion.npz"),
+        )
+
+        self.assertEqual(report["status"], "available")
+        self.assertEqual(report["body_names"], list(sonic_train.A0_TRACKING_BODY_NAMES))
+        self.assertEqual(report["weight_policy"], "uniform_14_tracking_bodies")
+        self.assertTrue(report["metric_contract"]["pinned"])
+        self.assertEqual(
+            report["metric_contract"]["root_alignment"],
+            "world_g1_root_no_pelvis_subtraction",
+        )
+        self.assertEqual(report["frame_count"], 2)
+        self.assertEqual(report["sample_count"], 28.0)
+        self.assertAlmostEqual(report["metric_results"]["mpjpe"]["value"], 0.5)
+        self.assertAlmostEqual(report["metric_results"]["w_mpjpe"]["value"], 0.5)
+
     def test_kin_visual_validation_due_accepts_wall_clock_cadence(self):
         config = {
             "visual_validation": {

@@ -13,6 +13,12 @@ from online_retarget.metrics import compute_metric_bundle, metric_metadata
 
 DEFAULT_PRIMARY_METRIC = "g1_joint_pos_rmse_rad"
 DEFAULT_REQUESTED_METRICS = ("mpjpe", "w_mpjpe", "context_compositing")
+BODY_POSITION_RESULT_ALIASES = {
+    "mpjpe": "mpjpe",
+    "body_position_mpjpe": "mpjpe",
+    "w_mpjpe": "w_mpjpe",
+    "weighted_mpjpe": "w_mpjpe",
+}
 
 
 def utc_now() -> str:
@@ -75,6 +81,9 @@ def _visual_validation_artifact_status(output_dir: Path, step: int) -> dict[str,
     for key in ("requested_videos", "videos_ok", "videos_failed", "duration_sec", "elapsed_sec"):
         if key in summary:
             status[key] = _json_metric_value(summary[key])
+    body_position_metrics = summary.get("body_position_metrics")
+    if isinstance(body_position_metrics, Mapping):
+        status["body_position_metrics"] = copy.deepcopy(dict(body_position_metrics))
     reports = summary.get("reports")
     if isinstance(reports, Sequence) and not isinstance(reports, (str, bytes)):
         status["report_count"] = len(reports)
@@ -171,6 +180,61 @@ def _context_compositing_metric_result(visual_payload: Mapping[str, Any]) -> dic
     }
 
 
+def _precomputed_body_position_metric_result(
+    name: str,
+    visual_payload: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    canonical_name = BODY_POSITION_RESULT_ALIASES.get(name)
+    if canonical_name is None:
+        return None
+    body_metrics = visual_payload.get("body_position_metrics")
+    if not isinstance(body_metrics, Mapping):
+        return None
+
+    metric_results = body_metrics.get("metric_results")
+    if isinstance(metric_results, Mapping):
+        raw_result = metric_results.get(canonical_name)
+        if isinstance(raw_result, Mapping):
+            result = copy.deepcopy(dict(raw_result))
+            result["name"] = name
+            _attach_body_position_metric_context(result, body_metrics)
+            return result
+
+    metadata = metric_metadata((canonical_name,)).get(canonical_name, {})
+    result = {
+        "name": name,
+        "status": "unavailable",
+        "value": None,
+        "reason": str(
+            body_metrics.get("reason")
+            or f"visual validation did not produce numeric {canonical_name}"
+        ),
+        "metadata": metadata,
+    }
+    _attach_body_position_metric_context(result, body_metrics)
+    return result
+
+
+def _attach_body_position_metric_context(
+    result: dict[str, Any],
+    body_metrics: Mapping[str, Any],
+) -> None:
+    for key in (
+        "body_names",
+        "body_position_weights",
+        "weight_policy",
+        "metric_contract",
+        "source_artifact_paths",
+        "sample_count",
+        "weighted_sample_weight",
+        "frame_count",
+        "body_count",
+        "report_count",
+    ):
+        if key in body_metrics:
+            result[key] = copy.deepcopy(body_metrics[key])
+
+
 def _requested_metric_results(
     *,
     config: Mapping[str, Any],
@@ -185,6 +249,8 @@ def _requested_metric_results(
     for name in names:
         if name == "context_compositing":
             results[name] = _context_compositing_metric_result(visual_payload)
+        elif precomputed := _precomputed_body_position_metric_result(name, visual_payload):
+            results[name] = precomputed
         else:
             registry_names.append(name)
     if registry_names:
@@ -228,6 +294,7 @@ def build_metric_validation_payload(
     primary_metric_key = f"validation/{primary_metric}"
     validation_payload = _json_metric_dict(validation_metrics)
     visual_payload = _visual_validation_artifact_status(output_dir, step)
+    body_position_metrics = visual_payload.get("body_position_metrics", {})
     requested_results = _requested_metric_results(
         config=config,
         validation_metrics=validation_metrics,
@@ -264,6 +331,11 @@ def build_metric_validation_payload(
         "requested_metric_names": list(_requested_metric_names(config)),
         "requested_metric_results": requested_results,
         "requested_metric_metadata": requested_metadata,
+        "body_position_metrics": (
+            copy.deepcopy(dict(body_position_metrics))
+            if isinstance(body_position_metrics, Mapping)
+            else {}
+        ),
         "visual_validation": visual_payload,
         "associated_visual_status": visual_payload.get("status"),
         "associated_visual_path": visual_payload.get("path"),
@@ -385,5 +457,37 @@ def metric_validation_wandb_payload(
             value = visual_payload.get(key)
             if value is not None:
                 wandb_payload[f"metric_validation/visual_validation/{key}"] = value
+
+    body_metrics = metric_payload.get("body_position_metrics", {})
+    if isinstance(body_metrics, Mapping):
+        for key in ("sample_count", "weighted_sample_weight", "frame_count", "body_count", "report_count"):
+            value = body_metrics.get(key)
+            scalar = _json_metric_value(value)
+            if scalar is not None:
+                wandb_payload[f"metric_validation/body_position_metrics/{key}"] = scalar
+        for key in ("status", "reason", "weight_policy"):
+            value = body_metrics.get(key)
+            if value is not None:
+                wandb_payload[f"metric_validation/body_position_metrics/{key}"] = str(value)
+        body_names = body_metrics.get("body_names")
+        if isinstance(body_names, Sequence) and not isinstance(body_names, (str, bytes)):
+            wandb_payload["metric_validation/body_position_metrics/body_names"] = "|".join(
+                str(name) for name in body_names
+            )
+        source_artifact_paths = body_metrics.get("source_artifact_paths")
+        if isinstance(source_artifact_paths, Sequence) and not isinstance(source_artifact_paths, (str, bytes)):
+            wandb_payload["metric_validation/body_position_metrics/source_artifact_paths"] = "|".join(
+                str(path) for path in source_artifact_paths
+            )
+        contract = body_metrics.get("metric_contract")
+        if isinstance(contract, Mapping):
+            for key in ("name", "units", "coordinate_frame", "root_alignment", "frame_alignment", "weight_policy"):
+                value = contract.get(key)
+                if value is not None:
+                    wandb_payload[f"metric_validation/body_position_metrics/contract/{key}"] = str(value)
+            if "scale_align" in contract:
+                wandb_payload["metric_validation/body_position_metrics/contract/scale_align"] = (
+                    1.0 if bool(contract["scale_align"]) else 0.0
+                )
 
     return wandb_payload
