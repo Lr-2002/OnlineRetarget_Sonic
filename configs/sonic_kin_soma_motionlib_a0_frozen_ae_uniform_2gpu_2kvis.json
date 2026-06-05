@@ -185,7 +185,13 @@
   "metric_validation": {
     "enabled": true,
     "every_steps": 2000,
-    "output_dir": "metrics"
+    "output_dir": "metrics",
+    "primary": "mpjpe",
+    "requested_metrics": [
+      "mpjpe",
+      "w_mpjpe",
+      "context_compositing"
+    ]
   },
   "runtime": {
     "required_gpu_count": 2,

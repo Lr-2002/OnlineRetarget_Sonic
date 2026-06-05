@@ -212,7 +212,13 @@ class A0FrozenAEConfigTests(unittest.TestCase):
         self.assertEqual(config["visual_validation"]["every_steps"], 2000)
         self.assertEqual(
             config["metric_validation"],
-            {"enabled": True, "every_steps": 2000, "output_dir": "metrics"},
+            {
+                "enabled": True,
+                "every_steps": 2000,
+                "output_dir": "metrics",
+                "primary": "mpjpe",
+                "requested_metrics": ["mpjpe", "w_mpjpe", "context_compositing"],
+            },
         )
         self.assertEqual(config["evaluation_metrics"]["primary"], "g1_joint_pos_rmse_rad")
         self.assertIn("metrics/step_00002000.json", config["expected_artifacts"])
@@ -231,7 +237,7 @@ class A0FrozenAEConfigTests(unittest.TestCase):
                         "requested_videos": 8,
                         "videos_ok": 8,
                         "videos_failed": 0,
-                        "reports": [{"combined_status": "ok"}],
+                        "reports": [{"combined_status": "ok", "accepted_vertical_v2_status": "ok"}],
                     }
                 ),
                 encoding="utf-8",
@@ -243,6 +249,8 @@ class A0FrozenAEConfigTests(unittest.TestCase):
                     "enabled": True,
                     "every_steps": 2000,
                     "output_dir": "metrics",
+                    "primary": "mpjpe",
+                    "requested_metrics": ["mpjpe", "w_mpjpe", "context_compositing"],
                 },
             }
 
@@ -270,14 +278,27 @@ class A0FrozenAEConfigTests(unittest.TestCase):
             self.assertEqual(payload["artifact_type"], "metric_validation")
             self.assertEqual(payload["step"], 2000)
             self.assertEqual(payload["metric_family"], EXPECTED_EVAL_METRICS["metric_family"])
-            self.assertEqual(payload["primary_metric"], "g1_joint_pos_rmse_rad")
-            self.assertEqual(payload["primary_metric_key"], "validation/g1_joint_pos_rmse_rad")
-            self.assertEqual(payload["validation/g1_joint_pos_rmse_rad"], 0.1234)
+            self.assertEqual(payload["primary_metric"], "mpjpe")
+            self.assertEqual(payload["primary_metric_key"], "validation/mpjpe")
+            self.assertIsNone(payload["primary_metric_value"])
+            self.assertEqual(payload["primary_metric_status"], "unavailable")
+            self.assertIsNone(payload["validation/mpjpe"])
+            self.assertEqual(payload["validation/mpjpe_status"], "unavailable")
+            self.assertIn("paired predicted and target G1 body/link position", payload["validation/mpjpe_reason"])
+            self.assertEqual(payload["validation/w_mpjpe_status"], "unavailable")
+            self.assertEqual(payload["validation/context_compositing"], 1.0)
+            self.assertEqual(payload["validation/context_compositing_status"], "available")
+            self.assertEqual(payload["requested_metric_names"], ["mpjpe", "w_mpjpe", "context_compositing"])
+            self.assertEqual(payload["requested_metric_results"]["mpjpe"]["status"], "unavailable")
+            self.assertIn("LR-239", payload["requested_metric_metadata"]["mpjpe"]["source_ref"])
+            self.assertEqual(payload["requested_metric_results"]["context_compositing"]["value"], 1.0)
             self.assertEqual(payload["validation_metrics"]["validation/g1_joint_pos_rmse_rad"], 0.1234)
             self.assertIsNone(payload["validation_metrics"]["validation/root_pos_rmse_raw"])
             self.assertEqual(payload["train_metrics"]["train/g1_joint_pos_rmse_rad"], 0.2345)
             self.assertEqual(payload["visual_validation"]["status"], "ok")
             self.assertEqual(payload["visual_validation"]["path"], str(visual_summary))
+            self.assertEqual(payload["visual_validation"]["context_compositing_status"], "ok")
+            self.assertEqual(payload["visual_validation"]["context_compositing_ok_count"], 1.0)
             self.assertEqual(payload["associated_visual_status"], "ok")
             self.assertEqual(payload["associated_visual_path"], str(visual_summary))
             self.assertEqual(payload["run"]["run_group"], "lr254-smoke")
@@ -286,14 +307,21 @@ class A0FrozenAEConfigTests(unittest.TestCase):
                 payload,
                 artifact_path=artifact,
             )
-            self.assertEqual(wandb_payload["metric_validation/primary_metric"], "g1_joint_pos_rmse_rad")
+            self.assertEqual(wandb_payload["metric_validation/primary_metric"], "mpjpe")
             self.assertEqual(
                 wandb_payload["metric_validation/primary_metric_key"],
-                "validation/g1_joint_pos_rmse_rad",
+                "validation/mpjpe",
             )
-            self.assertEqual(wandb_payload["metric_validation/primary_metric_value"], 0.1234)
+            self.assertNotIn("metric_validation/primary_metric_value", wandb_payload)
             self.assertEqual(wandb_payload["validation/g1_joint_pos_rmse_rad"], 0.1234)
             self.assertEqual(wandb_payload["metric_validation/validation/g1_joint_pos_rmse_rad"], 0.1234)
+            self.assertEqual(wandb_payload["metric_validation/mpjpe_status"], "unavailable")
+            self.assertEqual(wandb_payload["metric_validation/mpjpe_available"], 0.0)
+            self.assertEqual(wandb_payload["metric_validation/w_mpjpe_status"], "unavailable")
+            self.assertEqual(wandb_payload["metric_validation/context_compositing_status"], "available")
+            self.assertEqual(wandb_payload["metric_validation/context_compositing_available"], 1.0)
+            self.assertEqual(wandb_payload["validation/context_compositing"], 1.0)
+            self.assertEqual(wandb_payload["metric_validation/validation/context_compositing"], 1.0)
             self.assertEqual(wandb_payload["train/g1_joint_pos_rmse_rad"], 0.2345)
             self.assertEqual(wandb_payload["metric_validation/train/g1_joint_pos_rmse_rad"], 0.2345)
             self.assertEqual(wandb_payload["metric_validation/artifact_path"], str(artifact))

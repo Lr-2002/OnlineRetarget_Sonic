@@ -8,8 +8,11 @@ import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from online_retarget.metrics import compute_metric_bundle, metric_metadata
+
 
 DEFAULT_PRIMARY_METRIC = "g1_joint_pos_rmse_rad"
+DEFAULT_REQUESTED_METRICS = ("mpjpe", "w_mpjpe", "context_compositing")
 
 
 def utc_now() -> str:
@@ -75,7 +78,132 @@ def _visual_validation_artifact_status(output_dir: Path, step: int) -> dict[str,
     reports = summary.get("reports")
     if isinstance(reports, Sequence) and not isinstance(reports, (str, bytes)):
         status["report_count"] = len(reports)
+        combined_ok = 0
+        accepted_ok = 0
+        accepted_failed = 0
+        for report in reports:
+            if not isinstance(report, Mapping):
+                continue
+            combined_ok += str(report.get("combined_status", "")).lower() == "ok"
+            accepted_status = str(report.get("accepted_vertical_v2_status", "")).lower()
+            accepted_ok += accepted_status == "ok"
+            accepted_failed += accepted_status == "failed"
+        status["context_compositing_ok_count"] = float(combined_ok)
+        status["context_compositing_failed_count"] = float(max(0, len(reports) - combined_ok))
+        status["accepted_vertical_v2_ok_count"] = float(accepted_ok)
+        status["accepted_vertical_v2_failed_count"] = float(accepted_failed)
+        if reports:
+            status["context_compositing_status"] = "ok" if combined_ok == len(reports) else "failed"
     return status
+
+
+def _requested_metric_names(config: Mapping[str, Any]) -> tuple[str, ...]:
+    metric_cfg = config.get("metric_validation", {})
+    names: object = None
+    if isinstance(metric_cfg, Mapping):
+        names = metric_cfg.get("requested_metrics")
+    if names is None:
+        eval_cfg = config.get("evaluation_metrics", {})
+        if isinstance(eval_cfg, Mapping):
+            names = eval_cfg.get("requested_metrics")
+    if names is None:
+        return DEFAULT_REQUESTED_METRICS
+    if isinstance(names, str):
+        return (names,)
+    if isinstance(names, Sequence):
+        return tuple(str(name) for name in names)
+    raise ValueError("metric_validation.requested_metrics must be a string or sequence")
+
+
+def _metric_fields(
+    validation_metrics: Mapping[str, Any],
+    train_metrics: Mapping[str, Any] | None,
+    visual_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {"visual_validation": dict(visual_payload)}
+    for metrics in (validation_metrics, train_metrics or {}):
+        for key, value in metrics.items():
+            key_text = str(key)
+            fields[key_text] = value
+            if "/" in key_text:
+                fields[key_text.rsplit("/", 1)[-1]] = value
+    return fields
+
+
+def _context_compositing_metric_result(visual_payload: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = {
+        "name": "context_compositing",
+        "unit": "0/1",
+        "direction": "higher_is_better",
+        "required_fields": ["visual_validation/summary.json reports[].combined_status"],
+        "mask_semantics": "not maskable; computed from visual artifact status",
+        "reducer": "1 when every requested visual report has combined_status=ok, else 0",
+        "description": "Context-compositing status for accepted vertical visual validation artifacts.",
+        "source_ref": "LR-238/LR-254 accepted vertical-v2 visual artifact status",
+    }
+    status = str(visual_payload.get("status", "missing"))
+    if status in {"missing", "unreadable"}:
+        return {
+            "name": "context_compositing",
+            "status": "unavailable",
+            "value": None,
+            "reason": f"visual validation summary is {status}",
+            "metadata": metadata,
+        }
+    report_count = int(visual_payload.get("report_count") or 0)
+    if report_count <= 0:
+        return {
+            "name": "context_compositing",
+            "status": "unavailable",
+            "value": None,
+            "reason": "visual validation summary contains no reports",
+            "metadata": metadata,
+        }
+    ok_count = float(visual_payload.get("context_compositing_ok_count") or 0.0)
+    value = 1.0 if ok_count == float(report_count) else 0.0
+    reason = "" if value == 1.0 else "one or more visual reports did not compose successfully"
+    return {
+        "name": "context_compositing",
+        "status": "available",
+        "value": value,
+        "reason": reason,
+        "metadata": metadata,
+    }
+
+
+def _requested_metric_results(
+    *,
+    config: Mapping[str, Any],
+    validation_metrics: Mapping[str, Any],
+    train_metrics: Mapping[str, Any] | None,
+    visual_payload: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    names = _requested_metric_names(config)
+    fields = _metric_fields(validation_metrics, train_metrics, visual_payload)
+    results: dict[str, dict[str, Any]] = {}
+    registry_names: list[str] = []
+    for name in names:
+        if name == "context_compositing":
+            results[name] = _context_compositing_metric_result(visual_payload)
+        else:
+            registry_names.append(name)
+    if registry_names:
+        bundle = compute_metric_bundle(fields, registry_names)
+        results.update({name: result.to_dict() for name, result in bundle.items()})
+    return {name: results[name] for name in names}
+
+
+def _requested_metric_metadata(results: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    registry_names: list[str] = []
+    for name, result in results.items():
+        if name == "context_compositing":
+            metadata[name] = result.get("metadata", {})
+        else:
+            registry_names.append(name)
+    if registry_names:
+        metadata.update(metric_metadata(registry_names))
+    return metadata
 
 
 def build_metric_validation_payload(
@@ -91,11 +219,22 @@ def build_metric_validation_payload(
         raise ValueError("metric validation artifact requires validation_metrics")
     configured_eval_metrics = config.get("evaluation_metrics", {})
     eval_metrics = copy.deepcopy(configured_eval_metrics) if isinstance(configured_eval_metrics, Mapping) else {}
-    primary_metric = str(eval_metrics.get("primary") or DEFAULT_PRIMARY_METRIC)
+    metric_cfg = config.get("metric_validation", {})
+    primary_metric = str(
+        metric_cfg.get("primary")
+        if isinstance(metric_cfg, Mapping) and metric_cfg.get("primary")
+        else eval_metrics.get("primary") or DEFAULT_PRIMARY_METRIC
+    )
     primary_metric_key = f"validation/{primary_metric}"
     validation_payload = _json_metric_dict(validation_metrics)
     visual_payload = _visual_validation_artifact_status(output_dir, step)
-    metric_cfg = config.get("metric_validation", {})
+    requested_results = _requested_metric_results(
+        config=config,
+        validation_metrics=validation_metrics,
+        train_metrics=train_metrics,
+        visual_payload=visual_payload,
+    )
+    requested_metadata = _requested_metric_metadata(requested_results)
     variant = config.get("variant", {})
     run_payload: dict[str, Any] = {}
     if manifest is not None:
@@ -118,9 +257,13 @@ def build_metric_validation_payload(
         "primary_metric": primary_metric,
         "primary_metric_key": primary_metric_key,
         "primary_metric_value": validation_payload.get(primary_metric_key),
+        "primary_metric_status": None,
         primary_metric_key: validation_payload.get(primary_metric_key),
         "validation_metrics": validation_payload,
         "train_metrics": _json_metric_dict(train_metrics),
+        "requested_metric_names": list(_requested_metric_names(config)),
+        "requested_metric_results": requested_results,
+        "requested_metric_metadata": requested_metadata,
         "visual_validation": visual_payload,
         "associated_visual_status": visual_payload.get("status"),
         "associated_visual_path": visual_payload.get("path"),
@@ -128,6 +271,16 @@ def build_metric_validation_payload(
         "variant": dict(variant) if isinstance(variant, Mapping) else {},
         "run": run_payload,
     }
+    for name, result in requested_results.items():
+        key = f"validation/{name}"
+        value = result.get("value") if result.get("status") == "available" else None
+        payload[key] = value
+        payload[f"{key}_status"] = result.get("status")
+        if result.get("reason"):
+            payload[f"{key}_reason"] = result.get("reason")
+        if key == primary_metric_key:
+            payload["primary_metric_value"] = value
+            payload["primary_metric_status"] = result.get("status")
     return payload
 
 
@@ -190,6 +343,24 @@ def metric_validation_wandb_payload(
             key_text = str(key)
             wandb_payload[key_text] = value
             wandb_payload[f"metric_validation/{key_text}"] = value
+
+    requested_results = metric_payload.get("requested_metric_results", {})
+    if isinstance(requested_results, Mapping):
+        for name, raw_result in requested_results.items():
+            if not isinstance(raw_result, Mapping):
+                continue
+            key_text = str(name)
+            status = str(raw_result.get("status", "unknown"))
+            value = raw_result.get("value")
+            wandb_payload[f"metric_validation/{key_text}_status"] = status
+            wandb_payload[f"metric_validation/{key_text}_available"] = (
+                1.0 if status == "available" and value is not None else 0.0
+            )
+            if value is not None:
+                scalar = _json_metric_value(value)
+                if scalar is not None:
+                    wandb_payload[f"validation/{key_text}"] = scalar
+                    wandb_payload[f"metric_validation/validation/{key_text}"] = scalar
 
     train_metrics = metric_payload.get("train_metrics", {})
     if isinstance(train_metrics, Mapping):
