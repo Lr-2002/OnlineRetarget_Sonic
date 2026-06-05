@@ -99,7 +99,9 @@
     "stats/normalization.pt",
     "loss_curve.csv",
     "checkpoints/latest.pt",
-    "logs/train.log"
+    "logs/train.log",
+    "metrics/step_00002000.json",
+    "metrics/step_00004000.json"
   ],
   "variant": {
     "name": "sonic_kin_soma_motionlib_a0_frozen_ae_uniform",
@@ -179,6 +181,11 @@
     "g1_robot_usd": "/mnt/data_cpfs/code/wxh/OnlineRetarget/runs/isaaclab_urdf_cache/g1_main/main.usd",
     "isaac_python_bin": "/workspace/isaaclab/_isaac_sim/python.sh",
     "isaac_render_script": "scripts/render_g1_isaac_pair.py"
+  },
+  "metric_validation": {
+    "enabled": true,
+    "every_steps": 2000,
+    "output_dir": "metrics"
   },
   "runtime": {
     "required_gpu_count": 2,

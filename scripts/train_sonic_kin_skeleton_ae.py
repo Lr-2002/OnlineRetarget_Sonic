@@ -55,7 +55,6 @@ from online_retarget.a0_visual_validation import (  # noqa: E402
     ACCEPTANCE_SOURCE_BACKEND,
     ACCEPTANCE_SOURCE_RENDERER,
     DEBUG_CAPSULE_BACKEND,
-    PRIMARY_VISUAL_BACKEND,
     A0VisualValidationRenderer,
     SOMA_DISPLAY_TRANSFORM,
     accepted_vertical_v2_artifact_paths,
@@ -68,6 +67,10 @@ from online_retarget.models.skeleton_geometry_ae import (  # noqa: E402
     SKELETON_GEOMETRY_LATENT_DIM,
     load_skeleton_geometry_ae_checkpoint,
     load_skeleton_geometry_ae_stats,
+)
+from online_retarget.metric_validation_artifacts import (  # noqa: E402
+    metric_validation_due,
+    write_metric_validation_artifact,
 )
 
 
@@ -3545,7 +3548,6 @@ def _render_motionlib_acceptance_visual_validation_clip(
     cfg = config.get("visual_validation", {})
     clip_name = _safe_filename(str(row.get("filename") or Path(str(row["relative_path"])).stem))
     sample_id = clip_name
-    step_id = f"step_{step:08d}"
     paths = accepted_vertical_v2_artifact_paths(output_dir, sample_id=sample_id, step=step)
     clip_dir = paths["artifact_dir"]
     clip_dir.mkdir(parents=True, exist_ok=True)
@@ -5354,6 +5356,9 @@ def main() -> None:
         use_amp = precision in {"bf16", "fp16"}
         amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
         recent: deque[dict[str, float]] = deque(maxlen=log_every)
+        latest_train_metrics: dict[str, float] = {}
+        latest_validation_metrics: dict[str, float] = {}
+        latest_validation_step: int | None = None
         rng = torch.Generator(device=device)
         rng.manual_seed(seed + 20260520 + rank)
         start = time.perf_counter()
@@ -5418,6 +5423,7 @@ def main() -> None:
                 optimizer.step()
                 step += 1
                 metrics = average_metric_dict(metrics, runtime, device)
+                latest_train_metrics = {f"train/{key}": float(value) for key, value in metrics.items()}
                 recent.append(metrics)
 
                 if is_main and (step % log_every == 0 or step == 1):
@@ -5445,6 +5451,8 @@ def main() -> None:
                         root_pose_dim,
                     )
                     val_metrics = average_metric_dict(val_metrics, runtime, device)
+                    latest_validation_metrics = val_metrics
+                    latest_validation_step = step
                     if is_main and val_metrics:
                         print(json.dumps({"event": "validation", "step": step, **val_metrics}, sort_keys=True), flush=True)
                         if wandb_run is not None:
@@ -5572,6 +5580,36 @@ def main() -> None:
                             )
                     distributed_barrier(runtime)
                     last_visual_validation_time = now
+
+                if metric_validation_due(config, step):
+                    if latest_validation_step != step or not latest_validation_metrics:
+                        raise RuntimeError(
+                            "metric_validation.every_steps must align with training.validate_every "
+                            f"for same-step validation metrics: step={step}, "
+                            f"latest_validation_step={latest_validation_step}"
+                        )
+                    if is_main:
+                        metric_artifact_path = write_metric_validation_artifact(
+                            output_dir=output_dir,
+                            step=step,
+                            config=config,
+                            validation_metrics=latest_validation_metrics,
+                            train_metrics=latest_train_metrics,
+                            manifest=manifest,
+                        )
+                        print(
+                            json.dumps(
+                                {
+                                    "event": "metric_validation_artifact",
+                                    "step": step,
+                                    "path": str(metric_artifact_path),
+                                    "primary_metric": EVAL_METRIC_CONTRACT["primary"],
+                                },
+                                sort_keys=True,
+                            ),
+                            flush=True,
+                        )
+                    distributed_barrier(runtime)
 
                 if step % checkpoint_every == 0 or step == 1:
                     if is_main:

@@ -14,6 +14,12 @@ import numpy as np
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from online_retarget import metric_validation_artifacts  # noqa: E402
+
 A0_CONFIGS = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_frozen_ae_uniform_4gpu.json",
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_frozen_ae_proportional_4gpu.json",
@@ -21,6 +27,9 @@ A0_CONFIGS = (
 NO_ENCODER_CONFIGS = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_uniform_4gpu.json",
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_proportional_4gpu.json",
+)
+LR254_2GPU_UNIFORM_CONFIG = (
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_frozen_ae_uniform_2gpu_2kvis.json"
 )
 EXPECTED_EVAL_METRICS = {
     "primary": "g1_joint_pos_rmse_rad",
@@ -195,6 +204,83 @@ class A0FrozenAEConfigTests(unittest.TestCase):
             self.assertNotIn("joint_pos_rmse", " ".join(config["losses"]["primary"]).lower())
             self.assertEqual(config["evaluation_metrics"], EXPECTED_EVAL_METRICS)
             self.assertNotIn("mpjpe_like", config_text)
+
+    def test_lr254_2gpu_uniform_config_requests_2k_metric_artifacts(self) -> None:
+        config = json.loads(LR254_2GPU_UNIFORM_CONFIG.read_text(encoding="utf-8"))
+
+        self.assertEqual(config["training"]["validate_every"], 200)
+        self.assertEqual(config["visual_validation"]["every_steps"], 2000)
+        self.assertEqual(
+            config["metric_validation"],
+            {"enabled": True, "every_steps": 2000, "output_dir": "metrics"},
+        )
+        self.assertEqual(config["evaluation_metrics"]["primary"], "g1_joint_pos_rmse_rad")
+        self.assertIn("metrics/step_00002000.json", config["expected_artifacts"])
+        self.assertIn("metrics/step_00004000.json", config["expected_artifacts"])
+
+    def test_metric_validation_writer_creates_json_artifact_with_visual_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            visual_summary = output_dir / "visual_validation" / "step_00002000" / "summary.json"
+            visual_summary.parent.mkdir(parents=True)
+            visual_summary.write_text(
+                json.dumps(
+                    {
+                        "step": 2000,
+                        "status": "ok",
+                        "requested_videos": 8,
+                        "videos_ok": 8,
+                        "videos_failed": 0,
+                        "reports": [{"combined_status": "ok"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = {
+                "variant": {"name": "A0_metric_writer_smoke"},
+                "evaluation_metrics": EXPECTED_EVAL_METRICS,
+                "metric_validation": {
+                    "enabled": True,
+                    "every_steps": 2000,
+                    "output_dir": "metrics",
+                },
+            }
+
+            artifact = metric_validation_artifacts.write_metric_validation_artifact(
+                output_dir=output_dir,
+                step=2000,
+                config=config,
+                validation_metrics={
+                    "validation/g1_joint_pos_rmse_rad": 0.1234,
+                    "validation/loss": 1.5,
+                    "validation/root_pos_rmse_raw": float("nan"),
+                },
+                train_metrics={"train/g1_joint_pos_rmse_rad": 0.2345},
+                manifest={
+                    "run_id": "metric-writer-smoke",
+                    "run_group": "lr254-smoke",
+                    "config_path": "configs/sonic_kin_soma_motionlib_a0_frozen_ae_uniform_2gpu_2kvis.json",
+                    "control_revision_actual": "abc123",
+                    "source_revision_actual": "def456",
+                },
+            )
+
+            self.assertEqual(artifact, output_dir / "metrics" / "step_00002000.json")
+            payload = json.loads(artifact.read_text(encoding="utf-8"))
+            self.assertEqual(payload["artifact_type"], "metric_validation")
+            self.assertEqual(payload["step"], 2000)
+            self.assertEqual(payload["metric_family"], EXPECTED_EVAL_METRICS["metric_family"])
+            self.assertEqual(payload["primary_metric"], "g1_joint_pos_rmse_rad")
+            self.assertEqual(payload["primary_metric_key"], "validation/g1_joint_pos_rmse_rad")
+            self.assertEqual(payload["validation/g1_joint_pos_rmse_rad"], 0.1234)
+            self.assertEqual(payload["validation_metrics"]["validation/g1_joint_pos_rmse_rad"], 0.1234)
+            self.assertIsNone(payload["validation_metrics"]["validation/root_pos_rmse_raw"])
+            self.assertEqual(payload["train_metrics"]["train/g1_joint_pos_rmse_rad"], 0.2345)
+            self.assertEqual(payload["visual_validation"]["status"], "ok")
+            self.assertEqual(payload["visual_validation"]["path"], str(visual_summary))
+            self.assertEqual(payload["associated_visual_status"], "ok")
+            self.assertEqual(payload["associated_visual_path"], str(visual_summary))
+            self.assertEqual(payload["run"]["run_group"], "lr254-smoke")
 
     def test_a0_expected_dims_guard_is_in_normal_dry_run_and_formal_path(self) -> None:
         text = (REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py").read_text(encoding="utf-8")
