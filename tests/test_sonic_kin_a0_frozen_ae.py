@@ -282,6 +282,28 @@ class A0FrozenAEConfigTests(unittest.TestCase):
             self.assertEqual(payload["associated_visual_path"], str(visual_summary))
             self.assertEqual(payload["run"]["run_group"], "lr254-smoke")
 
+            wandb_payload = metric_validation_artifacts.metric_validation_wandb_payload(
+                payload,
+                artifact_path=artifact,
+            )
+            self.assertEqual(wandb_payload["metric_validation/primary_metric"], "g1_joint_pos_rmse_rad")
+            self.assertEqual(
+                wandb_payload["metric_validation/primary_metric_key"],
+                "validation/g1_joint_pos_rmse_rad",
+            )
+            self.assertEqual(wandb_payload["metric_validation/primary_metric_value"], 0.1234)
+            self.assertEqual(wandb_payload["validation/g1_joint_pos_rmse_rad"], 0.1234)
+            self.assertEqual(wandb_payload["metric_validation/validation/g1_joint_pos_rmse_rad"], 0.1234)
+            self.assertEqual(wandb_payload["train/g1_joint_pos_rmse_rad"], 0.2345)
+            self.assertEqual(wandb_payload["metric_validation/train/g1_joint_pos_rmse_rad"], 0.2345)
+            self.assertEqual(wandb_payload["metric_validation/artifact_path"], str(artifact))
+            self.assertEqual(wandb_payload["metric_validation/associated_visual_status"], "ok")
+            self.assertEqual(wandb_payload["metric_validation/associated_visual_path"], str(visual_summary))
+            self.assertEqual(wandb_payload["metric_validation/visual_validation/status"], "ok")
+            self.assertEqual(wandb_payload["metric_validation/visual_validation/path"], str(visual_summary))
+            self.assertEqual(wandb_payload["metric_validation/visual_validation/videos_ok"], 8.0)
+            self.assertNotIn("validation/root_pos_rmse_raw", wandb_payload)
+
     def test_a0_expected_dims_guard_is_in_normal_dry_run_and_formal_path(self) -> None:
         text = (REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py").read_text(encoding="utf-8")
         for token in (

@@ -78,7 +78,7 @@ def _visual_validation_artifact_status(output_dir: Path, step: int) -> dict[str,
     return status
 
 
-def write_metric_validation_artifact(
+def build_metric_validation_payload(
     *,
     output_dir: Path,
     step: int,
@@ -86,7 +86,7 @@ def write_metric_validation_artifact(
     validation_metrics: Mapping[str, Any],
     train_metrics: Mapping[str, Any] | None = None,
     manifest: Mapping[str, Any] | None = None,
-) -> Path:
+) -> dict[str, Any]:
     if not validation_metrics:
         raise ValueError("metric validation artifact requires validation_metrics")
     configured_eval_metrics = config.get("evaluation_metrics", {})
@@ -128,7 +128,26 @@ def write_metric_validation_artifact(
         "variant": dict(variant) if isinstance(variant, Mapping) else {},
         "run": run_payload,
     }
+    return payload
 
+
+def write_metric_validation_artifact(
+    *,
+    output_dir: Path,
+    step: int,
+    config: Mapping[str, Any],
+    validation_metrics: Mapping[str, Any],
+    train_metrics: Mapping[str, Any] | None = None,
+    manifest: Mapping[str, Any] | None = None,
+) -> Path:
+    payload = build_metric_validation_payload(
+        output_dir=output_dir,
+        step=step,
+        config=config,
+        validation_metrics=validation_metrics,
+        train_metrics=train_metrics,
+        manifest=manifest,
+    )
     metric_dir = metric_validation_output_dir(output_dir, config)
     metric_dir.mkdir(parents=True, exist_ok=True)
     artifact_path = metric_dir / f"step_{step:08d}.json"
@@ -139,3 +158,61 @@ def write_metric_validation_artifact(
     )
     tmp_path.replace(artifact_path)
     return artifact_path
+
+
+def load_metric_validation_artifact(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def metric_validation_wandb_payload(
+    metric_payload: Mapping[str, Any],
+    *,
+    artifact_path: Path | str | None = None,
+) -> dict[str, Any]:
+    wandb_payload: dict[str, Any] = {}
+    primary_metric = str(metric_payload.get("primary_metric", DEFAULT_PRIMARY_METRIC))
+    primary_metric_key = str(metric_payload.get("primary_metric_key", f"validation/{primary_metric}"))
+    primary_metric_value = metric_payload.get("primary_metric_value")
+    wandb_payload["metric_validation/primary_metric"] = primary_metric
+    wandb_payload["metric_validation/primary_metric_key"] = primary_metric_key
+    if primary_metric_value is not None:
+        wandb_payload["metric_validation/primary_metric_value"] = primary_metric_value
+        wandb_payload[primary_metric_key] = primary_metric_value
+        wandb_payload[f"metric_validation/{primary_metric_key}"] = primary_metric_value
+    if artifact_path is not None:
+        wandb_payload["metric_validation/artifact_path"] = str(artifact_path)
+
+    validation_metrics = metric_payload.get("validation_metrics", {})
+    if isinstance(validation_metrics, Mapping):
+        for key, value in validation_metrics.items():
+            if value is None:
+                continue
+            key_text = str(key)
+            wandb_payload[key_text] = value
+            wandb_payload[f"metric_validation/{key_text}"] = value
+
+    train_metrics = metric_payload.get("train_metrics", {})
+    if isinstance(train_metrics, Mapping):
+        for key, value in train_metrics.items():
+            if value is None:
+                continue
+            key_text = str(key)
+            wandb_payload[key_text] = value
+            wandb_payload[f"metric_validation/{key_text}"] = value
+
+    visual_payload = metric_payload.get("visual_validation", {})
+    if isinstance(visual_payload, Mapping):
+        status = visual_payload.get("status")
+        path = visual_payload.get("path") or visual_payload.get("summary_path")
+        if status is not None:
+            wandb_payload["metric_validation/associated_visual_status"] = str(status)
+            wandb_payload["metric_validation/visual_validation/status"] = str(status)
+        if path is not None:
+            wandb_payload["metric_validation/associated_visual_path"] = str(path)
+            wandb_payload["metric_validation/visual_validation/path"] = str(path)
+        for key in ("requested_videos", "videos_ok", "videos_failed", "duration_sec", "elapsed_sec", "report_count"):
+            value = visual_payload.get(key)
+            if value is not None:
+                wandb_payload[f"metric_validation/visual_validation/{key}"] = value
+
+    return wandb_payload

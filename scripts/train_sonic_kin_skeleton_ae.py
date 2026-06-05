@@ -69,7 +69,9 @@ from online_retarget.models.skeleton_geometry_ae import (  # noqa: E402
     load_skeleton_geometry_ae_stats,
 )
 from online_retarget.metric_validation_artifacts import (  # noqa: E402
+    load_metric_validation_artifact,
     metric_validation_due,
+    metric_validation_wandb_payload,
     write_metric_validation_artifact,
 )
 
@@ -5609,6 +5611,15 @@ def main() -> None:
                             ),
                             flush=True,
                         )
+                        if wandb_run is not None:
+                            metric_payload = load_metric_validation_artifact(metric_artifact_path)
+                            wandb_run.log(
+                                metric_validation_wandb_payload(
+                                    metric_payload,
+                                    artifact_path=metric_artifact_path,
+                                ),
+                                step=step,
+                            )
                     distributed_barrier(runtime)
 
                 if step % checkpoint_every == 0 or step == 1:
