@@ -3,6 +3,7 @@ import unittest
 
 from online_retarget.metrics import (
     action_similarity,
+    compute_metric_bundle,
     contact_artifact_metrics,
     joint_jump_rate,
     joint_limit_violation_rate,
@@ -11,7 +12,9 @@ from online_retarget.metrics import (
     joint_rmse,
     joint_velocity_rmse,
     max_joint_abs_error,
+    metric_metadata,
     mpjpe,
+    weighted_mpjpe,
 )
 
 
@@ -20,6 +23,42 @@ class MetricTests(unittest.TestCase):
         pred = [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]]
         target = [[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]]
         self.assertEqual(mpjpe(pred, target), 0.5)
+
+    def test_metric_registry_exposes_mpjpe_and_w_mpjpe_contract_status(self):
+        fields = {
+            "predicted_g1_body_pos": [[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]],
+            "target_g1_body_pos": [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]],
+            "body_position_weights": [2.0, 1.0],
+        }
+
+        blocked = compute_metric_bundle(fields, ("mpjpe", "w_mpjpe"))
+        self.assertEqual(blocked["mpjpe"].status, "blocked")
+        self.assertIn("pinned FK/link/root-alignment contract", blocked["mpjpe"].reason)
+        self.assertEqual(blocked["w_mpjpe"].status, "blocked")
+
+        fields["body_position_mpjpe_contract"] = {
+            "pinned": True,
+            "link_order": ["pelvis", "left_foot"],
+            "units": "m",
+            "root_alignment": "world_g1_root",
+        }
+        available = compute_metric_bundle(fields, ("mpjpe", "w_mpjpe"))
+
+        self.assertEqual(available["mpjpe"].status, "available")
+        self.assertEqual(available["mpjpe"].value, 0.5)
+        self.assertEqual(available["w_mpjpe"].status, "available")
+        self.assertEqual(available["w_mpjpe"].value, 1.0 / 3.0)
+        self.assertEqual(
+            weighted_mpjpe(
+                fields["predicted_g1_body_pos"],
+                fields["target_g1_body_pos"],
+                [2.0, 1.0],
+            ),
+            1.0 / 3.0,
+        )
+        metadata = metric_metadata(("mpjpe", "w_mpjpe"))
+        self.assertEqual(metadata["mpjpe"]["source_ref"], "LR-239 shared online/offline metric registry")
+        self.assertIn("body_position_weights", metadata["w_mpjpe"]["required_fields"])
 
     def test_joint_rmse(self):
         self.assertTrue(math.isclose(joint_rmse([[1.0, 3.0]], [[1.0, 1.0]]), math.sqrt(2.0)))
