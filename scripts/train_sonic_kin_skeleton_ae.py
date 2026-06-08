@@ -3442,9 +3442,17 @@ def run_visual_validation(
     vis_dir = output_dir / "visual_validation" / f"step_{step:08d}"
     vis_dir.mkdir(parents=True, exist_ok=True)
     report_path = vis_dir / "summary.json"
-    cohort = build_evaluation_cohort(validation_rows, config, run_group=run_group)
-    rows = list(cohort["visual_rows"])
-    cohort_summary = evaluation_cohort_artifact_summary(evaluation_cohort_manifest)
+    rows, cohort_summary = select_visual_validation_rows(
+        validation_rows,
+        config,
+        run_group=run_group,
+        evaluation_cohort_manifest=evaluation_cohort_manifest,
+    )
+    requested_videos = (
+        evaluation_cohort_counts(config)[0]
+        if evaluation_cohort_config(config)
+        else int(cfg.get("num_videos", 8))
+    )
     if not rows:
         summary = {
             "step": step,
@@ -3572,7 +3580,7 @@ def run_visual_validation(
         "status": status,
         "variant": config["variant"]["name"],
         "duration_sec": float(cfg.get("duration_sec", 4.0)),
-        "requested_videos": int(cohort["visual_num_samples"]),
+        "requested_videos": int(requested_videos),
         "videos_ok": ok_count,
         "videos_failed": failed_count,
         "elapsed_sec": time.perf_counter() - started,
@@ -4888,6 +4896,27 @@ def _select_visual_rows(
         key=lambda row: stable_hash_int(f"{salt}:{row.get('relative_path', '')}:{row.get('filename', '')}"),
     )
     return ranked[: max(0, count)]
+
+
+def select_visual_validation_rows(
+    rows: Sequence[Mapping[str, Any]],
+    config: Mapping[str, Any],
+    *,
+    run_group: str = "",
+    evaluation_cohort_manifest: Mapping[str, Any] | None = None,
+) -> tuple[list[Mapping[str, Any]], dict[str, Any]]:
+    if evaluation_cohort_config(config):
+        cohort = build_evaluation_cohort(rows, config, run_group=run_group)
+        return list(cohort["visual_rows"]), evaluation_cohort_artifact_summary(evaluation_cohort_manifest)
+    visual_cfg = config.get("visual_validation", {})
+    if not isinstance(visual_cfg, Mapping):
+        visual_cfg = {}
+    selected = _select_visual_rows(
+        rows,
+        count=int(visual_cfg.get("num_videos", 8)),
+        salt=f"{config['variant']['name']}:{config['training']['seed']}",
+    )
+    return selected, {}
 
 
 def _resolve_source_bvh(row: Mapping[str, Any], config: dict[str, Any], output_dir: Path) -> Path | None:

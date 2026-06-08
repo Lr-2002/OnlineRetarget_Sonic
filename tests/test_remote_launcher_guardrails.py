@@ -289,16 +289,18 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
         self.assertEqual(treatment["visual_validation"]["num_videos"], LR270_SHARED_EVAL_COHORT["visual_num_samples"])
         self.assertEqual(baseline["visual_validation"]["num_videos"], LR270_SHARED_EVAL_COHORT["visual_num_samples"])
 
-    def test_supervised_trainer_uses_shared_eval_cohort_not_variant_salt(self) -> None:
+    def test_supervised_trainer_gates_shared_eval_cohort_and_preserves_legacy_salt(self) -> None:
         text = SUPERVISED_TRAINER.read_text(encoding="utf-8")
         self.assertIn("build_evaluation_cohort(validation_dataset.rows, config, run_group=run_group)", text)
+        self.assertIn("def select_visual_validation_rows(", text)
+        self.assertIn("if evaluation_cohort_config(config):", text)
         self.assertIn("evaluation_cohort_manifest_payload", text)
         self.assertIn("metric_val_loader", text)
         self.assertIn("metric_rows_sha256", text)
         self.assertIn("visual_rows_sha256", text)
         self.assertIn("max_batches=0", text)
         self.assertIn('"variant.name"', text)
-        self.assertNotIn("config['variant']['name']}:{config['training']['seed']", text)
+        self.assertIn("salt=f\"{config['variant']['name']}:{config['training']['seed']}\"", text)
 
 
 class A0TwoGpuAcceptedVisualizationConfigTests(unittest.TestCase):

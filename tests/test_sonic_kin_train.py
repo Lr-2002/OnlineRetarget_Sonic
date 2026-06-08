@@ -100,6 +100,67 @@ class SonicKinTrainTimingTests(unittest.TestCase):
         self.assertIn("variant.name", manifest["sampling"]["excluded_config_fields"])
         self.assertIn("wandb.name", manifest["sampling"]["excluded_config_fields"])
 
+    def test_non_cohort_visual_selection_preserves_legacy_variant_seed_salt(self):
+        rows = [
+            {
+                "relative_path": f"legacy_{index:03d}.pkl",
+                "filename": f"legacy_{index:03d}",
+                "frame_count": 60 + index,
+                "split": "validation",
+            }
+            for index in range(40)
+        ]
+        config = {
+            "training": {"seed": 77},
+            "variant": {"name": "legacy_variant_a"},
+            "visual_validation": {"num_videos": 10},
+        }
+
+        selected, cohort_summary = sonic_train.select_visual_validation_rows(rows, config, run_group="ignored")
+        legacy = sonic_train._select_visual_rows(
+            rows,
+            count=10,
+            salt="legacy_variant_a:77",
+        )
+
+        self.assertEqual(cohort_summary, {})
+        self.assertEqual(
+            [sonic_train.evaluation_row_stable_key(row) for row in selected],
+            [sonic_train.evaluation_row_stable_key(row) for row in legacy],
+        )
+
+        disabled_config = {
+            **config,
+            "evaluation_cohort": {
+                "enabled": False,
+                "id": "should_not_affect_legacy_selection",
+                "seed": 20260608,
+                "visual_num_samples": 8,
+                "metric_num_samples": 100,
+            },
+        }
+        disabled_selected, disabled_summary = sonic_train.select_visual_validation_rows(
+            rows,
+            disabled_config,
+            run_group="ignored",
+        )
+
+        self.assertEqual(disabled_summary, {})
+        self.assertEqual(
+            [sonic_train.evaluation_row_stable_key(row) for row in disabled_selected],
+            [sonic_train.evaluation_row_stable_key(row) for row in legacy],
+        )
+
+        variant_b = {
+            **config,
+            "variant": {"name": "legacy_variant_b"},
+        }
+        variant_b_selected, _ = sonic_train.select_visual_validation_rows(rows, variant_b, run_group="ignored")
+        self.assertNotEqual(
+            [sonic_train.evaluation_row_stable_key(row) for row in selected],
+            [sonic_train.evaluation_row_stable_key(row) for row in variant_b_selected],
+        )
+
     def _predict_state(
         self,
         config,
