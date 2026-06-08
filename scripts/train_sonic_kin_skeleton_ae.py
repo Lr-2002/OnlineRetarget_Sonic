@@ -200,6 +200,14 @@ EVAL_METRIC_CONTRACT: dict[str, Any] = {
     },
 }
 TEMPORAL_CONSISTENCY_LOSS_WEIGHT_DEFAULT = 0.01
+RAW_SONIC_DATASET_KIN = "kin"
+RAW_SONIC_DATASET_PHY = "phy"
+RAW_SONIC_DATASETS = (RAW_SONIC_DATASET_KIN, RAW_SONIC_DATASET_PHY)
+DEFAULT_RAW_SONIC_DATASET_ROOTS = {
+    RAW_SONIC_DATASET_KIN: "/mnt/data_cpfs/bones_sonic",
+    RAW_SONIC_DATASET_PHY: "/mnt/data_cpfs/phsical_bones_sonic",
+}
+DEFAULT_RAW_SONIC_SOURCE_PATH_PREFIX = "/home/user/data/motion_data/bones_sonic"
 
 
 def utc_now() -> str:
@@ -233,7 +241,136 @@ def read_config(path: Path) -> dict[str, Any]:
     missing = sorted(REQUIRED_CONFIG_KEYS - set(data))
     if missing:
         raise ValueError(f"missing required config keys: {', '.join(missing)}")
+    validate_raw_sonic_dataset_config(data)
     return data
+
+
+def input_data_format(config: Mapping[str, Any]) -> str:
+    input_cfg = config.get("input_data", {})
+    if not isinstance(input_cfg, Mapping):
+        return "npz"
+    return str(input_cfg.get("format", "npz")).strip() or "npz"
+
+
+def is_raw_sonic_npz_config(config: Mapping[str, Any]) -> bool:
+    return input_data_format(config) != "soma_motionlib"
+
+
+def raw_sonic_dataset(config: Mapping[str, Any]) -> str:
+    input_cfg = config.get("input_data", {})
+    dataset = str(input_cfg.get("dataset", RAW_SONIC_DATASET_KIN)).strip().lower()
+    if dataset not in RAW_SONIC_DATASETS:
+        raise ValueError(f"input_data.dataset must be one of: {', '.join(RAW_SONIC_DATASETS)}")
+    return dataset
+
+
+def raw_sonic_dataset_roots(config: Mapping[str, Any]) -> dict[str, str]:
+    input_cfg = config.get("input_data", {})
+    roots = dict(DEFAULT_RAW_SONIC_DATASET_ROOTS)
+    configured_roots = input_cfg.get("dataset_roots", {})
+    if configured_roots in ("", None):
+        configured_roots = {}
+    if not isinstance(configured_roots, Mapping):
+        raise ValueError("input_data.dataset_roots must map kin/phy to dataset roots")
+    for name, root in configured_roots.items():
+        dataset = str(name).strip().lower()
+        if dataset not in RAW_SONIC_DATASETS:
+            raise ValueError(f"input_data.dataset_roots only supports: {', '.join(RAW_SONIC_DATASETS)}")
+        root_text = str(root).strip()
+        if not root_text:
+            raise ValueError(f"input_data.dataset_roots.{dataset} must be a non-empty path")
+        roots[dataset] = root_text
+    if not configured_roots and input_cfg.get("data_root"):
+        roots[raw_sonic_dataset(config)] = str(input_cfg["data_root"])
+    return roots
+
+
+def raw_sonic_dataset_manifests(config: Mapping[str, Any]) -> dict[str, str]:
+    input_cfg = config.get("input_data", {})
+    configured_manifests = input_cfg.get("dataset_manifests", {})
+    if configured_manifests in ("", None):
+        configured_manifests = {}
+    if not isinstance(configured_manifests, Mapping):
+        raise ValueError("input_data.dataset_manifests must map kin/phy to manifest paths")
+    manifests: dict[str, str] = {}
+    for name, manifest in configured_manifests.items():
+        dataset = str(name).strip().lower()
+        if dataset not in RAW_SONIC_DATASETS:
+            raise ValueError(f"input_data.dataset_manifests only supports: {', '.join(RAW_SONIC_DATASETS)}")
+        manifest_text = str(manifest).strip()
+        if not manifest_text:
+            raise ValueError(f"input_data.dataset_manifests.{dataset} must be a non-empty path")
+        manifests[dataset] = manifest_text
+    return manifests
+
+
+def raw_sonic_data_root(config: Mapping[str, Any]) -> Path:
+    dataset = raw_sonic_dataset(config)
+    roots = raw_sonic_dataset_roots(config)
+    return Path(roots[dataset])
+
+
+def raw_sonic_dataset_manifest_path(config: Mapping[str, Any]) -> Path | None:
+    dataset = raw_sonic_dataset(config)
+    manifests = raw_sonic_dataset_manifests(config)
+    if dataset in manifests:
+        return Path(manifests[dataset])
+    if dataset == RAW_SONIC_DATASET_PHY:
+        return raw_sonic_data_root(config) / "data.txt"
+    return None
+
+
+def raw_sonic_dataset_relative_paths(config: Mapping[str, Any]) -> set[str] | None:
+    manifest_path = raw_sonic_dataset_manifest_path(config)
+    if manifest_path is None:
+        return None
+    data_root = raw_sonic_data_root(config)
+    relative_paths: set[str] = set()
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            path = Path(text)
+            if path.is_absolute():
+                try:
+                    text = str(path.relative_to(data_root))
+                except ValueError:
+                    text = str(path)
+            else:
+                text = str(path)
+            relative_paths.add(text.lstrip("./"))
+    return relative_paths
+
+
+def resolved_raw_sonic_indexing(config: Mapping[str, Any]) -> dict[str, Any]:
+    input_cfg = config.get("input_data", {})
+    raw_indexing = input_cfg.get("indexing", {})
+    if raw_indexing in ("", None):
+        raw_indexing = {}
+    if not isinstance(raw_indexing, Mapping):
+        raise ValueError("input_data.indexing must be a mapping")
+    indexing = dict(raw_indexing)
+    if not indexing.get("source_path_prefix"):
+        indexing["source_path_prefix"] = DEFAULT_RAW_SONIC_SOURCE_PATH_PREFIX
+    if input_cfg.get("dataset") or input_cfg.get("dataset_roots") or not indexing.get("target_path_prefix"):
+        indexing["target_path_prefix"] = str(raw_sonic_data_root(config))
+    return indexing
+
+
+def data_root_from_config(config: Mapping[str, Any]) -> Path:
+    if not is_raw_sonic_npz_config(config):
+        return Path(config["input_data"]["robot_motion_dir"])
+    return raw_sonic_data_root(config)
+
+
+def validate_raw_sonic_dataset_config(config: Mapping[str, Any]) -> None:
+    if not is_raw_sonic_npz_config(config):
+        return
+    raw_sonic_dataset(config)
+    raw_sonic_dataset_roots(config)
+    raw_sonic_dataset_manifests(config)
+    resolved_raw_sonic_indexing(config)
 
 
 def git_revision(root: Path) -> str | None:
@@ -1947,9 +2084,9 @@ def load_soma_motionlib_arrays(row: Mapping[str, Any], config: Mapping[str, Any]
 
 
 def index_path_from_config(config: dict[str, Any]) -> Path:
-    if config["input_data"].get("format") == "soma_motionlib":
+    if not is_raw_sonic_npz_config(config):
         return Path(config["input_data"]["robot_motion_dir"])
-    indexing = config["input_data"].get("indexing", {})
+    indexing = resolved_raw_sonic_indexing(config)
     raw_path = indexing.get("index_csv") or indexing.get("prebuilt_index_jsonl")
     if not raw_path:
         raise ValueError("input_data.indexing must define index_csv or prebuilt_index_jsonl")
@@ -1965,7 +2102,8 @@ def remap_source_path(source_path: str, indexing: dict[str, Any]) -> Path:
 
 
 def rows_from_jsonl_index(config: dict[str, Any], data_root: Path) -> tuple[list[dict[str, Any]], int]:
-    indexing = config["input_data"].get("indexing", {})
+    indexing = resolved_raw_sonic_indexing(config)
+    dataset_relative_paths = raw_sonic_dataset_relative_paths(config)
     index_path = Path(indexing["prebuilt_index_jsonl"])
     max_clips = int(indexing.get("max_clips", 0))
     rows = []
@@ -1983,6 +2121,9 @@ def rows_from_jsonl_index(config: dict[str, Any], data_root: Path) -> tuple[list
             try:
                 relative_path = str(path.relative_to(data_root))
             except ValueError:
+                skipped += 1
+                continue
+            if dataset_relative_paths is not None and relative_path not in dataset_relative_paths:
                 skipped += 1
                 continue
             frame_count = int(float(source.get("move_duration_frames") or -1))
@@ -2009,7 +2150,8 @@ def rows_from_jsonl_index(config: dict[str, Any], data_root: Path) -> tuple[list
 
 
 def rows_from_csv_index(config: dict[str, Any], data_root: Path) -> tuple[list[dict[str, Any]], int]:
-    indexing = config["input_data"].get("indexing", {})
+    indexing = resolved_raw_sonic_indexing(config)
+    dataset_relative_paths = raw_sonic_dataset_relative_paths(config)
     index_path = Path(indexing["index_csv"])
     max_clips = int(indexing.get("max_clips", 0))
     rows = []
@@ -2027,6 +2169,9 @@ def rows_from_csv_index(config: dict[str, Any], data_root: Path) -> tuple[list[d
             try:
                 relative_path = str(path.relative_to(data_root))
             except ValueError:
+                skipped += 1
+                continue
+            if dataset_relative_paths is not None and relative_path not in dataset_relative_paths:
                 skipped += 1
                 continue
             frame_count_text = source.get("frame_count") or source.get("move_duration_frames") or ""
@@ -2085,16 +2230,23 @@ def rows_from_index_cache_payload(
     rows: list[dict[str, Any]],
     skipped: int,
 ) -> dict[str, Any]:
+    raw_indexing = resolved_raw_sonic_indexing(config) if is_raw_sonic_npz_config(config) else {}
     return {
         "cache_version": 1,
         "created_at": utc_now(),
         "config": {
-            "format": config["input_data"].get("format"),
+            "format": input_data_format(config),
+            "dataset": raw_sonic_dataset(config) if is_raw_sonic_npz_config(config) else "",
             "robot_motion_dir": config["input_data"].get("robot_motion_dir"),
             "soma_motion_dir": config["input_data"].get("soma_motion_dir"),
             "data_root": str(data_root),
-            "max_clips": int(config["input_data"].get("max_clips", 0)),
-            "max_duration_delta_sec": float(config["input_data"].get("max_duration_delta_sec", 0.05)),
+            "manifest_path": (
+                str(raw_sonic_dataset_manifest_path(config) or "") if is_raw_sonic_npz_config(config) else ""
+            ),
+            "max_clips": int(config["input_data"].get("max_clips", raw_indexing.get("max_clips", 0))),
+            "max_duration_delta_sec": float(
+                config["input_data"].get("max_duration_delta_sec", raw_indexing.get("max_duration_delta_sec", 0.05))
+            ),
         },
         "rows": rows,
         "row_count": len(rows),
@@ -2412,7 +2564,7 @@ def rows_from_index(
 ) -> tuple[list[dict[str, Any]], int]:
     cache_path = rows_from_index_cache_path(output_dir) if output_dir is not None else None
     use_cache = cache_path is not None
-    if config["input_data"].get("format") == "soma_motionlib":
+    if not is_raw_sonic_npz_config(config):
         if use_cache and runtime is not None and runtime.get("distributed"):
             if is_main_process(runtime):
                 if cache_path.exists():
@@ -2507,8 +2659,8 @@ class KinWindowDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]])
         self.rows = [row for row in rows if row["split"] == split]
         self.config = config
         self.skeleton_feature_lookup = skeleton_feature_lookup
-        self.input_format = str(config["input_data"].get("format", "npz"))
-        self.data_root = Path(config["input_data"].get("data_root", config["input_data"].get("robot_motion_dir", ".")))
+        self.input_format = input_data_format(config)
+        self.data_root = data_root_from_config(config)
         self.window = int(config["features"]["future_window_frames"])
         self.step = int(config["features"]["future_step"])
         self.frame_stride = int(config["training"]["frame_stride"])
@@ -3049,7 +3201,7 @@ def run_visual_validation(
         return {"visual_validation/videos_ok": 0.0, "visual_validation/videos_failed": 0.0}
 
     if acceptance_backend:
-        if config["input_data"].get("format") != "soma_motionlib":
+        if is_raw_sonic_npz_config(config):
             summary = {
                 "step": step,
                 "status": "blocked",
@@ -3353,7 +3505,7 @@ def _render_visual_validation_clip(
     isaac_render_script: Path | str | None = None,
     execute_isaaclab: bool = True,
 ) -> dict[str, Any]:
-    if config["input_data"].get("format") == "soma_motionlib":
+    if not is_raw_sonic_npz_config(config):
         return _render_motionlib_visual_validation_clip(
             model=model,
             row=row,
@@ -3385,7 +3537,7 @@ def _render_visual_validation_clip(
     metadata_path = clip_dir / "metadata.json"
     visual_renderer = A0VisualValidationRenderer(config)
 
-    arrays, fps = _load_visual_npz(Path(config["input_data"]["data_root"]) / str(row["relative_path"]))
+    arrays, fps = _load_visual_npz(data_root_from_config(config) / str(row["relative_path"]))
     total_frames = min(
         arrays["joint_pos"].shape[0],
         arrays["joint_vel"].shape[0],
@@ -5000,7 +5152,7 @@ def write_manifest(
 ) -> dict[str, Any]:
     source_root = Path(config["source_repo"])
     control_root = Path.cwd()
-    if config["input_data"].get("format") == "soma_motionlib":
+    if not is_raw_sonic_npz_config(config):
         data_snapshot: dict[str, Any] = {
             "format": "soma_motionlib",
             "robot_motion_dir": config["input_data"]["robot_motion_dir"],
@@ -5013,7 +5165,9 @@ def write_manifest(
     else:
         data_snapshot = {
             "format": "npz",
-            "data_root": config["input_data"]["data_root"],
+            "dataset": raw_sonic_dataset(config),
+            "data_root": str(data_root_from_config(config)),
+            "manifest_path": str(raw_sonic_dataset_manifest_path(config) or ""),
             "index": file_stats(index_path_from_config(config)),
             "row_count": len(rows),
             "skipped_index_rows": skipped_index_rows,
@@ -5151,15 +5305,18 @@ def validate_runtime(
             f"expected torchrun WORLD_SIZE={required_gpu_count} for this config, got {world_size}"
         )
     if check_data_artifacts:
-        if config["input_data"].get("format") == "soma_motionlib":
+        if not is_raw_sonic_npz_config(config):
             for key in ("robot_motion_dir", "soma_motion_dir"):
                 path = Path(config["input_data"][key])
                 if not path.exists():
                     raise FileNotFoundError(f"{key} is missing: {path}")
         else:
-            data_root = Path(config["input_data"]["data_root"])
+            data_root = data_root_from_config(config)
             if not data_root.exists():
                 raise FileNotFoundError(f"data_root is missing: {data_root}")
+            manifest_path = raw_sonic_dataset_manifest_path(config)
+            if manifest_path is not None and not manifest_path.exists():
+                raise FileNotFoundError(f"dataset manifest is missing: {manifest_path}")
             if not index_path_from_config(config).exists():
                 raise FileNotFoundError(f"index is missing: {index_path_from_config(config)}")
         cfg = skeleton_ae_config(config)
@@ -5263,7 +5420,7 @@ def main() -> None:
         stage_trace.attach(output_dir)
         with stage_trace.span("validate_runtime", output_dir=str(output_dir), index_only=True):
             validate_runtime(config, output_dir, index_runtime, check_data_artifacts=True, index_only=True)
-        data_root = Path(config["input_data"].get("data_root", config["input_data"].get("robot_motion_dir", ".")))
+        data_root = data_root_from_config(config)
         with stage_trace.span(
             "rows_from_index",
             data_root=str(data_root),
@@ -5282,7 +5439,11 @@ def main() -> None:
             "variant": config["variant"],
             "config_path": str(args.config),
             "output_dir": str(output_dir),
+            "dataset": raw_sonic_dataset(config) if is_raw_sonic_npz_config(config) else "",
             "data_root": str(data_root),
+            "manifest_path": (
+                str(raw_sonic_dataset_manifest_path(config) or "") if is_raw_sonic_npz_config(config) else ""
+            ),
             "index_path": str(index_path_from_config(config)),
             "robot_motion_dir": config["input_data"].get("robot_motion_dir", ""),
             "soma_motion_dir": config["input_data"].get("soma_motion_dir", ""),
@@ -5388,7 +5549,7 @@ def main() -> None:
             return
 
         skeleton_feature_lookup = build_skeleton_ae_feature_lookup(config, device, stage_trace)
-        data_root = Path(config["input_data"].get("data_root", config["input_data"].get("robot_motion_dir", ".")))
+        data_root = data_root_from_config(config)
         with stage_trace.span(
             "rows_from_index",
             data_root=str(data_root),
