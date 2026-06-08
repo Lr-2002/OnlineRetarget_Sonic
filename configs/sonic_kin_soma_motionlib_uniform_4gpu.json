@@ -39,7 +39,9 @@
       "g1_kin_root_position_rmse",
       "g1_kin_root_orientation_rmse"
     ],
-    "auxiliary": []
+    "auxiliary": [
+      "g1_kin_command_temporal_consistency_delta_mse"
+    ]
   },
   "output_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_kin_soma_motionlib_supervised_runs/{run_group}/uniform",
   "validation_command": "CONFIG=configs/sonic_kin_soma_motionlib_uniform_4gpu.json scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh",
@@ -97,7 +99,9 @@
     "keep_last_checkpoints": 5,
     "command_loss_weight": 1.0,
     "root_pos_loss_weight": 0.25,
-    "root_rot_loss_weight": 0.5
+    "root_rot_loss_weight": 0.5,
+    "temporal_consistency_loss_enabled": true,
+    "temporal_consistency_loss_weight": 0.01
   },
   "visual_validation": {
     "enabled": true,

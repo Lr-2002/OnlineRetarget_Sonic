@@ -150,7 +150,12 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                 self.assertEqual(config["training"]["required_gpu_count"], 4)
                 self.assertEqual(config["target_decoder"]["primary"], "g1_kin")
                 self.assertEqual(config["decoder_targets"], ["g1_kin"])
-                self.assertEqual(config["losses"]["auxiliary"], [])
+                self.assertEqual(
+                    config["losses"]["auxiliary"],
+                    ["g1_kin_command_temporal_consistency_delta_mse"],
+                )
+                self.assertIs(config["training"]["temporal_consistency_loss_enabled"], True)
+                self.assertEqual(config["training"]["temporal_consistency_loss_weight"], 0.01)
                 self.assertIn(f"soma_{topology}_filtered_v1", config["input_data"]["soma_motion_dir"])
                 text = path.read_text(encoding="utf-8")
                 self.assertNotIn("sonic_hydra", text)

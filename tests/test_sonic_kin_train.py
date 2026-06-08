@@ -376,3 +376,60 @@ class SonicKinTrainTimingTests(unittest.TestCase):
                 {"acceptance_backend": True},
             )
         )
+
+    def test_temporal_consistency_loss_weight_is_config_gated(self):
+        self.assertEqual(
+            sonic_train.temporal_consistency_loss_weight({"training": {}}),
+            0.0,
+        )
+        self.assertEqual(
+            sonic_train.temporal_consistency_loss_weight(
+                {"training": {"temporal_consistency_loss_enabled": True}}
+            ),
+            0.01,
+        )
+        self.assertEqual(
+            sonic_train.temporal_consistency_loss_weight(
+                {
+                    "training": {
+                        "temporal_consistency_loss_enabled": True,
+                        "temporal_consistency_loss_weight": 0.02,
+                    }
+                }
+            ),
+            0.02,
+        )
+
+    def test_loss_and_metrics_adds_temporal_command_delta_mse_when_enabled(self):
+        torch = sonic_train.torch
+        # Two future frames, one joint position + one joint velocity per frame.
+        pred_command = torch.tensor([[0.0, 0.0, 2.0, 0.0]], dtype=torch.float32)
+        target_command = torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32)
+        pred_anchor = torch.zeros(1, 18, dtype=torch.float32)
+        target_anchor = torch.zeros(1, 18, dtype=torch.float32)
+        pred = torch.cat([pred_command, pred_anchor], dim=-1)
+        target = torch.cat([target_command, target_anchor], dim=-1)
+        stats = {
+            "target_mean": torch.zeros(pred.shape[-1], dtype=torch.float32),
+            "target_std": torch.ones(pred.shape[-1], dtype=torch.float32),
+        }
+
+        loss, metrics = sonic_train.loss_and_metrics(
+            pred,
+            target,
+            target,
+            stats,
+            4,
+            1,
+            18,
+            True,
+            1.0,
+            0.25,
+            0.5,
+            0.01,
+        )
+
+        self.assertAlmostEqual(float(metrics["command_mse_norm"]), 0.25)
+        self.assertAlmostEqual(float(metrics["temporal_consistency_mse_norm"]), 0.5)
+        self.assertAlmostEqual(float(metrics["temporal_consistency_loss_weight"]), 0.01)
+        self.assertAlmostEqual(float(loss), 0.255)
