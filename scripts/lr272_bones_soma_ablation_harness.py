@@ -395,6 +395,8 @@ def build_campaign(
     retarget_template: str | None = None,
     metric_template: str | None = None,
     visual_template: str | None = None,
+    runner_python: str | None = None,
+    runner_script: Path | None = None,
     allow_missing_inputs: bool = False,
 ) -> dict[str, Any]:
     rows = read_pairing_rows(pairing_csv, allow_missing=allow_missing_inputs)
@@ -425,6 +427,8 @@ def build_campaign(
         retarget_template=retarget_template,
         metric_template=metric_template,
         visual_template=visual_template,
+        runner_python=runner_python or sys.executable,
+        runner_script=runner_script or Path("scripts/lr272_bones_soma_candidate_runner.py"),
     )
     commands_jsonl = output_dir / "commands.jsonl"
     commands_sh = output_dir / "commands.sh"
@@ -605,14 +609,18 @@ def build_command_rows(
     retarget_template: str | None,
     metric_template: str | None,
     visual_template: str | None,
+    runner_python: str,
+    runner_script: Path,
 ) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
-    script_path = Path(__file__).resolve()
     for candidate in candidates:
         if not candidate.enabled:
             continue
         for stage in stages:
             run_dir = output_dir / "runs" / stage.name / candidate.candidate_id
+            runner_path = runner_script
+            if not runner_path.is_absolute():
+                runner_path = repo_root / runner_path
             values = {
                 "candidate_id": candidate.candidate_id,
                 "route": candidate.route,
@@ -622,13 +630,12 @@ def build_command_rows(
                 "output_dir": str(run_dir),
                 "repo_root": str(repo_root),
                 "baseline_commit": baseline_commit,
+                "runner_python": runner_python,
+                "runner_script": str(runner_path),
             }
-            default_command = (
-                f"{shlex.quote(sys.executable)} {shlex.quote(str(script_path))} print-run "
-                f"--config {shlex.quote(values['config'])} "
-                f"--stage {shlex.quote(stage.name)} "
-                f"--output-dir {shlex.quote(str(run_dir))}"
-            )
+            default_retarget = default_runner_command(values, mode="retarget")
+            default_metric = default_runner_command(values, mode="metric")
+            default_visual = default_runner_command(values, mode="visual")
             rows.append(
                 {
                     "candidate_id": candidate.candidate_id,
@@ -637,13 +644,23 @@ def build_command_rows(
                     "stage_csv": str(stage_paths[stage]),
                     "config": str(config_paths[candidate.candidate_id]),
                     "output_dir": str(run_dir),
-                    "retarget_command": format_template(retarget_template, values) if retarget_template else default_command,
-                    "metric_command": format_template(metric_template, values) if metric_template else "",
-                    "visual_command": format_template(visual_template, values) if visual_template else "",
+                    "retarget_command": format_template(retarget_template, values) if retarget_template else default_retarget,
+                    "metric_command": format_template(metric_template, values) if metric_template else default_metric,
+                    "visual_command": format_template(visual_template, values) if visual_template else default_visual,
                     "baseline_commit": baseline_commit,
                 }
             )
     return rows
+
+
+def default_runner_command(values: Mapping[str, str], *, mode: str) -> str:
+    return (
+        f"{shlex.quote(values['runner_python'])} {shlex.quote(values['runner_script'])} "
+        f"--config {shlex.quote(values['config'])} "
+        f"--stage-csv {shlex.quote(values['stage_csv'])} "
+        f"--output-dir {shlex.quote(values['output_dir'])} "
+        f"--mode {shlex.quote(mode)}"
+    )
 
 
 def format_template(template: str, values: Mapping[str, str]) -> str:
@@ -853,11 +870,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Optional format string for remote retarget execution. Available placeholders: "
-            "{candidate_id}, {route}, {stage}, {config}, {stage_csv}, {output_dir}, {repo_root}, {baseline_commit}."
+            "{candidate_id}, {route}, {stage}, {config}, {stage_csv}, {output_dir}, "
+            "{repo_root}, {baseline_commit}, {runner_python}, {runner_script}."
         ),
     )
     plan.add_argument("--metric-template", default=None, help="Optional metric command template with the same placeholders.")
     plan.add_argument("--visual-template", default=None, help="Optional visual command template with the same placeholders.")
+    plan.add_argument(
+        "--runner-python",
+        default=sys.executable,
+        help="Python interpreter used in generated runner commands.",
+    )
+    plan.add_argument(
+        "--runner-script",
+        type=Path,
+        default=Path("scripts/lr272_bones_soma_candidate_runner.py"),
+        help="Runner script used in generated commands; relative paths resolve under --repo-root.",
+    )
     plan.add_argument("--allow-missing-inputs", action="store_true")
 
     print_run_parser = subparsers.add_parser("print-run", help="Print one resolved candidate/stage run spec.")
@@ -882,6 +911,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             retarget_template=args.retarget_template,
             metric_template=args.metric_template,
             visual_template=args.visual_template,
+            runner_python=args.runner_python,
+            runner_script=args.runner_script,
             allow_missing_inputs=args.allow_missing_inputs,
         )
         print(json.dumps(manifest, indent=2, sort_keys=True))

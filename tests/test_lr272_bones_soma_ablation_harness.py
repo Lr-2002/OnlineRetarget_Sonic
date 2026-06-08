@@ -116,6 +116,40 @@ class Lr272BonesSomaAblationHarnessTests(unittest.TestCase):
             self.assertIn("--candidate a_root_xy_scale_global_1p10", "\n".join(row["retarget_command"] for row in commands))
             self.assertTrue(all(row["baseline_commit"] == "b3ef2708" for row in commands))
 
+    def test_build_campaign_generates_executable_default_runner_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pairing_csv = root / "pairing.csv"
+            _write_pairing_csv(pairing_csv)
+            output_dir = root / "campaign"
+
+            self.script.build_campaign(
+                pairing_csv=pairing_csv,
+                output_dir=output_dir,
+                repo_root=root / "repo",
+                g1_tar=root / "g1.tar",
+                soma_bvh_tar=root / "soma_proportional.tar",
+                baseline_commit="b3ef2708",
+                run_name="unit",
+                worst_keys=[],
+                runner_python="/opt/run/python",
+            )
+
+            rows = [
+                json.loads(line)
+                for line in (output_dir / "commands.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            baseline_smoke = next(
+                row
+                for row in rows
+                if row["candidate_id"] == "baseline_b3ef2708_soma" and row["stage"] == "smoke1"
+            )
+            self.assertIn("lr272_bones_soma_candidate_runner.py", baseline_smoke["retarget_command"])
+            self.assertIn("--mode retarget", baseline_smoke["retarget_command"])
+            self.assertIn("--mode metric", baseline_smoke["metric_command"])
+            self.assertIn("--mode visual", baseline_smoke["visual_command"])
+            self.assertIn("/opt/run/python", baseline_smoke["retarget_command"])
+
     def test_print_run_resolves_stage_from_candidate_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
