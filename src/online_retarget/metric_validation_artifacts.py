@@ -353,6 +353,9 @@ def build_metric_validation_payload(
         ):
             if key in manifest:
                 run_payload[key] = str(manifest[key])
+    evaluation_cohort = {}
+    if manifest is not None and isinstance(manifest.get("evaluation_cohort"), Mapping):
+        evaluation_cohort = copy.deepcopy(dict(manifest["evaluation_cohort"]))
 
     payload: dict[str, Any] = {
         "artifact_type": "metric_validation",
@@ -379,6 +382,7 @@ def build_metric_validation_payload(
         "associated_visual_status": visual_payload.get("status"),
         "associated_visual_path": visual_payload.get("path"),
         "metric_validation": dict(metric_cfg) if isinstance(metric_cfg, Mapping) else {},
+        "evaluation_cohort": evaluation_cohort,
         "variant": dict(variant) if isinstance(variant, Mapping) else {},
         "run": run_payload,
     }

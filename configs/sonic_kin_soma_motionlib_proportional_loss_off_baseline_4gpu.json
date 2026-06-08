@@ -135,6 +135,15 @@
       "context_compositing"
     ]
   },
+  "evaluation_cohort": {
+    "enabled": true,
+    "id": "lr270_shared_eval_v1",
+    "seed": 20260608,
+    "include_run_group": true,
+    "visual_num_samples": 8,
+    "metric_num_samples": 100,
+    "manifest_path": "eval_cohort_manifest.json"
+  },
   "runtime": {
     "required_gpu_count": 4,
     "write_root": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs",
