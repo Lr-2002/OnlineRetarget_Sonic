@@ -39,6 +39,13 @@ DEFAULT_BASELINE_OUTPUT_ROOTS = (
     DEFAULT_REPO_ROOT / "outputs" / "lr272_adapter_convention_diagnostics_20260608T1436Z",
     DEFAULT_REPO_ROOT / "outputs" / "lr272_axis_dof_convention_search_20260608T1455Z",
 )
+DEFAULT_FRAME_CONSISTENCY_REPORT = (
+    DEFAULT_REPO_ROOT
+    / "outputs"
+    / "lr272_bones_soma_ablation_campaign_20260608T174631Z"
+    / "evaluator_frame_consistency_mixed10_20260608T182931Z"
+    / "frame_consistency_report.json"
+)
 
 DEFAULT_WORST_KEYS = (
     "230413__dance_hiphop_camel_walk_360_R_fast_002__A317",
@@ -352,7 +359,7 @@ def build_candidates() -> list[Candidate]:
         Candidate(
             candidate_id="c_hip_pitch_sign_flip_probe",
             route="C_dof_convention",
-            enabled=True,
+            enabled=False,
             expected_layer="hip_axis_sign",
             description="Single-axis FK perturbation: flip left/right hip pitch sign and compare lower-body FK/contact response.",
             root_world=root_identity,
@@ -368,7 +375,7 @@ def build_candidates() -> list[Candidate]:
         Candidate(
             candidate_id="c_hip_roll_yaw_swap_probe",
             route="C_dof_convention",
-            enabled=True,
+            enabled=False,
             expected_layer="hip_neighboring_axis_order",
             description="Single-axis FK perturbation: swap hip roll/yaw neighboring axes to test lower-body axis ordering.",
             root_world=root_identity,
@@ -387,7 +394,7 @@ def build_candidates() -> list[Candidate]:
         Candidate(
             candidate_id="c_waist_yaw_sign_flip_probe",
             route="C_dof_convention",
-            enabled=True,
+            enabled=False,
             expected_layer="waist_axis_sign",
             description="Single-axis FK perturbation: flip waist yaw sign and compare torso/root heading response.",
             root_world=root_identity,
@@ -403,7 +410,7 @@ def build_candidates() -> list[Candidate]:
         Candidate(
             candidate_id="c_shoulder_roll_sign_flip_probe",
             route="C_dof_convention",
-            enabled=True,
+            enabled=False,
             expected_layer="shoulder_axis_sign",
             description="Single-axis FK perturbation: flip shoulder roll sign and inspect arm FK response.",
             root_world=root_identity,
@@ -422,7 +429,7 @@ def build_candidates() -> list[Candidate]:
         Candidate(
             candidate_id="c_elbow_sign_flip_probe",
             route="C_dof_convention",
-            enabled=True,
+            enabled=False,
             expected_layer="elbow_axis_sign",
             description="Single-axis FK perturbation: flip elbow sign and inspect arm bend direction.",
             root_world=root_identity,
@@ -434,6 +441,61 @@ def build_candidates() -> list[Candidate]:
             },
             validation={"compare_to": "official_g1_csv", "metric_focus": ("elbow_fk", "wrist_fk", "upper_body_mpjpe")},
             tags=("dof", "elbow", "sign", "fk_probe"),
+        ),
+        Candidate(
+            candidate_id="c_lower_body_fk_signature_dof_map_train_split_v1",
+            route="C_dof_convention",
+            enabled=True,
+            expected_layer="lower_body_dof_sign_order_neighbor_axis",
+            description=(
+                "Train-split-only global lower-body DoF sign/order/neighbor-axis map learned from root-aligned "
+                "single-axis FK signatures; root/world and summarizer stay at the baseline contract."
+            ),
+            root_world=root_identity,
+            summarizer=summarizer_current,
+            dof_convention={
+                **dof_identity,
+                "train_split_fk_signature_map": {
+                    "enabled": True,
+                    "version": "v1",
+                    "required": True,
+                    "calibration_split": "train",
+                    "target_leakage_on_eval": False,
+                    "lower_body_groups": (
+                        "left_hip",
+                        "right_hip",
+                        "left_knee",
+                        "right_knee",
+                        "left_ankle",
+                        "right_ankle",
+                    ),
+                    "allow_waist": False,
+                    "allow_shoulder_elbow": False,
+                    "single_axis_delta_rad": 0.174533,
+                    "calibration_max_rows": 16,
+                    "calibration_max_frames": 160,
+                    "min_relative_improvement": 0.0,
+                },
+            },
+            validation={
+                "compare_to": "official_g1_csv",
+                "metric_focus": ("lower_body_fk", "dof_rmse", "contact_slide"),
+                "calibration_split": "train",
+                "eval_contract": "held_out_non_train_rows_only_for_acceptance",
+                "target_leakage_on_eval": False,
+                "allowed_stages": ("smoke1",),
+                "run_start_gates": {
+                    "frame_consistency_report": {
+                        "required": True,
+                        "expected_status": "passed",
+                        "path": str(DEFAULT_FRAME_CONSISTENCY_REPORT),
+                    }
+                },
+                "root_front_route_status": "stopped",
+                "do_not_run_mixed10_until_smoke_no_regression": True,
+                "do_not_run_walk100": True,
+            },
+            tags=("dof", "lower_body", "train_split", "fk_signature", "smoke_only"),
         ),
     ]
     return candidates
@@ -513,6 +575,7 @@ def build_campaign(
             "Do not use BONES-SONIC 50fps NPZ for the frame-exact main comparison.",
             "A candidate passes only if visual evidence and key metrics improve together.",
             "a_root_front_train_split_calibrated is stopped after the negative mixed10 gate and is disabled in new commands.",
+            "c_lower_body_fk_signature_dof_map_train_split_v1 is smoke1-only until no frame/count/unit or root regression is observed.",
         ],
     }
     manifest_path = output_dir / "campaign_manifest.json"
@@ -674,7 +737,11 @@ def build_command_rows(
     for candidate in candidates:
         if not candidate.enabled:
             continue
+        allowed_stages = candidate.validation.get("allowed_stages")
+        allowed_stage_names = {str(stage_name) for stage_name in allowed_stages or ()}
         for stage in stages:
+            if allowed_stage_names and stage.name not in allowed_stage_names:
+                continue
             run_dir = output_dir / "runs" / stage.name / candidate.candidate_id
             runner_path = runner_script
             if not runner_path.is_absolute():
@@ -832,6 +899,7 @@ def build_provenance(
             "g1_tar": str(g1_tar),
             "soma_bvh_tar": str(soma_bvh_tar),
             "baseline_output_roots": [str(path) for path in DEFAULT_BASELINE_OUTPUT_ROOTS],
+            "frame_consistency_report_json": str(DEFAULT_FRAME_CONSISTENCY_REPORT),
         },
     }
 

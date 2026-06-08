@@ -130,6 +130,89 @@ class Lr272BonesSomaCandidateRunnerTests(unittest.TestCase):
             self.assertAlmostEqual(float(rows[-1]["root_translateX"]), 6.0, places=5)
 
     @unittest.skipUnless(importlib.util.find_spec("numpy"), "numpy is required for candidate runner smoke")
+    def test_lower_body_fk_signature_dof_map_uses_train_split_and_gate(self):
+        import numpy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model_xml = root / "g1.xml"
+            model_xml.write_text(_minimal_lower_body_mjcf(), encoding="utf-8")
+            proof = root / "frame_consistency_report.json"
+            _write_passing_frame_consistency_report(proof)
+            g1_tar = root / "g1.tar"
+            train_member = "g1/csv/train.csv"
+            val_member = "g1/csv/val.csv"
+            train_signal = numpy.asarray([0.0, 0.10, 0.20, 0.30], dtype=numpy.float64)
+            val_signal = numpy.asarray([0.0, 0.11, 0.22, 0.33], dtype=numpy.float64)
+            _write_g1_tar_joint_members(
+                g1_tar,
+                {
+                    train_member: {"left_hip_pitch_joint_dof": train_signal / self.runner.ANGLE_SCALE},
+                    val_member: {"left_hip_pitch_joint_dof": val_signal / self.runner.ANGLE_SCALE},
+                },
+                self.runner.G1_CSV_COLUMNS,
+            )
+            train_soma = root / "train.npy"
+            val_soma = root / "val.npy"
+            train_qpos = _qpos_with_x_step(numpy, 0.0)
+            val_qpos = _qpos_with_x_step(numpy, 0.0)
+            roll_idx = self.runner.joint_index("left_hip_roll_joint")
+            assert roll_idx is not None
+            train_qpos[:, 7 + roll_idx] = train_signal
+            val_qpos[:, 7 + roll_idx] = val_signal
+            numpy.save(train_soma, train_qpos)
+            numpy.save(val_soma, val_qpos)
+            pairing_csv = root / "pairing.csv"
+            _write_pairing_csv(pairing_csv, g1_tar, train_member, train_soma, val_member, val_soma)
+            stage_csv = root / "stage.csv"
+            _write_stage_csv(stage_csv, g1_tar, val_member, val_soma, split="val", key="val_clip")
+            config = root / "candidate.json"
+            _write_lower_body_dof_map_config(config, g1_tar, pairing_csv, proof)
+            output_dir = root / "out"
+
+            rc = self.runner.main(
+                [
+                    "--config",
+                    str(config),
+                    "--stage-csv",
+                    str(stage_csv),
+                    "--output-dir",
+                    str(output_dir),
+                    "--mode",
+                    "retarget",
+                    "--model-xml",
+                    str(model_xml),
+                ]
+            )
+
+            self.assertEqual(rc, 0)
+            gate = json.loads((output_dir / "run_start_gates.json").read_text(encoding="utf-8"))
+            self.assertEqual(gate["status"], "passed")
+            calibration = json.loads(
+                (output_dir / "calibration" / "lower_body_fk_signature_dof_map_train_split_v1.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(calibration["status"], "ok")
+            self.assertFalse(calibration["target_leakage_on_eval"])
+            self.assertEqual(calibration["train_keys_used"], ["train_clip"])
+            self.assertEqual(calibration["eval_keys_excluded"], ["val_clip"])
+            self.assertFalse(calibration["scope"]["allow_shoulder_elbow"])
+            selected = calibration["source_to_target_dof_map"]["left_hip_pitch_joint"]
+            self.assertEqual(selected["source_joint"], "left_hip_roll_joint")
+            self.assertEqual(selected["sign"], 1.0)
+
+            csv_path = output_dir / "retarget_csv" / "val_clip.csv"
+            with csv_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertAlmostEqual(
+                float(rows[-1]["left_hip_pitch_joint_dof"]),
+                float(val_signal[-1] / self.runner.ANGLE_SCALE),
+                places=5,
+            )
+            self.assertAlmostEqual(float(rows[-1]["right_shoulder_pitch_joint_dof"]), 0.0, places=5)
+
+    @unittest.skipUnless(importlib.util.find_spec("numpy"), "numpy is required for candidate runner smoke")
     def test_fk_rootrel_identity_and_known_rigid_root_transform_invariants(self):
         import numpy
 
@@ -174,6 +257,16 @@ def _write_g1_tar_members(path: Path, members: dict[str, float], fieldnames: lis
                 tar.add(csv_path, arcname=member)
 
 
+def _write_g1_tar_joint_members(path: Path, members: dict[str, dict[str, object]], fieldnames: list[str]) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_root = Path(tmp)
+        with tarfile.open(path, "w") as tar:
+            for index, (member, joint_values) in enumerate(members.items()):
+                csv_path = tmp_root / f"{index}.csv"
+                _write_g1_csv_with_joints(csv_path, fieldnames, joint_values)
+                tar.add(csv_path, arcname=member)
+
+
 def _write_g1_csv(path: Path, fieldnames: list[str], *, root_x_step_cm: float) -> None:
     csv_path = path.with_suffix(".csv")
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
@@ -183,6 +276,18 @@ def _write_g1_csv(path: Path, fieldnames: list[str], *, root_x_step_cm: float) -
             row = {name: 0.0 for name in fieldnames}
             row["Frame"] = frame
             row["root_translateX"] = float(frame) * root_x_step_cm
+            writer.writerow(row)
+
+
+def _write_g1_csv_with_joints(path: Path, fieldnames: list[str], joint_values: dict[str, object]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for frame in range(4):
+            row = {name: 0.0 for name in fieldnames}
+            row["Frame"] = frame
+            for joint, values in joint_values.items():
+                row[joint] = float(values[frame])  # type: ignore[index]
             writer.writerow(row)
 
 
@@ -279,6 +384,104 @@ def _write_train_split_config(path: Path, g1_tar: Path, pairing_csv: Path) -> No
         "provenance": {"inputs": {"g1_tar": str(g1_tar), "pairing_csv": str(pairing_csv)}},
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _write_lower_body_dof_map_config(path: Path, g1_tar: Path, pairing_csv: Path, proof: Path) -> None:
+    payload = {
+        "candidate": {
+            "candidate_id": "c_lower_body_fk_signature_dof_map_train_split_v1",
+            "route": "C_dof_convention",
+            "root_world": {"xy_scale_mode": "identity", "yaw_alignment": "none"},
+            "summarizer": {"raw_action_contract": "current_soma_retarget_action"},
+            "dof_convention": {
+                "sign_overrides": {},
+                "axis_swaps": {},
+                "train_split_fk_signature_map": {
+                    "enabled": True,
+                    "version": "v1",
+                    "calibration_split": "train",
+                    "lower_body_groups": ("left_hip",),
+                    "allow_shoulder_elbow": False,
+                    "single_axis_delta_rad": 0.174533,
+                    "calibration_max_rows": 1,
+                    "calibration_max_frames": 4,
+                },
+            },
+            "validation": {
+                "run_start_gates": {
+                    "frame_consistency_report": {
+                        "required": True,
+                        "expected_status": "passed",
+                        "path": str(proof),
+                    }
+                },
+                "target_leakage_on_eval": False,
+            },
+        },
+        "provenance": {
+            "inputs": {
+                "g1_tar": str(g1_tar),
+                "pairing_csv": str(pairing_csv),
+                "frame_consistency_report_json": str(proof),
+            }
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _write_passing_frame_consistency_report(path: Path) -> None:
+    payload = {
+        "status": "passed",
+        "output_dir": str(path.parent),
+        "pass_checks": {
+            "identity_world_max_le_tol": True,
+            "identity_rootrel_max_le_tol": True,
+            "identity_dof_max_le_tol": True,
+            "rigid_rootrel_max_le_tol": True,
+            "rigid_dof_max_le_tol": True,
+            "rigid_world_changed": True,
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _minimal_lower_body_mjcf() -> str:
+    return """<mujoco model="minimal_lower_body">
+  <worldbody>
+    <body name="pelvis" pos="0 0 0">
+      <joint name="floating_base" type="free"/>
+      <geom pos="0 0 0"/>
+      <body name="left_hip_pitch_link" pos="0 0 0">
+        <joint name="left_hip_pitch_joint" axis="0 1 0" range="-2 2"/>
+        <geom pos="0 0 -0.05"/>
+        <body name="left_hip_roll_link" pos="0 0 -0.10">
+          <joint name="left_hip_roll_joint" axis="1 0 0" range="-2 2"/>
+          <geom pos="0 0 -0.05"/>
+          <body name="left_hip_yaw_link" pos="0 0 -0.10">
+            <joint name="left_hip_yaw_joint" axis="0 0 1" range="-2 2"/>
+            <geom pos="0 0 -0.05"/>
+            <body name="left_knee_link" pos="0 0 -0.20">
+              <joint name="left_knee_joint" axis="0 1 0" range="-2 2"/>
+              <geom pos="0 0 -0.05"/>
+              <body name="left_ankle_pitch_link" pos="0 0 -0.20">
+                <joint name="left_ankle_pitch_joint" axis="0 1 0" range="-2 2"/>
+                <geom pos="0 0 -0.03"/>
+                <body name="left_ankle_roll_link" pos="0 0 -0.08">
+                  <joint name="left_ankle_roll_joint" axis="1 0 0" range="-2 2"/>
+                  <geom pos="0 0 -0.03"/>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="right_ankle_roll_link" pos="0 -0.1 -0.7">
+        <geom pos="0 0 0"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>
+"""
 
 
 if __name__ == "__main__":

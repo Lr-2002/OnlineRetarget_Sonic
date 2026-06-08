@@ -39,6 +39,16 @@ class Lr272BonesSomaAblationHarnessTests(unittest.TestCase):
         self.assertEqual(stopped.validation["status"], "stopped_negative_mixed10")
         self.assertTrue(any(candidate.candidate_id == "b_per_clip_skeleton_preroll_ramp" for candidate in candidates))
         self.assertTrue(any(candidate.candidate_id == "c_hip_pitch_sign_flip_probe" for candidate in candidates))
+        lower_body = next(
+            candidate
+            for candidate in candidates
+            if candidate.candidate_id == "c_lower_body_fk_signature_dof_map_train_split_v1"
+        )
+        self.assertTrue(lower_body.enabled)
+        self.assertEqual(lower_body.root_world["xy_scale_mode"], "identity")
+        self.assertEqual(lower_body.summarizer["raw_action_contract"], "current_soma_retarget_action")
+        self.assertEqual(lower_body.validation["allowed_stages"], ("smoke1",))
+        self.assertFalse(lower_body.dof_convention["train_split_fk_signature_map"]["allow_shoulder_elbow"])
 
     def test_stage_selection_prioritizes_worst_key_and_caps_rows(self):
         worst = "230413__dance_hiphop_camel_walk_360_R_fast_002__A317"
@@ -116,10 +126,18 @@ class Lr272BonesSomaAblationHarnessTests(unittest.TestCase):
                 json.loads(line)
                 for line in (output_dir / "commands.jsonl").read_text(encoding="utf-8").splitlines()
             ]
-            enabled_count = sum(1 for candidate in self.script.build_candidates() if candidate.enabled)
-            self.assertEqual(len(commands), enabled_count * len(self.script.STAGES))
+            expected_commands = sum(
+                len(candidate.validation.get("allowed_stages") or self.script.STAGES)
+                for candidate in self.script.build_candidates()
+                if candidate.enabled
+            )
+            self.assertEqual(len(commands), expected_commands)
             self.assertIn("--candidate a_root_xy_scale_global_1p10", "\n".join(row["retarget_command"] for row in commands))
             self.assertNotIn("a_root_front_train_split_calibrated", "\n".join(row["retarget_command"] for row in commands))
+            lower_body_rows = [
+                row for row in commands if row["candidate_id"] == "c_lower_body_fk_signature_dof_map_train_split_v1"
+            ]
+            self.assertEqual([row["stage"] for row in lower_body_rows], ["smoke1"])
             self.assertTrue(all(row["baseline_commit"] == "b3ef2708" for row in commands))
 
     def test_build_campaign_generates_executable_default_runner_commands(self):

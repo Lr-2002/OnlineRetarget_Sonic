@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 from dataclasses import dataclass
+import itertools
 import json
 import math
 from pathlib import Path
@@ -112,6 +113,53 @@ ACCEPTANCE_THRESHOLDS = {
     "contact_slide_delta_mps": 0.50,
 }
 
+LOWER_BODY_FK_SIGNATURE_GROUPS = {
+    "left_hip": {
+        "joints": ("left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint"),
+        "bodies": (
+            "left_hip_pitch_link",
+            "left_hip_roll_link",
+            "left_hip_yaw_link",
+            "left_knee_link",
+            "left_ankle_pitch_link",
+            "left_ankle_roll_link",
+            "left_toe_link",
+        ),
+    },
+    "right_hip": {
+        "joints": ("right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint"),
+        "bodies": (
+            "right_hip_pitch_link",
+            "right_hip_roll_link",
+            "right_hip_yaw_link",
+            "right_knee_link",
+            "right_ankle_pitch_link",
+            "right_ankle_roll_link",
+            "right_toe_link",
+        ),
+    },
+    "left_knee": {
+        "joints": ("left_knee_joint",),
+        "bodies": ("left_knee_link", "left_ankle_pitch_link", "left_ankle_roll_link", "left_toe_link"),
+    },
+    "right_knee": {
+        "joints": ("right_knee_joint",),
+        "bodies": ("right_knee_link", "right_ankle_pitch_link", "right_ankle_roll_link", "right_toe_link"),
+    },
+    "left_ankle": {
+        "joints": ("left_ankle_pitch_joint", "left_ankle_roll_joint"),
+        "bodies": ("left_ankle_pitch_link", "left_ankle_roll_link", "left_toe_link"),
+    },
+    "right_ankle": {
+        "joints": ("right_ankle_pitch_joint", "right_ankle_roll_joint"),
+        "bodies": ("right_ankle_pitch_link", "right_ankle_roll_link", "right_toe_link"),
+    },
+    "waist": {
+        "joints": ("waist_yaw_joint", "waist_roll_joint"),
+        "bodies": ("waist_yaw_link", "waist_roll_link", "torso_link"),
+    },
+}
+
 
 @dataclass
 class Motion:
@@ -155,6 +203,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not rows:
         raise SystemExit(f"stage CSV has no rows: {args.stage_csv}")
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    run_start_gates = verify_run_start_gates(config, args.output_dir)
     manifest: dict[str, Any] = {
         "config": str(args.config),
         "stage_csv": str(args.stage_csv),
@@ -163,9 +212,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "candidate_id": config["candidate"]["candidate_id"],
         "route": config["candidate"]["route"],
         "row_count": len(rows),
+        "run_start_gates": run_start_gates,
     }
     if args.mode in ("retarget", "all"):
-        manifest["retarget"] = run_retarget(config, rows, args.output_dir, max_frames=args.max_frames)
+        manifest["retarget"] = run_retarget(config, rows, args.output_dir, max_frames=args.max_frames, model_xml=args.model_xml)
     if args.mode in ("metric", "all"):
         manifest["metric"] = run_metric(config, rows, args.output_dir, max_frames=args.max_frames, model_xml=args.model_xml)
     if args.mode in ("visual", "all"):
@@ -177,10 +227,63 @@ def main(argv: Sequence[str] | None = None) -> int:
             robot_usd=args.robot_usd,
             render_isaac=args.render_isaac,
             render_timeout_sec=args.render_timeout_sec,
+            model_xml=args.model_xml,
         )
     write_json(args.output_dir / "runner_manifest.json", manifest)
     print(json.dumps(manifest, indent=2, sort_keys=True))
     return 0
+
+
+def verify_run_start_gates(config: Mapping[str, Any], output_dir: Path) -> dict[str, Any]:
+    candidate = config.get("candidate", {})
+    validation = candidate.get("validation", {})
+    gate = validation.get("run_start_gates", {}).get("frame_consistency_report", {})
+    if not gate:
+        gate = (
+            candidate.get("dof_convention", {})
+            .get("train_split_fk_signature_map", {})
+            .get("frame_consistency_report", {})
+        )
+    if not gate or not bool(gate.get("required", False)):
+        return {"status": "not_required"}
+
+    proof_path = str(gate.get("path") or config.get("provenance", {}).get("inputs", {}).get("frame_consistency_report_json", ""))
+    report_path = Path(proof_path) if proof_path else Path()
+    if proof_path and not report_path.is_absolute():
+        report_path = REPO_ROOT / report_path
+    result: dict[str, Any] = {
+        "status": "blocked",
+        "frame_consistency_report": str(report_path) if proof_path else "",
+        "required": True,
+        "expected_status": str(gate.get("expected_status", "passed")),
+    }
+    if not proof_path:
+        result["reason"] = "frame_consistency_report_path_missing"
+    elif not report_path.exists():
+        result["reason"] = "frame_consistency_report_missing"
+    else:
+        try:
+            proof = read_json(report_path)
+        except Exception as exc:  # noqa: BLE001
+            result["reason"] = "frame_consistency_report_unreadable"
+            result["error"] = repr(exc)
+        else:
+            pass_checks = proof.get("pass_checks", {})
+            result.update(
+                {
+                    "observed_status": proof.get("status", ""),
+                    "pass_checks": pass_checks,
+                    "proof_output_dir": proof.get("output_dir", ""),
+                }
+            )
+            expected_status = result["expected_status"]
+            if proof.get("status") == expected_status and all(bool(value) for value in pass_checks.values()):
+                result["status"] = "passed"
+                result["reason"] = ""
+    write_json(output_dir / "run_start_gates.json", result)
+    if result.get("status") != "passed":
+        raise SystemExit(f"run_start_gate_failed:{result.get('reason', 'unknown')}")
+    return result
 
 
 def run_retarget(
@@ -189,11 +292,12 @@ def run_retarget(
     output_dir: Path,
     *,
     max_frames: int,
+    model_xml: Path | None = None,
 ) -> list[dict[str, Any]]:
     candidate = config["candidate"]
     out_dir = output_dir / "retarget_csv"
     out_dir.mkdir(parents=True, exist_ok=True)
-    calibration = resolve_candidate_calibration(config, rows, output_dir, max_frames=max_frames)
+    calibration = resolve_candidate_calibration(config, rows, output_dir, max_frames=max_frames, model_xml=model_xml)
     results = []
     for row in rows:
         key = row_key(row)
@@ -243,7 +347,7 @@ def run_metric(
         key = row_key(row)
         csv_path = candidate_csv_path(output_dir, key)
         if not csv_path.exists():
-            run_retarget(config, [row], output_dir, max_frames=max_frames)
+            run_retarget(config, [row], output_dir, max_frames=max_frames, model_xml=model_xml)
         official = load_official_motion(row, config)
         candidate_motion = load_candidate_csv(csv_path, float(row.get("source_bvh_fps") or official.fps))
         n = min(official.frame_count, candidate_motion.frame_count)
@@ -292,6 +396,7 @@ def run_visual(
     robot_usd: Path | None = None,
     render_isaac: bool = False,
     render_timeout_sec: int = 900,
+    model_xml: Path | None = None,
 ) -> dict[str, Any]:
     visual_dir = output_dir / "visuals"
     visual_dir.mkdir(parents=True, exist_ok=True)
@@ -304,7 +409,7 @@ def run_visual(
         key = row_key(row)
         csv_path = candidate_csv_path(output_dir, key)
         if not csv_path.exists():
-            run_retarget(config, [row], output_dir, max_frames=max_frames)
+            run_retarget(config, [row], output_dir, max_frames=max_frames, model_xml=model_xml)
         official = load_official_motion(row, config)
         candidate_motion = load_candidate_csv(csv_path, float(row.get("source_bvh_fps") or official.fps))
         n = min(official.frame_count, candidate_motion.frame_count)
@@ -515,6 +620,12 @@ def apply_candidate(
         diagnostics["target_leakage_on_eval"] = False
 
     dof_cfg = candidate.get("dof_convention", {})
+    if dof_cfg.get("train_split_fk_signature_map", {}).get("enabled", False):
+        applied = apply_source_to_target_dof_map(out, (calibration or {}).get("source_to_target_dof_map", {}))
+        diagnostics["lower_body_fk_signature_dof_map"] = calibration or {"status": "missing"}
+        diagnostics["lower_body_fk_signature_dof_map_applied"] = applied
+        diagnostics["target_leakage_on_eval"] = False
+
     signs = dof_cfg.get("sign_overrides") or {}
     for joint, sign in signs.items():
         idx = joint_index(joint)
@@ -560,13 +671,32 @@ def resolve_candidate_calibration(
     output_dir: Path,
     *,
     max_frames: int,
+    model_xml: Path | None = None,
 ) -> dict[str, Any] | None:
     candidate = config["candidate"]
     root_world = candidate.get("root_world", {})
+    dof_cfg = candidate.get("dof_convention", {})
     needs_calibration = (
         root_world.get("xy_scale_mode") == "train_split_calibrated"
         or root_world.get("yaw_alignment") == "train_split_calibrated"
     )
+    needs_dof_calibration = bool(dof_cfg.get("train_split_fk_signature_map", {}).get("enabled", False))
+    if needs_dof_calibration:
+        calibration = learn_train_split_lower_body_dof_map(
+            config,
+            candidate,
+            eval_rows,
+            max_frames=max_frames,
+            model_xml=model_xml,
+        )
+        path = output_dir / "calibration" / "lower_body_fk_signature_dof_map_train_split_v1.json"
+        calibration["calibration_json"] = str(path)
+        write_json(path, calibration)
+        if calibration.get("status") != "ok" and bool(
+            dof_cfg.get("train_split_fk_signature_map", {}).get("required", True)
+        ):
+            raise SystemExit(f"lower_body_dof_calibration_failed:{calibration.get('reason', 'unknown')}")
+        return calibration
     if not needs_calibration:
         return None
     calibration = learn_train_split_root_front_calibration(config, candidate, eval_rows, max_frames=max_frames)
@@ -712,6 +842,319 @@ def apply_train_split_root_front_calibration(motion: Motion, calibration: Mappin
     motion.root_pos[:, :2] = motion.root_pos[:1, :2] + rotate_xy_array(rel, yaw_delta) * scale
     motion.root_euler[:, 2] += yaw_delta
     return True
+
+
+def learn_train_split_lower_body_dof_map(
+    config: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    eval_rows: Sequence[Mapping[str, str]],
+    *,
+    max_frames: int,
+    model_xml: Path | None,
+) -> dict[str, Any]:
+    dof_cfg = candidate.get("dof_convention", {}).get("train_split_fk_signature_map", {})
+    evaluator = load_full_evaluator(model_xml)
+    if evaluator.get("status") != "ok":
+        return lower_body_dof_map_blocker(
+            "full_evaluator_unavailable",
+            evaluator=public_evaluator_report(evaluator),
+        )
+    pairing_csv = Path(config.get("provenance", {}).get("inputs", {}).get("pairing_csv", ""))
+    eval_keys = {row_key(row) for row in eval_rows}
+    if not pairing_csv.exists():
+        return lower_body_dof_map_blocker(
+            "pairing_csv_missing",
+            pairing_csv=str(pairing_csv),
+            eval_keys=sorted(eval_keys),
+        )
+    try:
+        all_rows = read_stage_csv(pairing_csv)
+    except Exception as exc:  # noqa: BLE001
+        return lower_body_dof_map_blocker(
+            "pairing_csv_unreadable",
+            pairing_csv=str(pairing_csv),
+            error=repr(exc),
+            eval_keys=sorted(eval_keys),
+        )
+
+    split_columns = split_columns_present(all_rows)
+    train_rows = [
+        row
+        for row in all_rows
+        if split_value(row).lower() == str(dof_cfg.get("calibration_split", "train")).lower()
+        and row_key(row) not in eval_keys
+    ]
+    max_rows = int(dof_cfg.get("calibration_max_rows", 16) or 16)
+    calibration_max_frames = int(dof_cfg.get("calibration_max_frames", 160) or 160)
+    if max_frames > 0:
+        calibration_max_frames = min(calibration_max_frames, max_frames)
+    examples: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    for row in train_rows:
+        if len(examples) >= max_rows:
+            break
+        key = row_key(row)
+        try:
+            official = load_official_motion(row, config)
+            base = load_base_soma_motion(row, official.frame_count, official.fps)
+        except Exception as exc:  # noqa: BLE001
+            skipped.append({"key": key, "reason": repr(exc)})
+            continue
+        n = min(official.frame_count, base.frame_count, calibration_max_frames)
+        if n < 3:
+            skipped.append({"key": key, "reason": "too_few_frames"})
+            continue
+        official = official.slice(n)
+        examples.append(
+            {
+                "key": key,
+                "base": base.slice(n),
+                "official": official,
+                "official_fk": fk_frames_for_motion(official, evaluator["model"]),
+            }
+        )
+
+    if not examples:
+        return lower_body_dof_map_blocker(
+            "no_usable_train_split_rows",
+            pairing_csv=str(pairing_csv),
+            split_columns=split_columns,
+            train_row_count=len(train_rows),
+            eval_keys=sorted(eval_keys),
+            skipped_rows=skipped[:20],
+        )
+
+    groups = selected_fk_signature_groups(dof_cfg)
+    min_relative_improvement = float(dof_cfg.get("min_relative_improvement", 0.0) or 0.0)
+    selected_map: dict[str, dict[str, Any]] = {}
+    group_reports: list[dict[str, Any]] = []
+    for group_name in groups:
+        group = LOWER_BODY_FK_SIGNATURE_GROUPS[group_name]
+        target_joints = tuple(group["joints"])
+        bodies = tuple(group["bodies"])
+        identity_map = {
+            joint: {"source_joint": joint, "sign": 1.0, "group": group_name}
+            for joint in target_joints
+        }
+        baseline_map = {**selected_map, **identity_map}
+        baseline_score = score_dof_mapping_on_train_examples(examples, evaluator["model"], baseline_map, bodies)
+        best_score = baseline_score
+        best_map = identity_map
+        best_reason = "identity_best_or_no_improvement"
+        for trial_map in candidate_group_dof_maps(group_name, target_joints):
+            score = score_dof_mapping_on_train_examples(examples, evaluator["model"], {**selected_map, **trial_map}, bodies)
+            if score < best_score:
+                best_score = score
+                best_map = trial_map
+                best_reason = "train_root_aligned_fk_score"
+        required_score = baseline_score * (1.0 - min_relative_improvement)
+        if best_score > required_score:
+            best_score = baseline_score
+            best_map = identity_map
+            best_reason = "identity_retained_below_min_relative_improvement"
+        selected_map.update(best_map)
+        group_reports.append(
+            {
+                "group": group_name,
+                "target_joints": list(target_joints),
+                "bodies": list(bodies),
+                "candidate_count": len(candidate_group_dof_maps(group_name, target_joints)),
+                "baseline_rootrel_fk_mean_m": baseline_score,
+                "selected_rootrel_fk_mean_m": best_score,
+                "selected_reason": best_reason,
+                "selected_map": best_map,
+            }
+        )
+
+    signatures = single_axis_signature_report(
+        evaluator["model"],
+        groups,
+        float(dof_cfg.get("single_axis_delta_rad", 0.174533) or 0.174533),
+    )
+    return {
+        "status": "ok",
+        "calibration_type": "lower_body_fk_signature_dof_map_train_split_v1",
+        "target_leakage_on_eval": False,
+        "pairing_csv": str(pairing_csv),
+        "split_columns": split_columns,
+        "calibration_split": str(dof_cfg.get("calibration_split", "train")),
+        "eval_keys_excluded": sorted(eval_keys),
+        "train_rows_available": len(train_rows),
+        "train_rows_used": len(examples),
+        "train_keys_used": [str(example["key"]) for example in examples],
+        "skipped_rows": skipped[:20],
+        "max_train_rows": max_rows,
+        "max_train_frames_per_row": calibration_max_frames,
+        "model_xml": str(evaluator["model_xml"]),
+        "groups": group_reports,
+        "single_axis_signatures": signatures,
+        "source_to_target_dof_map": selected_map,
+        "root_world_policy": candidate.get("root_world", {}),
+        "summarizer_policy": candidate.get("summarizer", {}),
+        "scope": {
+            "lower_body_only": True,
+            "allow_waist": bool(dof_cfg.get("allow_waist", False)),
+            "allow_shoulder_elbow": False,
+            "no_per_clip_eval_target_fitting": True,
+        },
+    }
+
+
+def lower_body_dof_map_blocker(reason: str, **details: Any) -> dict[str, Any]:
+    return {
+        "status": "blocked",
+        "calibration_type": "lower_body_fk_signature_dof_map_train_split_v1",
+        "target_leakage_on_eval": False,
+        "reason": reason,
+        "source_to_target_dof_map": {},
+        **details,
+    }
+
+
+def selected_fk_signature_groups(dof_cfg: Mapping[str, Any]) -> list[str]:
+    requested = [str(item) for item in dof_cfg.get("lower_body_groups", ()) if str(item)]
+    groups = [name for name in requested if name in LOWER_BODY_FK_SIGNATURE_GROUPS]
+    if bool(dof_cfg.get("allow_waist", False)) and "waist" not in groups:
+        groups.append("waist")
+    return groups or [
+        "left_hip",
+        "right_hip",
+        "left_knee",
+        "right_knee",
+        "left_ankle",
+        "right_ankle",
+    ]
+
+
+def candidate_group_dof_maps(group_name: str, target_joints: Sequence[str]) -> list[dict[str, dict[str, Any]]]:
+    maps: list[dict[str, dict[str, Any]]] = []
+    for source_order in itertools.permutations(target_joints, len(target_joints)):
+        for signs in itertools.product((-1.0, 1.0), repeat=len(target_joints)):
+            maps.append(
+                {
+                    target_joint: {
+                        "source_joint": source_joint,
+                        "sign": float(sign),
+                        "group": group_name,
+                    }
+                    for target_joint, source_joint, sign in zip(target_joints, source_order, signs)
+                }
+            )
+    return maps
+
+
+def score_dof_mapping_on_train_examples(
+    examples: Sequence[Mapping[str, Any]],
+    model: Any,
+    source_to_target_map: Mapping[str, Mapping[str, Any]],
+    body_names: Sequence[str],
+) -> float:
+    errors: list[float] = []
+    for example in examples:
+        base: Motion = example["base"]
+        official: Motion = example["official"]
+        pred = Motion(
+            fps=base.fps,
+            root_pos=base.root_pos.copy(),
+            root_euler=base.root_euler.copy(),
+            dof=base.dof.copy(),
+        )
+        apply_source_to_target_dof_map(pred, source_to_target_map)
+        pred_fk = fk_frames_for_motion(pred, model)
+        ref_fk = example["official_fk"]
+        errors.extend(rootrel_fk_body_errors(pred, official, pred_fk, ref_fk, body_names))
+    return finite_stat_mean(errors)
+
+
+def apply_source_to_target_dof_map(
+    motion: Motion,
+    source_to_target_map: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    original = motion.dof.copy()
+    applied: list[dict[str, Any]] = []
+    for target_joint, spec in sorted(source_to_target_map.items()):
+        target_idx = joint_index(target_joint)
+        source_joint = str(spec.get("source_joint", target_joint))
+        source_idx = joint_index(source_joint)
+        if target_idx is None or source_idx is None:
+            continue
+        sign = float(spec.get("sign", 1.0))
+        motion.dof[:, target_idx] = original[:, source_idx] * sign
+        applied.append(
+            {
+                "target_joint": target_joint,
+                "source_joint": source_joint,
+                "sign": sign,
+                "group": spec.get("group", ""),
+            }
+        )
+    return applied
+
+
+def fk_frames_for_motion(motion: Motion, model: Any) -> list[Mapping[str, Sequence[tuple[float, float, float]]]]:
+    return [
+        g1_fk_body_positions(model, joints, root, root_euler)
+        for joints, root, root_euler, _ in motion_to_parsed_frames(motion)
+    ]
+
+
+def rootrel_fk_body_errors(
+    pred: Motion,
+    ref: Motion,
+    pred_fk: Sequence[Mapping[str, Sequence[tuple[float, float, float]]]],
+    ref_fk: Sequence[Mapping[str, Sequence[tuple[float, float, float]]]],
+    body_names: Sequence[str],
+) -> list[float]:
+    errors: list[float] = []
+    wanted = tuple(body_names)
+    for frame_idx, (pred_frame, ref_frame) in enumerate(zip(pred_fk, ref_fk)):
+        for body in wanted:
+            pred_point = body_representative(pred_frame.get(body, ()))
+            ref_point = body_representative(ref_frame.get(body, ()))
+            if pred_point is None or ref_point is None:
+                continue
+            pred_root_point = root_aligned_point(pred_point, pred.root_pos[frame_idx], pred.root_euler[frame_idx])
+            ref_root_point = root_aligned_point(ref_point, ref.root_pos[frame_idx], ref.root_euler[frame_idx])
+            errors.append(float(np.linalg.norm(pred_root_point - ref_root_point)))
+    return errors
+
+
+def single_axis_signature_report(model: Any, groups: Sequence[str], delta_rad: float) -> dict[str, Any]:
+    report: dict[str, Any] = {}
+    neutral = Motion(
+        fps=120.0,
+        root_pos=np.zeros((1, 3), dtype=np.float64),
+        root_euler=np.zeros((1, 3), dtype=np.float64),
+        dof=np.zeros((1, len(G1_JOINT_COLUMNS)), dtype=np.float64),
+    )
+    base_fk = fk_frames_for_motion(neutral, model)
+    for group_name in groups:
+        group = LOWER_BODY_FK_SIGNATURE_GROUPS[group_name]
+        entries: dict[str, Any] = {}
+        for joint in group["joints"]:
+            idx = joint_index(joint)
+            if idx is None:
+                continue
+            perturbed = neutral.slice(1)
+            perturbed.dof[:, idx] = delta_rad
+            plus_fk = fk_frames_for_motion(perturbed, model)
+            displacements: list[float] = []
+            for body in group["bodies"]:
+                base_point = body_representative(base_fk[0].get(body, ()))
+                plus_point = body_representative(plus_fk[0].get(body, ()))
+                if base_point is None or plus_point is None:
+                    continue
+                base_root = root_aligned_point(base_point, neutral.root_pos[0], neutral.root_euler[0])
+                plus_root = root_aligned_point(plus_point, perturbed.root_pos[0], perturbed.root_euler[0])
+                displacements.append(float(np.linalg.norm(plus_root - base_root)))
+            entries[joint] = {
+                "delta_rad": delta_rad,
+                "body_count": len(displacements),
+                "mean_rootrel_displacement_m": finite_stat_mean(displacements),
+                "max_rootrel_displacement_m": finite_stat_max(displacements),
+            }
+        report[group_name] = entries
+    return report
 
 
 def full_evaluator_metrics(pred: Motion, ref: Motion, evaluator: Mapping[str, Any]) -> dict[str, Any]:
