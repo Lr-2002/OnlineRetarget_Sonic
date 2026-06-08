@@ -199,6 +199,7 @@ EVAL_METRIC_CONTRACT: dict[str, Any] = {
         "training_objective_changed": False,
     },
 }
+TEMPORAL_CONSISTENCY_LOSS_WEIGHT_DEFAULT = 0.01
 
 
 def utc_now() -> str:
@@ -2821,6 +2822,39 @@ def normalize_batch(
     )
 
 
+def temporal_consistency_loss_weight(config: Mapping[str, Any]) -> float:
+    training = config.get("training")
+    if not isinstance(training, Mapping) or not training.get("temporal_consistency_loss_enabled", False):
+        return 0.0
+    return float(
+        training.get(
+            "temporal_consistency_loss_weight",
+            TEMPORAL_CONSISTENCY_LOSS_WEIGHT_DEFAULT,
+        )
+    )
+
+
+def command_temporal_consistency_loss(
+    pred_command: torch.Tensor,
+    target_command: torch.Tensor,
+    *,
+    joint_dim: int,
+) -> torch.Tensor:
+    command_frame_dim = int(joint_dim) * 2
+    if command_frame_dim <= 0 or pred_command.shape[-1] % command_frame_dim != 0:
+        raise ValueError(
+            f"command_dim={pred_command.shape[-1]} is incompatible with joint_dim={joint_dim}"
+        )
+    window = pred_command.shape[-1] // command_frame_dim
+    if window < 2:
+        return pred_command.new_tensor(0.0)
+    pred_frames = pred_command.reshape(pred_command.shape[0], window, command_frame_dim)
+    target_frames = target_command.reshape(target_command.shape[0], window, command_frame_dim)
+    pred_delta = pred_frames[:, 1:, :] - pred_frames[:, :-1, :]
+    target_delta = target_frames[:, 1:, :] - target_frames[:, :-1, :]
+    return torch.mean((pred_delta - target_delta) ** 2)
+
+
 def loss_and_metrics(
     pred_norm: torch.Tensor,
     target_norm: torch.Tensor,
@@ -2833,6 +2867,7 @@ def loss_and_metrics(
     command_weight: float,
     root_pos_weight: float,
     root_rot_weight: float,
+    temporal_consistency_weight: float = 0.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     pred_command = pred_norm[:, :command_dim]
     target_command = target_norm[:, :command_dim]
@@ -2856,6 +2891,14 @@ def loss_and_metrics(
         root_pos_loss = pred_anchor.new_tensor(float("nan"))
         root_rot_loss = anchor_loss
         loss = command_weight * command_loss + root_rot_weight * anchor_loss
+    temporal_consistency_loss = pred_norm.new_tensor(0.0)
+    if temporal_consistency_weight > 0.0:
+        temporal_consistency_loss = command_temporal_consistency_loss(
+            pred_command,
+            target_command,
+            joint_dim=joint_dim,
+        )
+        loss = loss + temporal_consistency_weight * temporal_consistency_loss
 
     with torch.no_grad():
         pred_raw = pred_norm * stats["target_std"] + stats["target_mean"]
@@ -2880,6 +2923,8 @@ def loss_and_metrics(
             "anchor_mse_norm": float(anchor_loss.detach().item()),
             "root_pos_mse_norm": float(root_pos_loss.detach().item()),
             "root_rot_mse_norm": float(root_rot_loss.detach().item()),
+            "temporal_consistency_mse_norm": float(temporal_consistency_loss.detach().item()),
+            "temporal_consistency_loss_weight": float(temporal_consistency_weight),
             "joint_pos_rmse_raw": joint_pos_rmse,
             "g1_joint_pos_rmse_rad": joint_pos_rmse,
             "joint_vel_rmse_raw": float(torch.sqrt(torch.mean(joint_vel_error**2)).item()),
@@ -2916,6 +2961,7 @@ def validate(
             config["training"].get("anchor_loss_weight", 1.0),
         )
     )
+    temporal_consistency_weight = temporal_consistency_loss_weight(config)
     with torch.no_grad():
         for batch_idx, (motion, skeleton, target) in enumerate(loader):
             if batch_idx >= max_batches:
@@ -2937,6 +2983,7 @@ def validate(
                 command_weight,
                 root_pos_weight,
                 root_rot_weight,
+                temporal_consistency_weight,
             )
             rows.append(metrics)
     model.train()
@@ -4869,6 +4916,8 @@ def write_loss_header(path: Path) -> None:
                 "train_anchor_mse_norm",
                 "train_root_pos_mse_norm",
                 "train_root_rot_mse_norm",
+                "train_temporal_consistency_mse_norm",
+                "train_temporal_consistency_loss_weight",
                 "train_joint_pos_rmse_raw",
                 "train_g1_joint_pos_rmse_rad",
                 "train_joint_vel_rmse_raw",
@@ -4891,6 +4940,8 @@ def append_loss_row(path: Path, step: int, elapsed: float, metrics: dict[str, fl
                 f"{metrics['anchor_mse_norm']:.10f}",
                 f"{metrics.get('root_pos_mse_norm', float('nan')):.10f}",
                 f"{metrics.get('root_rot_mse_norm', float('nan')):.10f}",
+                f"{metrics.get('temporal_consistency_mse_norm', 0.0):.10f}",
+                f"{metrics.get('temporal_consistency_loss_weight', 0.0):.10f}",
                 f"{metrics['joint_pos_rmse_raw']:.10f}",
                 f"{metrics['g1_joint_pos_rmse_rad']:.10f}",
                 f"{metrics['joint_vel_rmse_raw']:.10f}",
@@ -5631,6 +5682,7 @@ def main() -> None:
                 config["training"].get("anchor_loss_weight", 1.0),
             )
         )
+        temporal_consistency_weight = temporal_consistency_loss_weight(config)
         precision = config["training"].get("precision", "bf16")
         use_amp = precision in {"bf16", "fp16"}
         amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
@@ -5695,6 +5747,7 @@ def main() -> None:
                         command_weight,
                         root_pos_weight,
                         root_rot_weight,
+                        temporal_consistency_weight,
                     )
                 loss.backward()
                 if grad_clip > 0:

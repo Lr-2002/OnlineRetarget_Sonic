@@ -16,6 +16,9 @@ SUPERVISED_CONFIGS = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_uniform_4gpu.json",
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_proportional_4gpu.json",
 )
+LOSS_OFF_BASELINE_CONFIG = (
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_proportional_loss_off_baseline_4gpu.json"
+)
 A0_FOUR_GPU_CONFIGS = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_uniform_4gpu.json",
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_proportional_4gpu.json",
@@ -70,7 +73,9 @@ class RemoteLauncherGuardrailTests(unittest.TestCase):
         text = self.launcher_text
         self.assertIn("ALLOW_HISTORICAL_A_B_4X1GPU", text)
         self.assertIn("A1/A2/B1/B2 4x1-GPU launching is historical", text)
-        self.assertIn("active kin-only SOMA encoder baselines must run as one 4-GPU job", text)
+        self.assertIn("LR-273 loss-on config", text)
+        self.assertIn("LR-274 loss-off baseline config", text)
+        self.assertIn("active kin-only SOMA encoder treatment/baseline configs must run as one 4-GPU job", text)
 
 
 class NativeRetargetFourGpuLauncherTests(unittest.TestCase):
@@ -127,31 +132,43 @@ class KinOnlySomaEncoderLauncherTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.launcher_text = KIN_ONLY_LAUNCHER.read_text(encoding="utf-8")
 
-    def test_wrapper_defaults_to_proportional_four_gpu_config(self) -> None:
+    def test_wrapper_defaults_to_proportional_loss_on_treatment_config(self) -> None:
         text = self.launcher_text
+        self.assertIn("LR-273 temporal-consistency loss-on treatment", text)
+        self.assertIn("LR-274 loss-off baseline", text)
         self.assertIn("configs/sonic_kin_soma_motionlib_proportional_4gpu.json", text)
+        self.assertIn("configs/sonic_kin_soma_motionlib_proportional_loss_off_baseline_4gpu.json", text)
         self.assertIn("remote_start_sonic_kin_soma_motionlib_4gpu.sh", text)
 
 
 class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
-    def test_configs_are_strict_supervised_four_gpu_baselines(self) -> None:
+    def test_configs_are_strict_supervised_four_gpu_loss_on_treatments(self) -> None:
         expected = {
-            "uniform": "sonic_kin_only_soma_encoder_uniform",
-            "proportional": "sonic_kin_only_soma_encoder_proportional",
+            "uniform": "sonic_kin_only_soma_encoder_uniform_temporal_consistency",
+            "proportional": "sonic_kin_only_soma_encoder_proportional_temporal_consistency",
         }
         for path in SUPERVISED_CONFIGS:
             with self.subTest(path=path.name):
                 config = json.loads(path.read_text(encoding="utf-8"))
                 topology = config["input_data"]["soma_topology"]
                 self.assertEqual(config["training_lane"], "soma_motionlib_kin_only")
+                self.assertIn("temporal-consistency loss-on treatment", config["purpose"])
+                self.assertIn("not the", config["purpose"])
                 self.assertEqual(config["variant"]["name"], expected[topology])
+                self.assertEqual(config["variant"]["family"], "soma_encoder_temporal_consistency_treatment")
                 self.assertEqual(config["variant"]["soma_topology"], topology)
                 self.assertEqual(config["runtime"]["required_gpu_count"], 4)
                 self.assertEqual(config["training"]["required_gpu_count"], 4)
                 self.assertEqual(config["target_decoder"]["primary"], "g1_kin")
                 self.assertEqual(config["decoder_targets"], ["g1_kin"])
-                self.assertEqual(config["losses"]["auxiliary"], [])
+                self.assertEqual(
+                    config["losses"]["auxiliary"],
+                    ["g1_kin_command_temporal_consistency_delta_mse"],
+                )
+                self.assertIs(config["training"]["temporal_consistency_loss_enabled"], True)
+                self.assertEqual(config["training"]["temporal_consistency_loss_weight"], 0.01)
                 self.assertIn(f"soma_{topology}_filtered_v1", config["input_data"]["soma_motion_dir"])
+                self.assertIn("temporal-consistency-loss-on", config["wandb"]["tags"])
                 text = path.read_text(encoding="utf-8")
                 self.assertNotIn("sonic_hydra", text)
                 self.assertNotIn("train_agent_trl.py", text)
@@ -159,6 +176,51 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                 self.assertNotIn("g1_dyn", text)
                 self.assertNotIn("g1_target_action", text)
                 self.assertNotIn("episode_length", text)
+
+    def test_loss_off_baseline_config_matches_proportional_treatment_except_loss_contract(self) -> None:
+        treatment = json.loads(SUPERVISED_CONFIGS[1].read_text(encoding="utf-8"))
+        baseline = json.loads(LOSS_OFF_BASELINE_CONFIG.read_text(encoding="utf-8"))
+
+        self.assertIn("LR-274", baseline["purpose"])
+        self.assertIn("loss-off baseline", baseline["purpose"])
+        self.assertEqual(baseline["training_lane"], "soma_motionlib_kin_only")
+        for key in (
+            "source_repo",
+            "source_rev",
+            "input_data",
+            "source_features",
+            "target_decoder",
+            "decoder_targets",
+            "target_features",
+            "features",
+            "split",
+            "normalization",
+            "model",
+            "visual_validation",
+            "runtime",
+        ):
+            self.assertEqual(baseline[key], treatment[key])
+        treatment_training = dict(treatment["training"])
+        baseline_training = dict(baseline["training"])
+        for key in ("temporal_consistency_loss_enabled", "temporal_consistency_loss_weight"):
+            treatment_training.pop(key)
+            baseline_training.pop(key)
+        self.assertEqual(baseline_training, treatment_training)
+        self.assertEqual(baseline["losses"]["primary"], treatment["losses"]["primary"])
+        self.assertEqual(baseline["losses"]["auxiliary"], [])
+        self.assertIs(baseline["training"]["temporal_consistency_loss_enabled"], False)
+        self.assertEqual(baseline["training"]["temporal_consistency_loss_weight"], 0.0)
+        self.assertEqual(baseline["training"]["seed"], treatment["training"]["seed"])
+        self.assertEqual(baseline["training"]["max_steps"], 1000000)
+        self.assertEqual(baseline["training"]["required_gpu_count"], 4)
+        self.assertEqual(baseline["runtime"]["required_gpu_count"], 4)
+        self.assertEqual(
+            baseline["validation_command"],
+            "CONFIG=configs/sonic_kin_soma_motionlib_proportional_loss_off_baseline_4gpu.json "
+            "scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh",
+        )
+        self.assertNotIn("g1_kin_command_temporal_consistency_delta_mse", LOSS_OFF_BASELINE_CONFIG.read_text())
+        self.assertIn("temporal-consistency-loss-off", baseline["wandb"]["tags"])
 
 
 class A0TwoGpuAcceptedVisualizationConfigTests(unittest.TestCase):
@@ -241,7 +303,10 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
 
     def test_launcher_uses_torch_distributed_supervised_entrypoint(self) -> None:
         text = self.launcher_text
+        self.assertIn("LR-273 temporal-consistency loss-on treatment", text)
+        self.assertIn("LR-274 loss-off baseline", text)
         self.assertIn("configs/sonic_kin_soma_motionlib_proportional_4gpu.json", text)
+        self.assertIn("configs/sonic_kin_soma_motionlib_proportional_loss_off_baseline_4gpu.json", text)
         self.assertIn('NPROC_PER_NODE="${NPROC_PER_NODE:-4}"', text)
         self.assertIn("torch.distributed.run", text)
         self.assertIn("scripts/train_sonic_kin_skeleton_ae.py", text)
@@ -365,7 +430,9 @@ class HistoricalKinSkeletonLauncherTests(unittest.TestCase):
         text = self.launcher_text
         self.assertIn("ALLOW_HISTORICAL_A_B_4X1GPU", text)
         self.assertIn("kin-skeleton 4x1-GPU launching is historical", text)
-        self.assertIn("active kin-only SOMA encoder baselines must run as one 4-GPU job", text)
+        self.assertIn("LR-273 loss-on config", text)
+        self.assertIn("LR-274 loss-off baseline config", text)
+        self.assertIn("active kin-only SOMA encoder treatment/baseline configs must run as one 4-GPU job", text)
 
 
 if __name__ == "__main__":
