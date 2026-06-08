@@ -124,6 +124,76 @@ class SonicKinTrainTimingTests(unittest.TestCase):
         self.assertEqual(summary["status"], "invalid")
         self.assertIn("target_fps_not_below_source_fps", summary["flags"])
 
+    def test_raw_sonic_dataset_setting_only_accepts_kin_or_phy(self):
+        sonic_train.validate_raw_sonic_dataset_config(
+            {
+                "input_data": {
+                    "dataset": "kin",
+                    "data_root": "/tmp/bones_sonic",
+                    "indexing": {},
+                }
+            }
+        )
+        sonic_train.validate_raw_sonic_dataset_config(
+            {
+                "input_data": {
+                    "dataset": "phy",
+                    "data_root": "/tmp/phsical_bones_sonic",
+                    "indexing": {},
+                }
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "input_data.dataset must be one of: kin, phy"):
+            sonic_train.validate_raw_sonic_dataset_config(
+                {
+                    "input_data": {
+                        "dataset": "physical",
+                        "data_root": "/tmp/phsical_bones_sonic",
+                        "indexing": {},
+                    }
+                }
+            )
+
+    def test_phy_dataset_remaps_existing_sonic_index_rows_to_physicalized_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            kin_root = root / "bones_sonic"
+            phy_root = root / "phsical_bones_sonic"
+            kin_root.mkdir()
+            phy_root.mkdir()
+            (phy_root / "data.txt").write_text("231121/foo.npz\n", encoding="utf-8")
+            index_csv = root / "sonic_index.csv"
+            index_csv.write_text(
+                "schema_status,sonic_path,frame_count,fps,filename\n"
+                ",/home/user/data/motion_data/bones_sonic/231121/foo.npz,80,50,foo.npz\n"
+                ",/home/user/data/motion_data/bones_sonic/231121/not_saved.npz,80,50,not_saved.npz\n",
+                encoding="utf-8",
+            )
+            config = {
+                "input_data": {
+                    "dataset": "phy",
+                    "data_root": str(kin_root),
+                    "dataset_roots": {
+                        "kin": str(kin_root),
+                        "phy": str(phy_root),
+                    },
+                    "dataset_manifests": {
+                        "phy": str(phy_root / "data.txt"),
+                    },
+                    "indexing": {
+                        "index_csv": str(index_csv),
+                        "source_path_prefix": "/home/user/data/motion_data/bones_sonic",
+                    },
+                }
+            }
+
+            rows, skipped = sonic_train.rows_from_csv_index(config, sonic_train.data_root_from_config(config))
+
+            self.assertEqual(skipped, 1)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["path"], str(phy_root / "231121/foo.npz"))
+            self.assertEqual(rows[0]["relative_path"], "231121/foo.npz")
+
     def test_soma_resample_matches_sonic_target_timeline_length(self):
         source = np.arange(330, dtype=np.float32).reshape(330, 1)
 

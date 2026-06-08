@@ -6,7 +6,15 @@
   "source_repo": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training",
   "source_rev": "a2b90bab00216885c389a5b03d7356e7fa112c25",
   "input_data": {
+    "dataset": "kin",
     "data_root": "/mnt/data_cpfs/bones_sonic",
+    "dataset_roots": {
+      "kin": "/mnt/data_cpfs/bones_sonic",
+      "phy": "/mnt/data_cpfs/phsical_bones_sonic"
+    },
+    "dataset_manifests": {
+      "phy": "/mnt/data_cpfs/phsical_bones_sonic/data.txt"
+    },
     "indexing": {
       "index_csv": "/mnt/data_cpfs/code/wxh/OnlineRetarget/runs/indices/bones_sonic_index_full_v0/sonic_index.csv",
       "source_path_prefix": "/home/user/data/motion_data/bones_sonic",
