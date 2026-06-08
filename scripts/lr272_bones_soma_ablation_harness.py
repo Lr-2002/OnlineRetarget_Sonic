@@ -47,6 +47,14 @@ DEFAULT_WORST_KEYS = (
     "230223__injured_torso_walk_ff_start_225_R_001__A214",
     "231024__walk_the_dog_ff_000_pull_back_leash_R_002__A494",
 )
+FULL_EVALUATOR_THRESHOLDS = {
+    "root_rel_rmse_m": 0.05,
+    "root_rot_geodesic_rmse_rad": 0.15,
+    "fk_rootrel_mpjpe_m": 0.05,
+    "dof_rmse_rad": 0.15,
+    "contact_frame_ratio_delta": 0.15,
+    "contact_slide_delta_mps": 0.50,
+}
 
 KEY_COLUMNS = (
     "lr271_key",
@@ -105,6 +113,21 @@ class Candidate:
                     "root-scale, lower-body-contact, IK/DoF convention, or a negative result with a concrete violated convention"
                 ),
                 "average_only_or_threshold_relaxation": "not accepted",
+            },
+            "full_evaluator": {
+                "required_metrics": [
+                    "root_rel_rmse_m",
+                    "root_rot_geodesic_rmse_rad",
+                    "dof_rmse_rad",
+                    "dof_max_abs_rad",
+                    "fk_world_mpjpe_m",
+                    "fk_rootrel_mpjpe_m",
+                    "foot_penetration_depth_pred_m",
+                    "contact_frame_ratio_delta",
+                    "contact_slide_delta_mps",
+                    "contact_lr_asymmetry_delta",
+                ],
+                "thresholds": FULL_EVALUATOR_THRESHOLDS,
             },
         }
 
@@ -208,6 +231,38 @@ def build_candidates() -> list[Candidate]:
             dof_convention=dof_identity,
             validation={"compare_to": "official_g1_csv", "metric_focus": ("root_xy_span",), "diagnostic_only": True},
             tags=("root", "scale", "per_clip", "diagnostic"),
+        ),
+        Candidate(
+            candidate_id="a_root_front_train_split_calibrated",
+            route="A_root_world_adapter",
+            enabled=True,
+            expected_layer="deployable_root_front_frozen_calibration",
+            description=(
+                "Frozen root/front adapter learned only from train split rows: one global XY scale and yaw/front offset, "
+                "then evaluated on held-out rows without fitting to eval clips."
+            ),
+            root_world={
+                **root_identity,
+                "xy_scale_mode": "train_split_calibrated",
+                "yaw_alignment": "train_split_calibrated",
+                "calibration_split": "train",
+                "calibration_max_rows": 32,
+                "calibration_max_frames": 240,
+                "calibration_min_scale": 0.25,
+                "calibration_max_scale": 4.0,
+                "target_leakage_on_eval": False,
+            },
+            summarizer=summarizer_current,
+            dof_convention=dof_identity,
+            validation={
+                "compare_to": "official_g1_csv",
+                "metric_focus": ("root_xy_span", "root_rot_geodesic", "fk_rootrel_mpjpe", "contact_slide"),
+                "calibration_split": "train",
+                "eval_contract": "held_out_non_train_rows_only_for_acceptance",
+                "target_leakage_on_eval": False,
+                "deployable_candidate": True,
+            },
+            tags=("root", "front", "yaw", "scale", "train_split", "deployable"),
         ),
         Candidate(
             candidate_id="a_root_yaw_align_first_heading",
@@ -654,13 +709,16 @@ def build_command_rows(
 
 
 def default_runner_command(values: Mapping[str, str], *, mode: str) -> str:
-    return (
+    command = (
         f"{shlex.quote(values['runner_python'])} {shlex.quote(values['runner_script'])} "
         f"--config {shlex.quote(values['config'])} "
         f"--stage-csv {shlex.quote(values['stage_csv'])} "
         f"--output-dir {shlex.quote(values['output_dir'])} "
         f"--mode {shlex.quote(mode)}"
     )
+    if mode == "visual":
+        command += " --render-isaac"
+    return command
 
 
 def format_template(template: str, values: Mapping[str, str]) -> str:

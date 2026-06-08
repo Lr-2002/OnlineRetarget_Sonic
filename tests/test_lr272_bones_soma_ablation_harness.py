@@ -33,6 +33,7 @@ class Lr272BonesSomaAblationHarnessTests(unittest.TestCase):
         self.assertIn("B_summarizer_preprocess", routes)
         self.assertIn("C_dof_convention", routes)
         self.assertIn("baseline", routes)
+        self.assertTrue(any(candidate.candidate_id == "a_root_front_train_split_calibrated" for candidate in candidates))
         self.assertTrue(any(candidate.candidate_id == "b_per_clip_skeleton_preroll_ramp" for candidate in candidates))
         self.assertTrue(any(candidate.candidate_id == "c_hip_pitch_sign_flip_probe" for candidate in candidates))
 
@@ -148,6 +149,7 @@ class Lr272BonesSomaAblationHarnessTests(unittest.TestCase):
             self.assertIn("--mode retarget", baseline_smoke["retarget_command"])
             self.assertIn("--mode metric", baseline_smoke["metric_command"])
             self.assertIn("--mode visual", baseline_smoke["visual_command"])
+            self.assertIn("--render-isaac", baseline_smoke["visual_command"])
             self.assertIn("/opt/run/python", baseline_smoke["retarget_command"])
 
     def test_print_run_resolves_stage_from_candidate_config(self):
