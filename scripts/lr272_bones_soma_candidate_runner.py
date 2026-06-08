@@ -314,7 +314,8 @@ def load_base_soma_motion(row: Mapping[str, str], frames: int, fps: float) -> Mo
 
 
 def load_candidate_csv(path: Path, fps: float) -> Motion:
-    rows = list(csv.DictReader(path.open(newline="", encoding="utf-8")))
+    with path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
     root_pos = np.asarray(
         [
             [
