@@ -49,13 +49,13 @@ DEFAULT_WORST_KEYS = (
 )
 
 KEY_COLUMNS = (
+    "lr271_key",
     "motion_key",
     "key",
     "clip_key",
     "action_key",
-    "Action",
-    "action",
-    "merged_quality_action",
+    "pair_key",
+    "bones_rel_key",
     "source_key",
     "bones_key",
 )
@@ -529,7 +529,13 @@ def row_key(row: Mapping[str, str]) -> str:
         value = str(row.get(column, "")).strip()
         if value:
             return value
-    for column in ("move_g1_path", "source_bvh", "move_soma_proportional_path"):
+    for column in (
+        "move_g1_path",
+        "official_bones_g1_csv_member",
+        "source_bvh",
+        "move_soma_proportional_path",
+        "manifest_robot_motion_pkl",
+    ):
         value = str(row.get(column, "")).strip()
         if value:
             return Path(value).stem

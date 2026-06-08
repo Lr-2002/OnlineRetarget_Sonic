@@ -50,6 +50,27 @@ class Lr272BonesSomaAblationHarnessTests(unittest.TestCase):
         self.assertEqual(len(mixed), 10)
         self.assertEqual(len(walk), 13)
 
+    def test_stage_selection_uses_lr271_key_not_quality_action(self):
+        worst = "230413__dance_hiphop_camel_walk_360_R_fast_002__A317"
+        rows = [
+            {
+                "lr271_key": worst if idx == 4 else f"230101__walk_{idx:03d}__A{idx:03d}",
+                "pair_key_contract": "lr271_key = date__filename",
+                "source_bvh": f"/data/soma/{idx:03d}.bvh",
+                "official_bones_g1_csv_member": f"g1/csv/230101/{idx:03d}.csv",
+                "merged_quality_action": "keep",
+            }
+            for idx in range(12)
+        ]
+
+        mixed = self.script.select_stage_rows(rows, self.script.STAGES[1], [worst])
+        walk = self.script.select_stage_rows(rows, self.script.STAGES[2], [worst])
+
+        self.assertEqual(self.script.row_key(rows[0]), rows[0]["lr271_key"])
+        self.assertEqual(mixed[0]["lr271_key"], worst)
+        self.assertEqual(len(mixed), 10)
+        self.assertEqual(len(walk), 12)
+
     def test_build_campaign_writes_configs_commands_and_stage_manifests(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
