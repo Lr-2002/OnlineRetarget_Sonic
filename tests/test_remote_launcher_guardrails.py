@@ -24,6 +24,14 @@ SUPERVISED_CONFIGS = (
 LOSS_OFF_BASELINE_CONFIG = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_proportional_loss_off_baseline_4gpu.json"
 )
+ACTIVE_FOUR_GPU_SOMA_MOTIONLIB_CONFIGS = (*SUPERVISED_CONFIGS, LOSS_OFF_BASELINE_CONFIG)
+ACCEPTED_SOMAMESH_VISUAL_FIELDS = {
+    "soma_retargeter_root": "/home/user/project/ContextRetarget/third_party/soma-retargeter",
+    "somamesh_usd": "/home/user/data/motion_data/soma_shapes/soma_base_rig/soma_base_skel_minimal.usd",
+    "g1_robot_usd": "/mnt/data_cpfs/code/wxh/OnlineRetarget/runs/isaaclab_urdf_cache/g1_main/main.usd",
+    "isaac_python_bin": "/workspace/isaaclab/_isaac_sim/python.sh",
+    "isaac_render_script": "scripts/render_g1_isaac_pair.py",
+}
 A0_FOUR_GPU_CONFIGS = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_uniform_4gpu.json",
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_proportional_4gpu.json",
@@ -226,6 +234,20 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
         )
         self.assertNotIn("g1_kin_command_temporal_consistency_delta_mse", LOSS_OFF_BASELINE_CONFIG.read_text())
         self.assertIn("temporal-consistency-loss-off", baseline["wandb"]["tags"])
+
+    def test_active_four_gpu_configs_use_accepted_somamesh_visual_backend(self) -> None:
+        for path in ACTIVE_FOUR_GPU_SOMA_MOTIONLIB_CONFIGS:
+            with self.subTest(path=path.name):
+                config = json.loads(path.read_text(encoding="utf-8"))
+                visual = config["visual_validation"]
+                self.assertIs(visual["enabled"], True)
+                self.assertIs(visual["acceptance_backend"], True)
+                self.assertEqual(visual["every_steps"], 20000)
+                self.assertEqual(visual["every_minutes"], 60)
+                self.assertEqual(visual["num_videos"], 8)
+                for key, expected in ACCEPTED_SOMAMESH_VISUAL_FIELDS.items():
+                    self.assertEqual(visual[key], expected)
+                self.assertIn("acceptance-backend", config["wandb"]["tags"])
 
 
 class A0TwoGpuAcceptedVisualizationConfigTests(unittest.TestCase):
