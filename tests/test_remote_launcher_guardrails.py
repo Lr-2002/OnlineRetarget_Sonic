@@ -40,6 +40,15 @@ ACCEPTED_VISUAL_METRIC_VALIDATION = {
     "primary": "mpjpe",
     "requested_metrics": ["mpjpe", "w_mpjpe", "context_compositing"],
 }
+LR270_SHARED_EVAL_COHORT = {
+    "enabled": True,
+    "id": "lr270_shared_eval_v1",
+    "seed": 20260608,
+    "include_run_group": True,
+    "visual_num_samples": 8,
+    "metric_num_samples": 100,
+    "manifest_path": "eval_cohort_manifest.json",
+}
 A0_FOUR_GPU_CONFIGS = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_uniform_4gpu.json",
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_proportional_4gpu.json",
@@ -219,6 +228,7 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
             "model",
             "visual_validation",
             "metric_validation",
+            "evaluation_cohort",
             "runtime",
         ):
             self.assertEqual(baseline[key], treatment[key])
@@ -269,6 +279,26 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                 )
                 self.assertEqual(config["training"]["validate_every"], 200)
                 self.assertEqual(config["metric_validation"]["every_steps"] % config["training"]["validate_every"], 0)
+
+    def test_proportional_treatment_and_baseline_share_fixed_eval_cohort(self) -> None:
+        treatment = json.loads(PROPORTIONAL_TREATMENT_AND_BASELINE_CONFIGS[0].read_text(encoding="utf-8"))
+        baseline = json.loads(PROPORTIONAL_TREATMENT_AND_BASELINE_CONFIGS[1].read_text(encoding="utf-8"))
+        self.assertEqual(treatment["evaluation_cohort"], LR270_SHARED_EVAL_COHORT)
+        self.assertEqual(baseline["evaluation_cohort"], LR270_SHARED_EVAL_COHORT)
+        self.assertEqual(treatment["evaluation_cohort"], baseline["evaluation_cohort"])
+        self.assertEqual(treatment["visual_validation"]["num_videos"], LR270_SHARED_EVAL_COHORT["visual_num_samples"])
+        self.assertEqual(baseline["visual_validation"]["num_videos"], LR270_SHARED_EVAL_COHORT["visual_num_samples"])
+
+    def test_supervised_trainer_uses_shared_eval_cohort_not_variant_salt(self) -> None:
+        text = SUPERVISED_TRAINER.read_text(encoding="utf-8")
+        self.assertIn("build_evaluation_cohort(validation_dataset.rows, config, run_group=run_group)", text)
+        self.assertIn("evaluation_cohort_manifest_payload", text)
+        self.assertIn("metric_val_loader", text)
+        self.assertIn("metric_rows_sha256", text)
+        self.assertIn("visual_rows_sha256", text)
+        self.assertIn("max_batches=0", text)
+        self.assertIn('"variant.name"', text)
+        self.assertNotIn("config['variant']['name']}:{config['training']['seed']", text)
 
 
 class A0TwoGpuAcceptedVisualizationConfigTests(unittest.TestCase):

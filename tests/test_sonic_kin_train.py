@@ -27,6 +27,79 @@ if sonic_train is not None:
 
 @unittest.skipIf(sonic_train is None, "torch is required for sonic kin trainer tests")
 class SonicKinTrainTimingTests(unittest.TestCase):
+    def test_shared_evaluation_cohort_ignores_variant_name_and_keeps_visual_subset(self):
+        rows = [
+            {
+                "relative_path": f"sample_{index:03d}.pkl",
+                "filename": f"sample_{index:03d}",
+                "robot_relative_path": f"robot/sample_{index:03d}.pkl",
+                "soma_relative_path": f"soma/sample_{index:03d}.pkl",
+                "source_soma_proportional_path": f"soma_proportional/sample_{index:03d}.bvh",
+                "frame_count": 120 + index,
+                "split": "validation",
+            }
+            for index in range(120)
+        ]
+        base_config = {
+            "training": {"seed": 1234},
+            "visual_validation": {"num_videos": 8},
+            "evaluation_cohort": {
+                "enabled": True,
+                "id": "lr270_shared_eval_v1",
+                "seed": 20260608,
+                "include_run_group": True,
+                "visual_num_samples": 8,
+                "metric_num_samples": 100,
+            },
+            "variant": {"name": "treatment_variant"},
+            "wandb": {"name": "treatment_run"},
+        }
+        treatment = sonic_train.build_evaluation_cohort(rows, base_config, run_group="shared_group")
+        baseline_config = {
+            **base_config,
+            "variant": {"name": "loss_off_baseline_variant"},
+            "wandb": {"name": "baseline_run"},
+        }
+        baseline = sonic_train.build_evaluation_cohort(rows, baseline_config, run_group="shared_group")
+
+        treatment_metric_keys = [
+            sonic_train.evaluation_row_stable_key(row) for row in treatment["metric_rows"]
+        ]
+        baseline_metric_keys = [
+            sonic_train.evaluation_row_stable_key(row) for row in baseline["metric_rows"]
+        ]
+        treatment_visual_keys = [
+            sonic_train.evaluation_row_stable_key(row) for row in treatment["visual_rows"]
+        ]
+        baseline_visual_keys = [
+            sonic_train.evaluation_row_stable_key(row) for row in baseline["visual_rows"]
+        ]
+
+        self.assertEqual(len(treatment_metric_keys), 100)
+        self.assertEqual(len(treatment_visual_keys), 8)
+        self.assertEqual(treatment_metric_keys, baseline_metric_keys)
+        self.assertEqual(treatment_visual_keys, baseline_visual_keys)
+        self.assertEqual(treatment_visual_keys, treatment_metric_keys[:8])
+        self.assertTrue(treatment["visual_subset_of_metric"])
+
+        manifest = sonic_train.evaluation_cohort_manifest_payload(treatment, Path("eval_cohort_manifest.json"))
+        baseline_manifest = sonic_train.evaluation_cohort_manifest_payload(
+            baseline,
+            Path("baseline_eval_cohort_manifest.json"),
+        )
+        self.assertEqual(manifest["metric_row_count"], 100)
+        self.assertEqual(manifest["visual_row_count"], 8)
+        self.assertEqual(
+            [row["stable_key"] for row in manifest["visual_rows"]],
+            [row["stable_key"] for row in manifest["metric_rows"][:8]],
+        )
+        self.assertEqual(len(manifest["metric_rows_sha256"]), 64)
+        self.assertEqual(len(manifest["visual_rows_sha256"]), 64)
+        self.assertEqual(manifest["metric_rows_sha256"], baseline_manifest["metric_rows_sha256"])
+        self.assertEqual(manifest["visual_rows_sha256"], baseline_manifest["visual_rows_sha256"])
+        self.assertIn("variant.name", manifest["sampling"]["excluded_config_fields"])
+        self.assertIn("wandb.name", manifest["sampling"]["excluded_config_fields"])
+
     def _predict_state(
         self,
         config,

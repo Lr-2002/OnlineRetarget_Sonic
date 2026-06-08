@@ -2649,6 +2649,258 @@ def split_rows(rows: list[dict[str, Any]], validation_ratio: float, hash_salt: s
         rows[0]["split"] = "train"
 
 
+DEFAULT_EVAL_COHORT_MANIFEST = "eval_cohort_manifest.json"
+EVAL_COHORT_EXCLUDED_SAMPLING_FIELDS = (
+    "variant.name",
+    "wandb.name",
+    "wandb.group",
+)
+
+
+def evaluation_cohort_config(config: Mapping[str, Any]) -> Mapping[str, Any]:
+    cfg = config.get("evaluation_cohort", {})
+    if not isinstance(cfg, Mapping) or not bool(cfg.get("enabled", False)):
+        return {}
+    return cfg
+
+
+def _positive_int_config(cfg: Mapping[str, Any], key: str, default: int) -> int:
+    try:
+        value = int(cfg.get(key, default))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"evaluation_cohort.{key} must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError(f"evaluation_cohort.{key} must be a positive integer")
+    return value
+
+
+def evaluation_cohort_counts(config: Mapping[str, Any]) -> tuple[int, int]:
+    visual_cfg = config.get("visual_validation", {})
+    if not isinstance(visual_cfg, Mapping):
+        visual_cfg = {}
+    visual_default = max(1, int(visual_cfg.get("num_videos", 8)))
+    cfg = evaluation_cohort_config(config)
+    if not cfg:
+        return visual_default, visual_default
+    visual_count = _positive_int_config(cfg, "visual_num_samples", visual_default)
+    metric_count = _positive_int_config(cfg, "metric_num_samples", max(visual_count, visual_default))
+    if metric_count < visual_count:
+        raise ValueError("evaluation_cohort.metric_num_samples must be >= visual_num_samples")
+    return visual_count, metric_count
+
+
+def evaluation_cohort_sampling(config: Mapping[str, Any], run_group: str = "") -> dict[str, Any]:
+    cfg = evaluation_cohort_config(config)
+    training_cfg = config.get("training", {})
+    if not isinstance(training_cfg, Mapping):
+        training_cfg = {}
+    visual_cfg = config.get("visual_validation", {})
+    if not isinstance(visual_cfg, Mapping):
+        visual_cfg = {}
+    if cfg:
+        cohort_id = str(cfg.get("id") or cfg.get("cohort_id") or "default").strip() or "default"
+        seed = int(cfg.get("seed", training_cfg.get("seed", 0)))
+        include_run_group = bool(cfg.get("include_run_group", True))
+    else:
+        cohort_id = str(visual_cfg.get("cohort_id") or "legacy_visual_validation").strip()
+        seed = int(training_cfg.get("seed", 0))
+        include_run_group = False
+    run_group_text = str(run_group or "") if include_run_group else ""
+    salt_parts = [
+        "evaluation_cohort",
+        f"id={cohort_id}",
+        f"seed={seed}",
+    ]
+    if include_run_group:
+        salt_parts.append(f"run_group={run_group_text}")
+    salt = "|".join(salt_parts)
+    return {
+        "cohort_id": cohort_id,
+        "seed": seed,
+        "run_group": run_group_text,
+        "include_run_group": include_run_group,
+        "salt_sha256": hashlib.sha256(salt.encode("utf-8")).hexdigest(),
+        "salt": salt,
+        "excluded_config_fields": list(EVAL_COHORT_EXCLUDED_SAMPLING_FIELDS),
+    }
+
+
+def evaluation_row_stable_key(row: Mapping[str, Any]) -> str:
+    fields = (
+        "sample_id",
+        "relative_path",
+        "filename",
+        "robot_relative_path",
+        "soma_relative_path",
+        "source_soma_proportional_path",
+        "source_bvh",
+        "path",
+    )
+    parts: list[str] = []
+    for key in fields:
+        value = row.get(key)
+        if value not in ("", None):
+            parts.append(f"{key}={value}")
+    if not parts:
+        parts.append(f"row={json.dumps(dict(row), sort_keys=True, default=str)}")
+    return "\n".join(parts)
+
+
+def _row_frame_count(row: Mapping[str, Any]) -> int:
+    try:
+        return int(row.get("frame_count", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def build_evaluation_cohort(
+    rows: Sequence[Mapping[str, Any]],
+    config: Mapping[str, Any],
+    *,
+    run_group: str = "",
+) -> dict[str, Any]:
+    visual_count, metric_count = evaluation_cohort_counts(config)
+    sampling = evaluation_cohort_sampling(config, run_group)
+    eligible = [row for row in rows if _row_frame_count(row) > 1]
+    ranked = sorted(
+        eligible,
+        key=lambda row: (
+            stable_hash_int(f"{sampling['salt']}:{evaluation_row_stable_key(row)}"),
+            evaluation_row_stable_key(row),
+        ),
+    )
+    metric_rows = list(ranked[:metric_count])
+    visual_rows = list(metric_rows[:visual_count])
+    return {
+        "enabled": bool(evaluation_cohort_config(config)),
+        "cohort_id": sampling["cohort_id"],
+        "seed": sampling["seed"],
+        "run_group": sampling["run_group"],
+        "include_run_group": sampling["include_run_group"],
+        "salt_sha256": sampling["salt_sha256"],
+        "excluded_config_fields": sampling["excluded_config_fields"],
+        "visual_num_samples": visual_count,
+        "metric_num_samples": metric_count,
+        "eligible_row_count": len(eligible),
+        "metric_rows": metric_rows,
+        "visual_rows": visual_rows,
+        "metric_row_count": len(metric_rows),
+        "visual_row_count": len(visual_rows),
+        "visual_subset_of_metric": [
+            evaluation_row_stable_key(row) for row in visual_rows
+        ]
+        == [
+            evaluation_row_stable_key(row) for row in metric_rows[: len(visual_rows)]
+        ],
+    }
+
+
+def evaluation_cohort_manifest_path(output_dir: Path, config: Mapping[str, Any]) -> Path:
+    cfg = evaluation_cohort_config(config)
+    configured = Path(str(cfg.get("manifest_path", DEFAULT_EVAL_COHORT_MANIFEST)))
+    if configured.is_absolute():
+        return configured
+    return output_dir / configured
+
+
+def _evaluation_cohort_manifest_row(row: Mapping[str, Any], index: int) -> dict[str, Any]:
+    stable_key = evaluation_row_stable_key(row)
+    source_path = (
+        row.get("source_soma_proportional_path")
+        or row.get("source_bvh")
+        or row.get("path")
+        or ""
+    )
+    return {
+        "index": int(index),
+        "row_id": str(row.get("sample_id") or row.get("relative_path") or row.get("filename") or stable_key),
+        "filename": str(row.get("filename", "")),
+        "relative_path": str(row.get("relative_path", "")),
+        "robot_relative_path": str(row.get("robot_relative_path", "")),
+        "soma_relative_path": str(row.get("soma_relative_path", "")),
+        "source_path": str(source_path),
+        "path": str(row.get("path", "")),
+        "frame_count": _row_frame_count(row),
+        "stable_key": stable_key,
+        "stable_key_sha256": hashlib.sha256(stable_key.encode("utf-8")).hexdigest(),
+    }
+
+
+def evaluation_cohort_manifest_payload(
+    cohort: Mapping[str, Any],
+    manifest_path: Path | str,
+) -> dict[str, Any]:
+    metric_rows = list(cohort.get("metric_rows", []))
+    visual_rows = list(cohort.get("visual_rows", []))
+    visual_manifest_rows = [
+        _evaluation_cohort_manifest_row(row, index) for index, row in enumerate(visual_rows)
+    ]
+    metric_manifest_rows = [
+        _evaluation_cohort_manifest_row(row, index) for index, row in enumerate(metric_rows)
+    ]
+    return {
+        "artifact_type": "evaluation_cohort",
+        "version": 1,
+        "created_at": utc_now(),
+        "path": str(manifest_path),
+        "cohort_id": str(cohort.get("cohort_id", "")),
+        "seed": int(cohort.get("seed", 0)),
+        "run_group": str(cohort.get("run_group", "")),
+        "include_run_group": bool(cohort.get("include_run_group", False)),
+        "visual_num_samples": int(cohort.get("visual_num_samples", 0)),
+        "metric_num_samples": int(cohort.get("metric_num_samples", 0)),
+        "eligible_row_count": int(cohort.get("eligible_row_count", 0)),
+        "visual_row_count": len(visual_rows),
+        "metric_row_count": len(metric_rows),
+        "visual_subset_of_metric": bool(cohort.get("visual_subset_of_metric", False)),
+        "visual_rows_sha256": hashlib.sha256(
+            json.dumps(visual_manifest_rows, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        "metric_rows_sha256": hashlib.sha256(
+            json.dumps(metric_manifest_rows, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        "sampling": {
+            "salt_sha256": str(cohort.get("salt_sha256", "")),
+            "salt_fields": [
+                "evaluation_cohort.id",
+                "evaluation_cohort.seed",
+                "run_group",
+                "row.stable_key",
+            ],
+            "excluded_config_fields": list(cohort.get("excluded_config_fields", [])),
+        },
+        "visual_rows": visual_manifest_rows,
+        "metric_rows": metric_manifest_rows,
+    }
+
+
+def evaluation_cohort_artifact_summary(manifest: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(manifest, Mapping):
+        return {}
+    keys = (
+        "path",
+        "cohort_id",
+        "seed",
+        "run_group",
+        "visual_num_samples",
+        "metric_num_samples",
+        "visual_row_count",
+        "metric_row_count",
+        "visual_subset_of_metric",
+        "visual_rows_sha256",
+        "metric_rows_sha256",
+        "sampling",
+    )
+    return {key: copy.deepcopy(manifest[key]) for key in keys if key in manifest}
+
+
+def write_evaluation_cohort_manifest(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(json.dumps(dict(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
 class KinWindowDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]):
     def __init__(
         self,
@@ -3097,10 +3349,12 @@ def validate(
     command_dim: int,
     joint_dim: int,
     root_pose_dim: int,
+    max_batches: int | None = None,
 ) -> dict[str, float]:
     model.eval()
     rows = []
-    max_batches = int(config["training"]["validation_batches"])
+    if max_batches is None:
+        max_batches = int(config["training"]["validation_batches"])
     command_weight = float(config["training"].get("command_loss_weight", 1.0))
     root_pos_weight = float(
         config["training"].get(
@@ -3117,7 +3371,7 @@ def validate(
     temporal_consistency_weight = temporal_consistency_loss_weight(config)
     with torch.no_grad():
         for batch_idx, (motion, skeleton, target) in enumerate(loader):
-            if batch_idx >= max_batches:
+            if max_batches is not None and max_batches > 0 and batch_idx >= max_batches:
                 break
             motion = motion.to(device, non_blocking=True)
             skeleton = skeleton.to(device, non_blocking=True)
@@ -3180,22 +3434,23 @@ def run_visual_validation(
     isaac_python_bin: Path | str | None = None,
     isaac_render_script: Path | str | None = None,
     execute_isaaclab: bool = True,
+    run_group: str = "",
+    evaluation_cohort_manifest: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     cfg = config.get("visual_validation", {})
     started = time.perf_counter()
     vis_dir = output_dir / "visual_validation" / f"step_{step:08d}"
     vis_dir.mkdir(parents=True, exist_ok=True)
     report_path = vis_dir / "summary.json"
-    rows = _select_visual_rows(
-        validation_rows,
-        count=int(cfg.get("num_videos", 8)),
-        salt=f"{config['variant']['name']}:{config['training']['seed']}",
-    )
+    cohort = build_evaluation_cohort(validation_rows, config, run_group=run_group)
+    rows = list(cohort["visual_rows"])
+    cohort_summary = evaluation_cohort_artifact_summary(evaluation_cohort_manifest)
     if not rows:
         summary = {
             "step": step,
             "status": "blocked",
             "message": "no validation rows were available for visual validation",
+            "evaluation_cohort": cohort_summary,
             "reports": [],
         }
         report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -3207,6 +3462,7 @@ def run_visual_validation(
                 "step": step,
                 "status": "blocked",
                 "message": "acceptance rerender currently requires input_data.format=soma_motionlib",
+                "evaluation_cohort": cohort_summary,
                 "reports": [],
             }
             report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -3222,6 +3478,7 @@ def run_visual_validation(
                 "step": step,
                 "status": "blocked",
                 "message": f"body-position metric FK dependencies are unavailable: {exc}",
+                "evaluation_cohort": cohort_summary,
                 "reports": [],
             }
             report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -3234,6 +3491,7 @@ def run_visual_validation(
                 "step": step,
                 "status": "blocked",
                 "message": f"visual rendering dependencies are unavailable: {exc}",
+                "evaluation_cohort": cohort_summary,
                 "reports": [],
             }
             report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -3245,6 +3503,7 @@ def run_visual_validation(
                 "step": step,
                 "status": "blocked",
                 "message": f"g1_model_xml is missing: {model_xml}",
+                "evaluation_cohort": cohort_summary,
                 "reports": [],
             }
             report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -3313,10 +3572,11 @@ def run_visual_validation(
         "status": status,
         "variant": config["variant"]["name"],
         "duration_sec": float(cfg.get("duration_sec", 4.0)),
-        "requested_videos": int(cfg.get("num_videos", 8)),
+        "requested_videos": int(cohort["visual_num_samples"]),
         "videos_ok": ok_count,
         "videos_failed": failed_count,
         "elapsed_sec": time.perf_counter() - started,
+        "evaluation_cohort": cohort_summary,
         "body_position_metrics": body_position_metrics,
         "reports": reports,
     }
@@ -5152,6 +5412,7 @@ def write_manifest(
     optimizer_parameter_names: Sequence[str],
     skeleton_feature_lookup: SkeletonAEFeatureLookup | None = None,
     runtime: Mapping[str, Any] | None = None,
+    evaluation_cohort_manifest: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_root = Path(config["source_repo"])
     control_root = Path.cwd()
@@ -5231,6 +5492,9 @@ def write_manifest(
         "metrics_path": str(output_dir / "loss_curve.csv"),
         "notes": config["purpose"],
     }
+    eval_cohort_summary = evaluation_cohort_artifact_summary(evaluation_cohort_manifest)
+    if eval_cohort_summary:
+        manifest["evaluation_cohort"] = eval_cohort_summary
     if skeleton_feature_lookup is not None:
         manifest["skeleton_ae"] = {
             "enabled": True,
@@ -5583,6 +5847,47 @@ def main() -> None:
             train_dataset = KinWindowDataset(rows, "train", config, skeleton_feature_lookup)
         with stage_trace.span("validation_dataset_build"):
             validation_dataset = KinWindowDataset(rows, "validation", config, skeleton_feature_lookup)
+        eval_cohort_manifest: dict[str, Any] | None = None
+        eval_cohort_manifest_file: Path | None = None
+        metric_validation_dataset: KinWindowDataset | None = None
+        with stage_trace.span("evaluation_cohort_build"):
+            eval_cohort = build_evaluation_cohort(validation_dataset.rows, config, run_group=run_group)
+            stage_trace.log(
+                "evaluation_cohort_build",
+                "details",
+                enabled=bool(eval_cohort["enabled"]),
+                cohort_id=str(eval_cohort["cohort_id"]),
+                seed=int(eval_cohort["seed"]),
+                run_group=str(eval_cohort["run_group"]),
+                visual_row_count=int(eval_cohort["visual_row_count"]),
+                metric_row_count=int(eval_cohort["metric_row_count"]),
+                eligible_row_count=int(eval_cohort["eligible_row_count"]),
+            )
+            if eval_cohort["enabled"]:
+                if int(eval_cohort["visual_row_count"]) < int(eval_cohort["visual_num_samples"]):
+                    raise ValueError(
+                        "evaluation_cohort could not select requested visual rows: "
+                        f"requested={eval_cohort['visual_num_samples']} selected={eval_cohort['visual_row_count']}"
+                    )
+                if int(eval_cohort["metric_row_count"]) < int(eval_cohort["metric_num_samples"]):
+                    raise ValueError(
+                        "evaluation_cohort could not select requested metric rows: "
+                        f"requested={eval_cohort['metric_num_samples']} selected={eval_cohort['metric_row_count']}"
+                    )
+                eval_cohort_manifest_file = evaluation_cohort_manifest_path(output_dir, config)
+                eval_cohort_manifest = evaluation_cohort_manifest_payload(
+                    eval_cohort,
+                    eval_cohort_manifest_file,
+                )
+                if is_main:
+                    write_evaluation_cohort_manifest(eval_cohort_manifest_file, eval_cohort_manifest)
+                distributed_barrier(runtime)
+                metric_validation_dataset = KinWindowDataset(
+                    [dict(row) for row in eval_cohort["metric_rows"]],
+                    "validation",
+                    config,
+                    skeleton_feature_lookup,
+                )
         stats_load_device = torch.device("cpu") if is_skeleton_ae_enabled(config) else device
         with stage_trace.span("normalization_stats_motion_z", stats_load_device=str(stats_load_device)):
             stats = compute_or_load_stats(output_dir, train_dataset, config, stats_load_device, runtime)
@@ -5638,6 +5943,17 @@ def main() -> None:
             if runtime["distributed"]
             else None
         )
+        metric_val_sampler = (
+            DistributedSampler(
+                metric_validation_dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=False,
+                drop_last=False,
+            )
+            if runtime["distributed"] and metric_validation_dataset is not None
+            else None
+        )
         with stage_trace.span("train_loader_build"):
             train_loader = DataLoader(
                 train_dataset,
@@ -5659,6 +5975,18 @@ def main() -> None:
                 collate_fn=collate_chunks,
                 pin_memory=True,
             )
+        metric_val_loader = None
+        if metric_validation_dataset is not None:
+            with stage_trace.span("metric_validation_loader_build"):
+                metric_val_loader = DataLoader(
+                    metric_validation_dataset,
+                    batch_size=1,
+                    shuffle=False,
+                    sampler=metric_val_sampler,
+                    num_workers=max(0, int(config["training"]["num_workers"]) // 2),
+                    collate_fn=collate_chunks,
+                    pin_memory=True,
+                )
         diagnostic_batch = None
         if stage_trace.enabled:
             with stage_trace.span("first_batch_collation", loader="validation"):
@@ -5777,6 +6105,7 @@ def main() -> None:
                 optimizer_parameter_names,
                 skeleton_feature_lookup,
                 runtime,
+                evaluation_cohort_manifest=eval_cohort_manifest,
             )
         with stage_trace.span("manifest_barrier"):
             distributed_barrier(runtime)
@@ -5988,6 +6317,8 @@ def main() -> None:
                                 acceptance_backend=bool(visual_cfg.get("acceptance_backend", False)),
                                 isaac_python_bin=visual_cfg.get("isaac_python_bin"),
                                 isaac_render_script=visual_cfg.get("isaac_render_script"),
+                                run_group=run_group,
+                                evaluation_cohort_manifest=eval_cohort_manifest,
                             )
                         except Exception as exc:
                             visual_metrics = {
@@ -6078,7 +6409,23 @@ def main() -> None:
                     last_visual_validation_time = now
 
                 if metric_validation_due(config, step):
-                    if latest_validation_step != step or not latest_validation_metrics:
+                    metric_validation_metrics = latest_validation_metrics
+                    metric_validation_source = "latest_validation"
+                    if metric_val_loader is not None:
+                        metric_validation_source = "evaluation_cohort"
+                        metric_validation_metrics = validate(
+                            model,
+                            metric_val_loader,
+                            stats,
+                            device,
+                            config,
+                            command_dim,
+                            joint_dim,
+                            root_pose_dim,
+                            max_batches=0,
+                        )
+                        metric_validation_metrics = average_metric_dict(metric_validation_metrics, runtime, device)
+                    elif latest_validation_step != step or not latest_validation_metrics:
                         raise RuntimeError(
                             "metric_validation.every_steps must align with training.validate_every "
                             f"for same-step validation metrics: step={step}, "
@@ -6089,7 +6436,7 @@ def main() -> None:
                             output_dir=output_dir,
                             step=step,
                             config=config,
-                            validation_metrics=latest_validation_metrics,
+                            validation_metrics=metric_validation_metrics,
                             train_metrics=latest_train_metrics,
                             manifest=manifest,
                         )
@@ -6100,6 +6447,7 @@ def main() -> None:
                                     "step": step,
                                     "path": str(metric_artifact_path),
                                     "primary_metric": EVAL_METRIC_CONTRACT["primary"],
+                                    "validation_source": metric_validation_source,
                                 },
                                 sort_keys=True,
                             ),

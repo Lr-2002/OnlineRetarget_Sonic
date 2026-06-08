@@ -270,6 +270,12 @@ class A0FrozenAEConfigTests(unittest.TestCase):
                     "config_path": "configs/sonic_kin_soma_motionlib_a0_frozen_ae_uniform_2gpu_2kvis.json",
                     "control_revision_actual": "abc123",
                     "source_revision_actual": "def456",
+                    "evaluation_cohort": {
+                        "path": "eval_cohort_manifest.json",
+                        "cohort_id": "lr270_shared_eval_v1",
+                        "visual_num_samples": 8,
+                        "metric_num_samples": 100,
+                    },
                 },
             )
 
@@ -278,6 +284,8 @@ class A0FrozenAEConfigTests(unittest.TestCase):
             self.assertEqual(payload["artifact_type"], "metric_validation")
             self.assertEqual(payload["step"], 2000)
             self.assertEqual(payload["metric_family"], EXPECTED_EVAL_METRICS["metric_family"])
+            self.assertEqual(payload["evaluation_cohort"]["cohort_id"], "lr270_shared_eval_v1")
+            self.assertEqual(payload["evaluation_cohort"]["metric_num_samples"], 100)
             self.assertEqual(payload["primary_metric"], "mpjpe")
             self.assertEqual(payload["primary_metric_key"], "validation/mpjpe")
             self.assertIsNone(payload["primary_metric_value"])
