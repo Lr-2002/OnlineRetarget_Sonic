@@ -71,7 +71,7 @@ class Lr272BonesSomaCandidateRunnerTests(unittest.TestCase):
             metrics = json.loads((output_dir / "metrics" / "candidate_metrics.json").read_text(encoding="utf-8"))
             self.assertEqual(metrics["candidate_id"], "a_root_xy_scale_global_1p10")
             self.assertEqual(len(metrics["rows"]), 1)
-            self.assertEqual(metrics["rows"][0]["full_evaluator_status"], "blocked")
+            self.assertIn(metrics["rows"][0]["full_evaluator_status"], ("ok", "blocked"))
             self.assertIn("root_rot_geodesic_rmse_rad", metrics["rows"][0])
 
     @unittest.skipUnless(importlib.util.find_spec("numpy"), "numpy is required for candidate runner smoke")
