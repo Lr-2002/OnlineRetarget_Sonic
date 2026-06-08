@@ -235,11 +235,11 @@ def build_candidates() -> list[Candidate]:
         Candidate(
             candidate_id="a_root_front_train_split_calibrated",
             route="A_root_world_adapter",
-            enabled=True,
-            expected_layer="deployable_root_front_frozen_calibration",
+            enabled=False,
+            expected_layer="stopped_root_front_negative_mixed10_gate",
             description=(
-                "Frozen root/front adapter learned only from train split rows: one global XY scale and yaw/front offset, "
-                "then evaluated on held-out rows without fitting to eval clips."
+                "Stopped after negative mixed10 gate: root improved but root-rot/DoF/contact failed and FK root-rel "
+                "regressed, so this route is retained only as a diagnostic artifact."
             ),
             root_world={
                 **root_identity,
@@ -260,9 +260,11 @@ def build_candidates() -> list[Candidate]:
                 "calibration_split": "train",
                 "eval_contract": "held_out_non_train_rows_only_for_acceptance",
                 "target_leakage_on_eval": False,
-                "deployable_candidate": True,
+                "deployable_candidate": False,
+                "status": "stopped_negative_mixed10",
+                "do_not_run_walk100": True,
             },
-            tags=("root", "front", "yaw", "scale", "train_split", "deployable"),
+            tags=("root", "front", "yaw", "scale", "train_split", "stopped", "diagnostic"),
         ),
         Candidate(
             candidate_id="a_root_yaw_align_first_heading",
@@ -510,6 +512,7 @@ def build_campaign(
             "Run smoke1 first, then mixed10. Expand only top 1-2 candidates to walk100.",
             "Do not use BONES-SONIC 50fps NPZ for the frame-exact main comparison.",
             "A candidate passes only if visual evidence and key metrics improve together.",
+            "a_root_front_train_split_calibrated is stopped after the negative mixed10 gate and is disabled in new commands.",
         ],
     }
     manifest_path = output_dir / "campaign_manifest.json"

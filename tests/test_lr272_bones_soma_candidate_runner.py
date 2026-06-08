@@ -129,6 +129,36 @@ class Lr272BonesSomaCandidateRunnerTests(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
             self.assertAlmostEqual(float(rows[-1]["root_translateX"]), 6.0, places=5)
 
+    @unittest.skipUnless(importlib.util.find_spec("numpy"), "numpy is required for candidate runner smoke")
+    def test_fk_rootrel_identity_and_known_rigid_root_transform_invariants(self):
+        import numpy
+
+        local = numpy.asarray([0.25, -0.10, 0.80], dtype=numpy.float64)
+        ref_root = numpy.asarray([[0.0, 0.0, 1.0], [0.35, 0.15, 1.0]], dtype=numpy.float64)
+        ref_euler = numpy.zeros((2, 3), dtype=numpy.float64)
+        ref_fk = [{"pelvis": (tuple(root + local),)} for root in ref_root]
+
+        identity = self.runner.fk_mpjpe_metrics(ref_fk, ref_fk, ref_root, ref_root, ref_euler, ref_euler)
+        self.assertAlmostEqual(identity["fk_world_max_m"], 0.0, places=12)
+        self.assertAlmostEqual(identity["fk_rootrel_max_m"], 0.0, places=12)
+
+        yaw = 0.7
+        translation = numpy.asarray([1.2, -0.4, 0.05], dtype=numpy.float64)
+        rotated_root = self.runner.rotate_xy_array(ref_root[:, :2] - ref_root[:1, :2], yaw) + ref_root[:1, :2]
+        pred_root = ref_root.copy()
+        pred_root[:, :2] = rotated_root
+        pred_root += translation
+        pred_euler = ref_euler.copy()
+        pred_euler[:, 2] += yaw
+        pred_fk = [
+            {"pelvis": (tuple(root + self.runner.euler_xyz_to_matrix(euler) @ local),)}
+            for root, euler in zip(pred_root, pred_euler)
+        ]
+
+        rigid = self.runner.fk_mpjpe_metrics(pred_fk, ref_fk, pred_root, ref_root, pred_euler, ref_euler)
+        self.assertGreater(rigid["fk_world_mpjpe_m"], 0.1)
+        self.assertAlmostEqual(rigid["fk_rootrel_max_m"], 0.0, places=12)
+
 
 def _write_g1_tar(path: Path, member: str, fieldnames: list[str]) -> None:
     _write_g1_tar_members(path, {member: 1.0}, fieldnames)

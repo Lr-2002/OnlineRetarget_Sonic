@@ -734,7 +734,14 @@ def full_evaluator_metrics(pred: Motion, ref: Motion, evaluator: Mapping[str, An
         g1_fk_body_positions(model, joints, root, root_euler)
         for joints, root, root_euler, _ in ref_parsed
     ]
-    fk_metrics = fk_mpjpe_metrics(pred_fk, ref_fk, pred.root_pos[:n], ref.root_pos[:n])
+    fk_metrics = fk_mpjpe_metrics(
+        pred_fk,
+        ref_fk,
+        pred.root_pos[:n],
+        ref.root_pos[:n],
+        pred.root_euler[:n],
+        ref.root_euler[:n],
+    )
     pred_contact = g1_quality_module._contact_stats(pred_parsed, model, config, pred.fps)  # type: ignore[union-attr]
     ref_contact = g1_quality_module._contact_stats(ref_parsed, model, config, ref.fps)  # type: ignore[union-attr]
     pred_lr = foot_lr_contact_asymmetry(pred_fk, model, config)
@@ -848,7 +855,18 @@ def fk_mpjpe_metrics(
     ref_fk: Sequence[Mapping[str, Sequence[tuple[float, float, float]]]],
     pred_root: np.ndarray,
     ref_root: np.ndarray,
+    pred_root_euler: np.ndarray,
+    ref_root_euler: np.ndarray,
 ) -> dict[str, Any]:
+    """Compare FK points in world coordinates and in each motion's root-aligned frame.
+
+    ``fk_world_*`` is the direct Euclidean distance between representative body
+    points in the shared world frame.  ``fk_rootrel_*`` first maps each body
+    point into that motion's own root frame with R_root.T @ (p_world - root).
+    A known rigid root transform of an unchanged local pose should therefore
+    change world FK but leave root-relative FK near zero.
+    """
+
     body_world_errors: dict[str, list[float]] = {}
     body_rootrel_errors: dict[str, list[float]] = {}
     world_errors: list[float] = []
@@ -860,8 +878,10 @@ def fk_mpjpe_metrics(
             if pred_point is None or ref_point is None:
                 continue
             world_error = float(np.linalg.norm(pred_point - ref_point))
+            pred_root_point = root_aligned_point(pred_point, pred_root[frame_idx], pred_root_euler[frame_idx])
+            ref_root_point = root_aligned_point(ref_point, ref_root[frame_idx], ref_root_euler[frame_idx])
             rootrel_error = float(
-                np.linalg.norm((pred_point - pred_root[frame_idx]) - (ref_point - ref_root[frame_idx]))
+                np.linalg.norm(pred_root_point - ref_root_point)
             )
             body_world_errors.setdefault(body, []).append(world_error)
             body_rootrel_errors.setdefault(body, []).append(rootrel_error)
@@ -927,6 +947,11 @@ def body_representative(points: Sequence[tuple[float, float, float]]) -> np.ndar
     if not points:
         return None
     return np.asarray(points, dtype=np.float64).mean(axis=0)
+
+
+def root_aligned_point(point: np.ndarray, root_pos: np.ndarray, root_euler: np.ndarray) -> np.ndarray:
+    rotation = euler_xyz_to_matrix(root_euler)
+    return rotation.T @ (np.asarray(point, dtype=np.float64) - np.asarray(root_pos, dtype=np.float64))
 
 
 def metric_threshold_pass(metrics: Mapping[str, Any]) -> bool:
