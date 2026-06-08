@@ -124,6 +124,17 @@
     "isaac_python_bin": "/workspace/isaaclab/_isaac_sim/python.sh",
     "isaac_render_script": "scripts/render_g1_isaac_pair.py"
   },
+  "metric_validation": {
+    "enabled": true,
+    "every_steps": 20000,
+    "output_dir": "metrics",
+    "primary": "mpjpe",
+    "requested_metrics": [
+      "mpjpe",
+      "w_mpjpe",
+      "context_compositing"
+    ]
+  },
   "runtime": {
     "required_gpu_count": 4,
     "write_root": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs",

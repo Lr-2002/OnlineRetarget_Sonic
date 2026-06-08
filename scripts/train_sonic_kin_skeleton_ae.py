@@ -72,6 +72,7 @@ from online_retarget.metric_validation_artifacts import (  # noqa: E402
     load_metric_validation_artifact,
     metric_validation_due,
     metric_validation_wandb_payload,
+    visual_validation_wandb_payload,
     write_metric_validation_artifact,
 )
 from online_retarget.metrics import compute_metric_bundle  # noqa: E402
@@ -3179,7 +3180,7 @@ def run_visual_validation(
     isaac_python_bin: Path | str | None = None,
     isaac_render_script: Path | str | None = None,
     execute_isaaclab: bool = True,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     cfg = config.get("visual_validation", {})
     started = time.perf_counter()
     vis_dir = output_dir / "visual_validation" / f"step_{step:08d}"
@@ -3320,10 +3321,12 @@ def run_visual_validation(
         "reports": reports,
     }
     report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    visual_wandb_payload = visual_validation_wandb_payload(summary, summary_path=report_path)
     return {
         "visual_validation/videos_ok": float(ok_count),
         "visual_validation/videos_failed": float(failed_count),
         "visual_validation/elapsed_sec": float(summary["elapsed_sec"]),
+        **visual_wandb_payload,
     }
 
 
@@ -5953,7 +5956,7 @@ def main() -> None:
 
                 now = time.perf_counter()
                 if visual_validation_due(config, step, now=now, last_time=last_visual_validation_time):
-                    visual_metrics: dict[str, float] = {}
+                    visual_metrics: dict[str, Any] = {}
                     visual_status_path = rank0_stage_status_path(output_dir, "visual_validation", step=step)
                     if is_main:
                         visual_cfg = config.get("visual_validation", {})
