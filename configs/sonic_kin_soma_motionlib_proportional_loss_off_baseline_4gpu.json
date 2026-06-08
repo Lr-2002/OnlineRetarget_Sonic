@@ -2,7 +2,7 @@
   "schema_version": "1.1.0",
   "owner": "OnlineRetarget",
   "training_lane": "soma_motionlib_kin_only",
-  "purpose": "Strict 4-GPU supervised proportional-SOMA temporal-consistency loss-on treatment for LR-273. Adds g1_kin command delta-MSE auxiliary loss at weight 0.01; this is not the LR-274 loss-off baseline. SOMA motion/skeleton features to G1 g1_kin targets only; no PPO, no Isaac rollout, and no rollout metric surface.",
+  "purpose": "Strict 4-GPU supervised proportional-SOMA loss-off baseline for LR-274. Same dataset, split, model, seed, and eval contract as the LR-273 proportional temporal-consistency treatment, but with temporal_consistency_loss_enabled=false, no temporal auxiliary loss, and no PPO, Isaac rollout, or reward surface.",
   "source_repo": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training",
   "source_rev": "remote-latest-required-before-training",
   "input_data": {
@@ -39,12 +39,10 @@
       "g1_kin_root_position_rmse",
       "g1_kin_root_orientation_rmse"
     ],
-    "auxiliary": [
-      "g1_kin_command_temporal_consistency_delta_mse"
-    ]
+    "auxiliary": []
   },
-  "output_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_kin_soma_motionlib_supervised_runs/{run_group}/proportional",
-  "validation_command": "CONFIG=configs/sonic_kin_soma_motionlib_proportional_4gpu.json scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh",
+  "output_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_kin_soma_motionlib_loss_off_baseline_runs/{run_group}/proportional",
+  "validation_command": "CONFIG=configs/sonic_kin_soma_motionlib_proportional_loss_off_baseline_4gpu.json scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh",
   "expected_artifacts": [
     "manifest.json",
     "loss_curve.csv",
@@ -53,8 +51,8 @@
     "logs/train.log"
   ],
   "variant": {
-    "name": "sonic_kin_only_soma_encoder_proportional_temporal_consistency",
-    "family": "soma_encoder_temporal_consistency_treatment",
+    "name": "sonic_kin_soma_motionlib_proportional_loss_off_baseline",
+    "family": "soma_encoder_loss_off_baseline",
     "type": "concat",
     "soma_topology": "proportional",
     "gpu_topology": "single_4gpu_ddp_job"
@@ -100,8 +98,8 @@
     "command_loss_weight": 1.0,
     "root_pos_loss_weight": 0.25,
     "root_rot_loss_weight": 0.5,
-    "temporal_consistency_loss_enabled": true,
-    "temporal_consistency_loss_weight": 0.01
+    "temporal_consistency_loss_enabled": false,
+    "temporal_consistency_loss_weight": 0.0
   },
   "visual_validation": {
     "enabled": true,
@@ -134,15 +132,16 @@
     "enabled": true,
     "project": "OnlineRetarget",
     "entity": null,
-    "group": "sonic_kin_only_soma_encoder_temporal_consistency_{run_group}",
-    "name": "sonic_kin_only_soma_encoder_proportional_temporal_consistency_{run_group}",
+    "group": "sonic_kin_only_soma_encoder_loss_off_baseline_{run_group}",
+    "name": "sonic_kin_soma_motionlib_proportional_loss_off_baseline_{run_group}",
     "dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/wandb",
     "tags": [
       "sonic-kin-only",
       "soma-motionlib",
       "supervised",
       "proportional",
-      "temporal-consistency-loss-on",
+      "temporal-consistency-loss-off",
+      "baseline",
       "4gpu"
     ]
   }

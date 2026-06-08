@@ -3,6 +3,9 @@ set -euo pipefail
 
 ROOT="${ROOT:-/mnt/data_cpfs/code/wxh/OnlineRetarget}"
 PYTHON_BIN="${PYTHON_BIN:-/workspace/isaaclab/_isaac_sim/python.sh}"
+# Default is the LR-273 temporal-consistency loss-on treatment.
+# For the matched LR-274 loss-off baseline, run:
+# CONFIG=configs/sonic_kin_soma_motionlib_proportional_loss_off_baseline_4gpu.json scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
 CONFIG="${CONFIG:-configs/sonic_kin_soma_motionlib_proportional_4gpu.json}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
@@ -27,7 +30,7 @@ fi
 
 TRAINING_LANE="$("${PYTHON_BIN}" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("training_lane",""))' "${CONFIG}")"
 if [[ "${TRAINING_LANE}" != "soma_motionlib_kin_only" ]]; then
-  echo "CONFIG must use training_lane=soma_motionlib_kin_only for strict supervised baselines, got ${TRAINING_LANE}" >&2
+  echo "CONFIG must use training_lane=soma_motionlib_kin_only for strict supervised treatment/baseline configs, got ${TRAINING_LANE}" >&2
   exit 1
 fi
 

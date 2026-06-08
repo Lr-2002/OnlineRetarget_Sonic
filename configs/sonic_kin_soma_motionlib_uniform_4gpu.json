@@ -2,7 +2,7 @@
   "schema_version": "1.1.0",
   "owner": "OnlineRetarget",
   "training_lane": "soma_motionlib_kin_only",
-  "purpose": "Strict 4-GPU supervised uniform-SOMA baseline. SOMA motion/skeleton features to G1 g1_kin targets only; no PPO, no Isaac rollout, and no rollout metric surface.",
+  "purpose": "Strict 4-GPU supervised uniform-SOMA temporal-consistency loss-on treatment. Adds g1_kin command delta-MSE auxiliary loss at weight 0.01; this is not the loss-off baseline. SOMA motion/skeleton features to G1 g1_kin targets only; no PPO, no Isaac rollout, and no rollout metric surface.",
   "source_repo": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training",
   "source_rev": "remote-latest-required-before-training",
   "input_data": {
@@ -53,8 +53,8 @@
     "logs/train.log"
   ],
   "variant": {
-    "name": "sonic_kin_only_soma_encoder_uniform",
-    "family": "soma_encoder_baseline",
+    "name": "sonic_kin_only_soma_encoder_uniform_temporal_consistency",
+    "family": "soma_encoder_temporal_consistency_treatment",
     "type": "concat",
     "soma_topology": "uniform",
     "gpu_topology": "single_4gpu_ddp_job"
@@ -134,14 +134,15 @@
     "enabled": true,
     "project": "OnlineRetarget",
     "entity": null,
-    "group": "sonic_kin_only_soma_encoder_supervised_{run_group}",
-    "name": "sonic_kin_only_soma_encoder_uniform_{run_group}",
+    "group": "sonic_kin_only_soma_encoder_temporal_consistency_{run_group}",
+    "name": "sonic_kin_only_soma_encoder_uniform_temporal_consistency_{run_group}",
     "dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/wandb",
     "tags": [
       "sonic-kin-only",
       "soma-motionlib",
       "supervised",
       "uniform",
+      "temporal-consistency-loss-on",
       "4gpu"
     ]
   }
