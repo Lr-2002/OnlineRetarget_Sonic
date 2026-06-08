@@ -13,6 +13,7 @@ from online_retarget.metrics import compute_metric_bundle, metric_metadata
 
 DEFAULT_PRIMARY_METRIC = "g1_joint_pos_rmse_rad"
 DEFAULT_REQUESTED_METRICS = ("mpjpe", "w_mpjpe", "context_compositing")
+VISUAL_BODY_POSITION_METRICS = ("mpjpe", "w_mpjpe")
 BODY_POSITION_RESULT_ALIASES = {
     "mpjpe": "mpjpe",
     "body_position_mpjpe": "mpjpe",
@@ -59,6 +60,44 @@ def _json_metric_dict(metrics: Mapping[str, Any] | None) -> dict[str, float | No
     if metrics is None:
         return {}
     return {str(key): _json_metric_value(value) for key, value in sorted(metrics.items())}
+
+
+def body_position_metric_wandb_scalars(
+    body_position_metrics: Mapping[str, Any] | None,
+    *,
+    prefix: str = "visual_validation",
+) -> dict[str, float]:
+    if not isinstance(body_position_metrics, Mapping):
+        return {}
+    metric_results = body_position_metrics.get("metric_results")
+    if not isinstance(metric_results, Mapping):
+        return {}
+    scalars: dict[str, float] = {}
+    for name in VISUAL_BODY_POSITION_METRICS:
+        raw_result = metric_results.get(name)
+        if not isinstance(raw_result, Mapping) or raw_result.get("status") != "available":
+            continue
+        scalar = _json_metric_value(raw_result.get("value"))
+        if scalar is not None:
+            scalars[f"{prefix}/{name}"] = scalar
+    return scalars
+
+
+def visual_validation_wandb_payload(
+    summary: Mapping[str, Any],
+    *,
+    summary_path: Path | str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if summary_path is not None:
+        payload["visual_validation/summary_path"] = str(summary_path)
+    status = summary.get("status")
+    if status is not None:
+        payload["visual_validation/status"] = str(status)
+    body_position_metrics = summary.get("body_position_metrics")
+    if isinstance(body_position_metrics, Mapping):
+        payload.update(body_position_metric_wandb_scalars(body_position_metrics))
+    return payload
 
 
 def _visual_validation_artifact_status(output_dir: Path, step: int) -> dict[str, Any]:
@@ -453,6 +492,7 @@ def metric_validation_wandb_payload(
         if path is not None:
             wandb_payload["metric_validation/associated_visual_path"] = str(path)
             wandb_payload["metric_validation/visual_validation/path"] = str(path)
+            wandb_payload["visual_validation/summary_path"] = str(path)
         for key in ("requested_videos", "videos_ok", "videos_failed", "duration_sec", "elapsed_sec", "report_count"):
             value = visual_payload.get(key)
             if value is not None:
@@ -460,6 +500,7 @@ def metric_validation_wandb_payload(
 
     body_metrics = metric_payload.get("body_position_metrics", {})
     if isinstance(body_metrics, Mapping):
+        wandb_payload.update(body_position_metric_wandb_scalars(body_metrics))
         for key in ("sample_count", "weighted_sample_weight", "frame_count", "body_count", "report_count"):
             value = body_metrics.get(key)
             scalar = _json_metric_value(value)

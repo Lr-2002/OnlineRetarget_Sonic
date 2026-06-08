@@ -25,12 +25,20 @@ LOSS_OFF_BASELINE_CONFIG = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_proportional_loss_off_baseline_4gpu.json"
 )
 ACTIVE_FOUR_GPU_SOMA_MOTIONLIB_CONFIGS = (*SUPERVISED_CONFIGS, LOSS_OFF_BASELINE_CONFIG)
+PROPORTIONAL_TREATMENT_AND_BASELINE_CONFIGS = (SUPERVISED_CONFIGS[1], LOSS_OFF_BASELINE_CONFIG)
 ACCEPTED_SOMAMESH_VISUAL_FIELDS = {
     "soma_retargeter_root": "/home/user/project/ContextRetarget/third_party/soma-retargeter",
     "somamesh_usd": "/home/user/data/motion_data/soma_shapes/soma_base_rig/soma_base_skel_minimal.usd",
     "g1_robot_usd": "/mnt/data_cpfs/code/wxh/OnlineRetarget/runs/isaaclab_urdf_cache/g1_main/main.usd",
     "isaac_python_bin": "/workspace/isaaclab/_isaac_sim/python.sh",
     "isaac_render_script": "scripts/render_g1_isaac_pair.py",
+}
+ACCEPTED_VISUAL_METRIC_VALIDATION = {
+    "enabled": True,
+    "every_steps": 20000,
+    "output_dir": "metrics",
+    "primary": "mpjpe",
+    "requested_metrics": ["mpjpe", "w_mpjpe", "context_compositing"],
 }
 A0_FOUR_GPU_CONFIGS = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_uniform_4gpu.json",
@@ -210,6 +218,7 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
             "normalization",
             "model",
             "visual_validation",
+            "metric_validation",
             "runtime",
         ):
             self.assertEqual(baseline[key], treatment[key])
@@ -248,6 +257,18 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                 for key, expected in ACCEPTED_SOMAMESH_VISUAL_FIELDS.items():
                     self.assertEqual(visual[key], expected)
                 self.assertIn("acceptance-backend", config["wandb"]["tags"])
+
+    def test_proportional_treatment_and_baseline_log_visual_body_metrics(self) -> None:
+        for path in PROPORTIONAL_TREATMENT_AND_BASELINE_CONFIGS:
+            with self.subTest(path=path.name):
+                config = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(config["metric_validation"], ACCEPTED_VISUAL_METRIC_VALIDATION)
+                self.assertEqual(
+                    config["metric_validation"]["every_steps"],
+                    config["visual_validation"]["every_steps"],
+                )
+                self.assertEqual(config["training"]["validate_every"], 200)
+                self.assertEqual(config["metric_validation"]["every_steps"] % config["training"]["validate_every"], 0)
 
 
 class A0TwoGpuAcceptedVisualizationConfigTests(unittest.TestCase):
@@ -531,6 +552,12 @@ class SupervisedTrainerDdpGuardrailTests(unittest.TestCase):
         self.assertIn('acceptance_backend=bool(visual_cfg.get("acceptance_backend", False))', text)
         self.assertIn('isaac_python_bin=visual_cfg.get("isaac_python_bin")', text)
         self.assertIn('isaac_render_script=visual_cfg.get("isaac_render_script")', text)
+
+    def test_trainer_promotes_visual_body_metrics_to_wandb_scalars(self) -> None:
+        text = self.trainer_text
+        self.assertIn("visual_validation_wandb_payload", text)
+        self.assertIn("visual_wandb_payload = visual_validation_wandb_payload(summary, summary_path=report_path)", text)
+        self.assertIn("**visual_wandb_payload", text)
 
     def test_trainer_supports_short_smoke_cli_overrides(self) -> None:
         text = self.trainer_text

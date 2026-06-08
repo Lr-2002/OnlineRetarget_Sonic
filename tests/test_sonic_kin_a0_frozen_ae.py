@@ -453,6 +453,9 @@ class A0FrozenAEConfigTests(unittest.TestCase):
             )
             self.assertEqual(wandb_payload["metric_validation/primary_metric_value"], 0.045)
             self.assertEqual(wandb_payload["validation/mpjpe"], 0.045)
+            self.assertEqual(wandb_payload["visual_validation/mpjpe"], 0.045)
+            self.assertEqual(wandb_payload["visual_validation/w_mpjpe"], 0.045)
+            self.assertEqual(wandb_payload["visual_validation/summary_path"], str(visual_summary))
             self.assertEqual(wandb_payload["metric_validation/mpjpe_status"], "available")
             self.assertEqual(wandb_payload["metric_validation/w_mpjpe_status"], "available")
             self.assertEqual(
@@ -467,6 +470,14 @@ class A0FrozenAEConfigTests(unittest.TestCase):
                 wandb_payload["metric_validation/body_position_metrics/contract/root_alignment"],
                 "world_g1_root_no_pelvis_subtraction",
             )
+
+            visual_payload = metric_validation_artifacts.visual_validation_wandb_payload(
+                json.loads(visual_summary.read_text(encoding="utf-8")),
+                summary_path=visual_summary,
+            )
+            self.assertEqual(visual_payload["visual_validation/mpjpe"], 0.045)
+            self.assertEqual(visual_payload["visual_validation/w_mpjpe"], 0.045)
+            self.assertEqual(visual_payload["visual_validation/summary_path"], str(visual_summary))
 
     def test_a0_expected_dims_guard_is_in_normal_dry_run_and_formal_path(self) -> None:
         text = (REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py").read_text(encoding="utf-8")
