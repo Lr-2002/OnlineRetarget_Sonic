@@ -213,6 +213,67 @@ class Lr272BonesSomaCandidateRunnerTests(unittest.TestCase):
             self.assertAlmostEqual(float(rows[-1]["right_shoulder_pitch_joint_dof"]), 0.0, places=5)
 
     @unittest.skipUnless(importlib.util.find_spec("numpy"), "numpy is required for candidate runner smoke")
+    def test_corrected_contact_metric_gate_and_legacy_fields(self):
+        import numpy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model_xml = root / "g1_contact.xml"
+            model_xml.write_text(_minimal_contact_mjcf(), encoding="utf-8")
+            proof = root / "frame_consistency_report.json"
+            _write_passing_frame_consistency_report(proof)
+            audit = root / "contact_metric_body_floor_audit_report.json"
+            _write_contact_metric_audit_report(audit)
+            g1_tar = root / "g1.tar"
+            member = "g1/csv/contact.csv"
+            _write_g1_tar(g1_tar, member, self.runner.G1_CSV_COLUMNS)
+            qpos = _qpos_with_x_step(numpy, 0.0)
+            qpos[:, 2] = 0.50
+            soma_npy = root / "soma.npy"
+            numpy.save(soma_npy, qpos)
+            stage_csv = root / "stage.csv"
+            _write_stage_csv(stage_csv, g1_tar, member, soma_npy)
+            config = root / "baseline.json"
+            _write_corrected_contact_config(config, g1_tar, proof, audit, model_xml)
+            output_dir = root / "out"
+
+            rc = self.runner.main(
+                [
+                    "--config",
+                    str(config),
+                    "--stage-csv",
+                    str(stage_csv),
+                    "--output-dir",
+                    str(output_dir),
+                    "--mode",
+                    "metric",
+                    "--model-xml",
+                    str(model_xml),
+                ]
+            )
+
+            self.assertEqual(rc, 0)
+            gates = json.loads((output_dir / "run_start_gates.json").read_text(encoding="utf-8"))
+            self.assertEqual(gates["status"], "passed")
+            self.assertTrue(gates["checks"]["frame_consistency_report"])
+            self.assertTrue(gates["checks"]["contact_metric_body_floor_audit"])
+            self.assertEqual(
+                gates["contact_metric_body_floor_audit_gate"]["observed_model_collision_sphere_count"],
+                8,
+            )
+            metrics = json.loads((output_dir / "metrics" / "candidate_metrics.json").read_text(encoding="utf-8"))
+            self.assertEqual(metrics["contact_evaluator"]["height_definition"], "foot_collision_sphere_bottom_min_z")
+            self.assertEqual(metrics["contact_evaluator"]["collision_sphere_count"], 8)
+            row = metrics["rows"][0]
+            self.assertEqual(row["contact_evaluator_id"], "provisional_collision_sphere_p05_v1")
+            self.assertEqual(row["contact_height_definition"], "foot_collision_sphere_bottom_min_z")
+            self.assertAlmostEqual(row["contact_ground_height_m"], -0.03624434809693291, places=12)
+            self.assertEqual(row["contact_collision_sphere_count"], 8)
+            self.assertIn("legacy_contact_frame_ratio_ref", row)
+            self.assertIn("corrected_contact_frame_ratio_ref", row)
+            self.assertIn("contact_floor_provenance_json", row)
+
+    @unittest.skipUnless(importlib.util.find_spec("numpy"), "numpy is required for candidate runner smoke")
     def test_fk_rootrel_identity_and_known_rigid_root_transform_invariants(self):
         import numpy
 
@@ -429,6 +490,63 @@ def _write_lower_body_dof_map_config(path: Path, g1_tar: Path, pairing_csv: Path
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _write_corrected_contact_config(path: Path, g1_tar: Path, proof: Path, audit: Path, model_xml: Path) -> None:
+    payload = {
+        "candidate": {
+            "candidate_id": "baseline_b3ef2708_soma",
+            "route": "baseline",
+            "root_world": {"xy_scale_mode": "identity", "yaw_alignment": "none"},
+            "summarizer": {},
+            "dof_convention": {"sign_overrides": {}, "axis_swaps": {}},
+            "validation": {
+                "run_start_gates": {
+                    "frame_consistency_report": {
+                        "required": True,
+                        "expected_status": "passed",
+                        "path": str(proof),
+                    },
+                    "contact_metric_body_floor_audit": {
+                        "required": True,
+                        "path": str(audit),
+                        "model_xml": str(model_xml),
+                        "expected_definition": "foot_collision_sphere_bottom_min_z",
+                        "expected_floor_rule": "train_official_p05_height",
+                        "expected_ground_height_m": -0.03624434809693291,
+                        "expected_contact_threshold_m": 0.04,
+                        "expected_collision_sphere_count": 8,
+                        "expected_mesh_extent_blocker": True,
+                    },
+                }
+            },
+        },
+        "provenance": {
+            "inputs": {
+                "g1_tar": str(g1_tar),
+                "frame_consistency_report_json": str(proof),
+                "contact_metric_body_floor_audit_report_json": str(audit),
+            }
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _write_contact_metric_audit_report(path: Path) -> None:
+    payload = {
+        "status": "complete",
+        "selected_floor_convention": {
+            "definition": "foot_collision_sphere_bottom_min_z",
+            "floor_rule": "train_official_p05_height",
+            "ground_height_m": -0.03624434809693291,
+            "contact_threshold_m": 0.04,
+            "mesh_extent_blocker": True,
+        },
+        "mjcf_feature_inventory": {
+            "foot_collision_sphere_count": 8,
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def _write_passing_frame_consistency_report(path: Path) -> None:
     payload = {
         "status": "passed",
@@ -443,6 +561,27 @@ def _write_passing_frame_consistency_report(path: Path) -> None:
         },
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _minimal_contact_mjcf() -> str:
+    spheres = "\n".join(
+        f'        <geom size="0.005" pos="{x} {y} -0.03"/>'
+        for x, y in [("-0.05", "0.025"), ("-0.05", "-0.025"), ("0.12", "0.03"), ("0.12", "-0.03")]
+    )
+    return f"""<mujoco model="minimal_contact">
+  <worldbody>
+    <body name="pelvis" pos="0 0 0">
+      <joint name="floating_base" type="free"/>
+      <geom pos="0 0 0"/>
+      <body name="left_ankle_roll_link" pos="0.08 0.05 -0.50">
+{spheres}
+      </body>
+      <body name="right_ankle_roll_link" pos="-0.08 -0.05 -0.50">
+{spheres}
+      </body>
+    </body>
+  </worldbody>
+</mujoco>"""
 
 
 def _minimal_lower_body_mjcf() -> str:

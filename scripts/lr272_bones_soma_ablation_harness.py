@@ -46,6 +46,14 @@ DEFAULT_FRAME_CONSISTENCY_REPORT = (
     / "evaluator_frame_consistency_mixed10_20260608T182931Z"
     / "frame_consistency_report.json"
 )
+DEFAULT_CONTACT_METRIC_BODY_FLOOR_AUDIT_REPORT = (
+    DEFAULT_REPO_ROOT
+    / "outputs"
+    / "lr272_contact_metric_body_floor_audit_20260608T193304Z"
+    / "contact_metric_body_floor_audit_report.json"
+)
+CORRECTED_CONTACT_GROUND_HEIGHT_M = -0.03624434809693291
+CORRECTED_CONTACT_THRESHOLD_M = 0.04
 
 DEFAULT_WORST_KEYS = (
     "230413__dance_hiphop_camel_walk_360_R_fast_002__A317",
@@ -200,7 +208,27 @@ def build_candidates() -> list[Candidate]:
             root_world=root_identity,
             summarizer=summarizer_current,
             dof_convention=dof_identity,
-            validation={"compare_to": "official_g1_csv", "role": "control"},
+            validation={
+                "compare_to": "official_g1_csv",
+                "role": "control",
+                "run_start_gates": {
+                    "frame_consistency_report": {
+                        "required": True,
+                        "expected_status": "passed",
+                        "path": str(DEFAULT_FRAME_CONSISTENCY_REPORT),
+                    },
+                    "contact_metric_body_floor_audit": {
+                        "required": True,
+                        "path": str(DEFAULT_CONTACT_METRIC_BODY_FLOOR_AUDIT_REPORT),
+                        "expected_definition": "foot_collision_sphere_bottom_min_z",
+                        "expected_floor_rule": "train_official_p05_height",
+                        "expected_ground_height_m": CORRECTED_CONTACT_GROUND_HEIGHT_M,
+                        "expected_contact_threshold_m": CORRECTED_CONTACT_THRESHOLD_M,
+                        "expected_collision_sphere_count": 8,
+                        "expected_mesh_extent_blocker": True,
+                    },
+                },
+            },
             tags=("baseline", "soma"),
         ),
         Candidate(
@@ -900,6 +928,7 @@ def build_provenance(
             "soma_bvh_tar": str(soma_bvh_tar),
             "baseline_output_roots": [str(path) for path in DEFAULT_BASELINE_OUTPUT_ROOTS],
             "frame_consistency_report_json": str(DEFAULT_FRAME_CONSISTENCY_REPORT),
+            "contact_metric_body_floor_audit_report_json": str(DEFAULT_CONTACT_METRIC_BODY_FLOOR_AUDIT_REPORT),
         },
     }
 

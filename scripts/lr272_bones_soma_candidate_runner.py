@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tarfile
 from typing import Any, Mapping, Sequence
+import xml.etree.ElementTree as ET
 
 import numpy as np
 
@@ -104,6 +105,18 @@ DEFAULT_G1_MODEL_XMLS = (
     Path("/home/user/project/OnlineRetarget/gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml"),
 )
 DEFAULT_G1_USD = Path("/home/user/project/OnlineRetarget/runs/isaaclab_urdf_cache/g1_main/main.usd")
+DEFAULT_CONTACT_METRIC_BODY_FLOOR_AUDIT_REPORT = (
+    Path("/home/user/project/OnlineRetarget")
+    / "outputs"
+    / "lr272_contact_metric_body_floor_audit_20260608T193304Z"
+    / "contact_metric_body_floor_audit_report.json"
+)
+CORRECTED_CONTACT_EVALUATOR_ID = "provisional_collision_sphere_p05_v1"
+CORRECTED_CONTACT_HEIGHT_DEFINITION = "foot_collision_sphere_bottom_min_z"
+CORRECTED_CONTACT_FLOOR_RULE = "train_official_p05_height"
+CORRECTED_CONTACT_GROUND_HEIGHT_M = -0.03624434809693291
+CORRECTED_CONTACT_THRESHOLD_M = 0.04
+CORRECTED_CONTACT_EXPECTED_SPHERE_COUNT = 8
 ACCEPTANCE_THRESHOLDS = {
     "root_rel_rmse_m": 0.05,
     "root_rot_geodesic_rmse_rad": 0.15,
@@ -182,6 +195,15 @@ class Motion:
         )
 
 
+@dataclass(frozen=True)
+class FootCollisionSphere:
+    body_name: str
+    side: str
+    local_pos: np.ndarray
+    radius: float
+    attrs: Mapping[str, str]
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
@@ -203,7 +225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not rows:
         raise SystemExit(f"stage CSV has no rows: {args.stage_csv}")
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    run_start_gates = verify_run_start_gates(config, args.output_dir)
+    run_start_gates = verify_run_start_gates(config, args.output_dir, model_xml=args.model_xml)
     manifest: dict[str, Any] = {
         "config": str(args.config),
         "stage_csv": str(args.stage_csv),
@@ -234,19 +256,49 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def verify_run_start_gates(config: Mapping[str, Any], output_dir: Path) -> dict[str, Any]:
+def verify_run_start_gates(config: Mapping[str, Any], output_dir: Path, *, model_xml: Path | None = None) -> dict[str, Any]:
     candidate = config.get("candidate", {})
     validation = candidate.get("validation", {})
-    gate = validation.get("run_start_gates", {}).get("frame_consistency_report", {})
-    if not gate:
+    gates = validation.get("run_start_gates", {})
+    frame_gate = gates.get("frame_consistency_report", {})
+    if not frame_gate:
         gate = (
             candidate.get("dof_convention", {})
             .get("train_split_fk_signature_map", {})
             .get("frame_consistency_report", {})
         )
-    if not gate or not bool(gate.get("required", False)):
+        frame_gate = gate
+    contact_gate = gates.get("contact_metric_body_floor_audit", {})
+    if not frame_gate and not contact_gate:
         return {"status": "not_required"}
 
+    results: dict[str, Any] = {"status": "passed", "checks": {}}
+    if frame_gate and bool(frame_gate.get("required", False)):
+        frame_result = verify_frame_consistency_gate(config, frame_gate)
+        results["frame_consistency_report"] = frame_result.get("frame_consistency_report", "")
+        results["expected_status"] = frame_result.get("expected_status", "")
+        results["observed_status"] = frame_result.get("observed_status", "")
+        results["pass_checks"] = frame_result.get("pass_checks", {})
+        results["proof_output_dir"] = frame_result.get("proof_output_dir", "")
+        results["frame_consistency_gate"] = frame_result
+        results["checks"]["frame_consistency_report"] = frame_result.get("status") == "passed"
+        if frame_result.get("status") != "passed":
+            results["status"] = "blocked"
+            results["reason"] = frame_result.get("reason", "frame_consistency_report_failed")
+    if contact_gate and bool(contact_gate.get("required", False)):
+        contact_result = verify_contact_metric_body_floor_gate(config, contact_gate, model_xml=model_xml)
+        results["contact_metric_body_floor_audit_gate"] = contact_result
+        results["checks"]["contact_metric_body_floor_audit"] = contact_result.get("status") == "passed"
+        if contact_result.get("status") != "passed":
+            results["status"] = "blocked"
+            results["reason"] = contact_result.get("reason", "contact_metric_body_floor_audit_failed")
+    write_json(output_dir / "run_start_gates.json", results)
+    if results.get("status") != "passed":
+        raise SystemExit(f"run_start_gate_failed:{results.get('reason', 'unknown')}")
+    return results
+
+
+def verify_frame_consistency_gate(config: Mapping[str, Any], gate: Mapping[str, Any]) -> dict[str, Any]:
     proof_path = str(gate.get("path") or config.get("provenance", {}).get("inputs", {}).get("frame_consistency_report_json", ""))
     report_path = Path(proof_path) if proof_path else Path()
     if proof_path and not report_path.is_absolute():
@@ -280,9 +332,88 @@ def verify_run_start_gates(config: Mapping[str, Any], output_dir: Path) -> dict[
             if proof.get("status") == expected_status and all(bool(value) for value in pass_checks.values()):
                 result["status"] = "passed"
                 result["reason"] = ""
-    write_json(output_dir / "run_start_gates.json", result)
-    if result.get("status") != "passed":
-        raise SystemExit(f"run_start_gate_failed:{result.get('reason', 'unknown')}")
+    return result
+
+
+def verify_contact_metric_body_floor_gate(
+    config: Mapping[str, Any],
+    gate: Mapping[str, Any],
+    *,
+    model_xml: Path | None,
+) -> dict[str, Any]:
+    expected_definition = str(gate.get("expected_definition", CORRECTED_CONTACT_HEIGHT_DEFINITION))
+    expected_floor_rule = str(gate.get("expected_floor_rule", CORRECTED_CONTACT_FLOOR_RULE))
+    expected_ground = float(gate.get("expected_ground_height_m", CORRECTED_CONTACT_GROUND_HEIGHT_M))
+    expected_threshold = float(gate.get("expected_contact_threshold_m", CORRECTED_CONTACT_THRESHOLD_M))
+    expected_spheres = int(gate.get("expected_collision_sphere_count", CORRECTED_CONTACT_EXPECTED_SPHERE_COUNT))
+    expected_mesh_blocker = bool(gate.get("expected_mesh_extent_blocker", True))
+    audit_path = contact_audit_report_path(config, gate)
+    result: dict[str, Any] = {
+        "status": "blocked",
+        "required": True,
+        "audit_report": str(audit_path),
+        "expected_definition": expected_definition,
+        "expected_floor_rule": expected_floor_rule,
+        "expected_ground_height_m": expected_ground,
+        "expected_contact_threshold_m": expected_threshold,
+        "expected_collision_sphere_count": expected_spheres,
+        "expected_mesh_extent_blocker": expected_mesh_blocker,
+        "checks": {},
+    }
+    if not audit_path.exists():
+        result["reason"] = "contact_metric_body_floor_audit_report_missing"
+        return result
+    try:
+        audit = read_json(audit_path)
+    except Exception as exc:  # noqa: BLE001
+        result["reason"] = "contact_metric_body_floor_audit_report_unreadable"
+        result["error"] = repr(exc)
+        return result
+    selected = audit.get("selected_floor_convention", {})
+    inventory = audit.get("mjcf_feature_inventory", {})
+    observed_definition = selected.get("definition", "")
+    observed_floor_rule = selected.get("floor_rule", "")
+    observed_ground = float(selected.get("ground_height_m", float("nan")))
+    observed_threshold = float(selected.get("contact_threshold_m", expected_threshold))
+    observed_mesh_blocker = bool(selected.get("mesh_extent_blocker", False))
+    observed_spheres = int(inventory.get("foot_collision_sphere_count", 0))
+    selected_model = model_xml
+    if selected_model is None:
+        model_value = str(gate.get("model_xml", "")).strip()
+        selected_model = Path(model_value) if model_value else None
+    if selected_model is None:
+        selected_model = first_existing_path(DEFAULT_G1_MODEL_XMLS)
+    model_spheres = load_foot_collision_spheres(selected_model, DEFAULT_FOOT_BODIES) if selected_model and selected_model.exists() else []
+    result.update(
+        {
+            "observed_definition": observed_definition,
+            "observed_floor_rule": observed_floor_rule,
+            "observed_ground_height_m": observed_ground,
+            "observed_contact_threshold_m": observed_threshold,
+            "observed_collision_sphere_count": observed_spheres,
+            "observed_model_collision_sphere_count": len(model_spheres),
+            "observed_mesh_extent_blocker": observed_mesh_blocker,
+            "mesh_extent_blocker_status": "git_lfs_pointer_no_mesh_vertices" if observed_mesh_blocker else "not_blocked",
+            "audit_status": audit.get("status", ""),
+        }
+    )
+    checks = {
+        "audit_status_complete": audit.get("status") == "complete",
+        "definition_match": observed_definition == expected_definition,
+        "floor_rule_match": observed_floor_rule == expected_floor_rule,
+        "ground_height_match": abs(observed_ground - expected_ground) <= 1e-12,
+        "contact_threshold_match": abs(observed_threshold - expected_threshold) <= 1e-12,
+        "audit_collision_sphere_count_match": observed_spheres == expected_spheres,
+        "model_collision_sphere_count_match": len(model_spheres) == expected_spheres,
+        "mesh_extent_blocker_match": observed_mesh_blocker is expected_mesh_blocker,
+    }
+    result["checks"] = checks
+    if all(checks.values()):
+        result["status"] = "passed"
+        result["reason"] = ""
+    else:
+        failed = [name for name, ok in checks.items() if not ok]
+        result["reason"] = "contact_metric_body_floor_audit_gate_failed:" + ",".join(failed)
     return result
 
 
@@ -355,7 +486,7 @@ def run_metric(
             n = min(n, max_frames)
         official = official.slice(n)
         candidate_motion = candidate_motion.slice(n)
-        full_metrics = full_evaluator_metrics(candidate_motion, official, evaluator)
+        full_metrics = full_evaluator_metrics(candidate_motion, official, evaluator, config=config)
         rec = {
             "key": key,
             "candidate_id": config["candidate"]["candidate_id"],
@@ -377,10 +508,12 @@ def run_metric(
         "summary": summary,
         "acceptance_thresholds": ACCEPTANCE_THRESHOLDS,
         "full_evaluator": public_evaluator_report(evaluator),
+        "contact_evaluator": public_corrected_contact_context(corrected_contact_context(config, evaluator)) if evaluator.get("status") == "ok" else {},
         "metric_notes": [
             "Eval rows are tagged with their pairing split; train-split calibration candidates must not fit eval rows.",
             "Angles are compared in radians after CSV degrees-to-radians conversion.",
-            "FK/contact fields are computed from the configured G1 MJCF when available; otherwise full_evaluator_blocker.json explains the missing dependency.",
+            "FK fields are computed from the configured G1 MJCF when available; otherwise full_evaluator_blocker.json explains the missing dependency.",
+            "Primary contact fields use the provisional collision-sphere/p05 floor evaluator; legacy_* contact fields preserve the old ankle-point/ground-zero evaluator for before/after comparison.",
         ],
     }
     write_json(metric_dir / "candidate_metrics.json", payload)
@@ -1157,7 +1290,13 @@ def single_axis_signature_report(model: Any, groups: Sequence[str], delta_rad: f
     return report
 
 
-def full_evaluator_metrics(pred: Motion, ref: Motion, evaluator: Mapping[str, Any]) -> dict[str, Any]:
+def full_evaluator_metrics(
+    pred: Motion,
+    ref: Motion,
+    evaluator: Mapping[str, Any],
+    *,
+    config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     if evaluator.get("status") != "ok":
         return {
             "full_evaluator_status": "blocked",
@@ -1165,7 +1304,7 @@ def full_evaluator_metrics(pred: Motion, ref: Motion, evaluator: Mapping[str, An
             "metric_threshold_pass": False,
         }
     model = evaluator["model"]
-    config = evaluator["config"]
+    quality_config = evaluator["config"]
     n = min(pred.frame_count, ref.frame_count)
     pred_parsed = motion_to_parsed_frames(pred.slice(n))
     ref_parsed = motion_to_parsed_frames(ref.slice(n))
@@ -1185,11 +1324,33 @@ def full_evaluator_metrics(pred: Motion, ref: Motion, evaluator: Mapping[str, An
         pred.root_euler[:n],
         ref.root_euler[:n],
     )
-    pred_contact = g1_quality_module._contact_stats(pred_parsed, model, config, pred.fps)  # type: ignore[union-attr]
-    ref_contact = g1_quality_module._contact_stats(ref_parsed, model, config, ref.fps)  # type: ignore[union-attr]
-    pred_lr = foot_lr_contact_asymmetry(pred_fk, model, config)
-    ref_lr = foot_lr_contact_asymmetry(ref_fk, model, config)
+    legacy_pred_contact = g1_quality_module._contact_stats(pred_parsed, model, quality_config, pred.fps)  # type: ignore[union-attr]
+    legacy_ref_contact = g1_quality_module._contact_stats(ref_parsed, model, quality_config, ref.fps)  # type: ignore[union-attr]
+    legacy_pred_lr = foot_lr_contact_asymmetry(pred_fk, model, quality_config)
+    legacy_ref_lr = foot_lr_contact_asymmetry(ref_fk, model, quality_config)
+    corrected_context = corrected_contact_context(config or {}, evaluator)
+    if corrected_context.get("status") == "ok":
+        pred_contact = corrected_contact_stats(pred.slice(n), model, corrected_context, pred.fps)
+        ref_contact = corrected_contact_stats(ref.slice(n), model, corrected_context, ref.fps)
+        pred_lr = corrected_contact_lr_asymmetry(pred_contact)
+        ref_lr = corrected_contact_lr_asymmetry(ref_contact)
+    else:
+        pred_contact = legacy_pred_contact
+        ref_contact = legacy_ref_contact
+        pred_lr = legacy_pred_lr
+        ref_lr = legacy_ref_lr
     contact_metrics = {
+        "contact_evaluator_id": str(corrected_context.get("evaluator_id", "legacy_ankle_body_points_ground0")),
+        "contact_evaluator_status": str(corrected_context.get("status", "")),
+        "contact_height_definition": str(corrected_context.get("height_definition", "legacy_ankle_body_points_min_z")),
+        "contact_ground_height_m": float(corrected_context.get("ground_height_m", quality_config.ground_height)),
+        "contact_threshold_m": float(corrected_context.get("contact_threshold_m", quality_config.contact_height_threshold)),
+        "contact_floor_rule": str(corrected_context.get("floor_rule", "ground_zero")),
+        "contact_floor_provenance_json": json.dumps(corrected_context.get("floor_provenance", {}), sort_keys=True),
+        "contact_mesh_extent_blocker": bool(corrected_context.get("mesh_extent_blocker", False)),
+        "contact_mesh_extent_status": str(corrected_context.get("mesh_extent_status", "")),
+        "contact_collision_sphere_count": int(corrected_context.get("collision_sphere_count", 0)),
+        "contact_audit_report_json": str(corrected_context.get("audit_report", "")),
         "contact_frame_ratio_pred": float(pred_contact.get("contact_frame_ratio", 0.0)),
         "contact_frame_ratio_ref": float(ref_contact.get("contact_frame_ratio", 0.0)),
         "contact_frame_ratio_delta": abs(float(pred_contact.get("contact_frame_ratio", 0.0)) - float(ref_contact.get("contact_frame_ratio", 0.0))),
@@ -1198,11 +1359,37 @@ def full_evaluator_metrics(pred: Motion, ref: Motion, evaluator: Mapping[str, An
         "contact_slide_delta_mps": abs(float(pred_contact.get("max_contact_slide_speed", 0.0)) - float(ref_contact.get("max_contact_slide_speed", 0.0))),
         "foot_penetration_depth_pred_m": float(pred_contact.get("penetration_depth", 0.0)),
         "foot_penetration_depth_ref_m": float(ref_contact.get("penetration_depth", 0.0)),
+        "foot_p95_penetration_pred_m": float(pred_contact.get("p95_penetration", 0.0)),
+        "foot_p95_penetration_ref_m": float(ref_contact.get("p95_penetration", 0.0)),
+        "foot_below_floor_ratio_pred": float(pred_contact.get("below_floor_ratio", 0.0)),
+        "foot_below_floor_ratio_ref": float(ref_contact.get("below_floor_ratio", 0.0)),
         "mean_foot_clearance_pred_m": float(pred_contact.get("mean_foot_clearance", 0.0)),
         "mean_foot_clearance_ref_m": float(ref_contact.get("mean_foot_clearance", 0.0)),
         "contact_lr_asymmetry_pred": float(pred_lr.get("lr_contact_ratio_asymmetry", 0.0)),
         "contact_lr_asymmetry_ref": float(ref_lr.get("lr_contact_ratio_asymmetry", 0.0)),
         "contact_lr_asymmetry_delta": abs(float(pred_lr.get("lr_contact_ratio_asymmetry", 0.0)) - float(ref_lr.get("lr_contact_ratio_asymmetry", 0.0))),
+        "corrected_contact_frame_ratio_pred": float(pred_contact.get("contact_frame_ratio", 0.0)),
+        "corrected_contact_frame_ratio_ref": float(ref_contact.get("contact_frame_ratio", 0.0)),
+        "corrected_contact_slide_mps_pred": float(pred_contact.get("max_contact_slide_speed", 0.0)),
+        "corrected_contact_slide_mps_ref": float(ref_contact.get("max_contact_slide_speed", 0.0)),
+        "corrected_foot_penetration_depth_pred_m": float(pred_contact.get("penetration_depth", 0.0)),
+        "corrected_foot_penetration_depth_ref_m": float(ref_contact.get("penetration_depth", 0.0)),
+        "corrected_foot_p95_penetration_pred_m": float(pred_contact.get("p95_penetration", 0.0)),
+        "corrected_foot_p95_penetration_ref_m": float(ref_contact.get("p95_penetration", 0.0)),
+        "corrected_mean_foot_clearance_pred_m": float(pred_contact.get("mean_foot_clearance", 0.0)),
+        "corrected_mean_foot_clearance_ref_m": float(ref_contact.get("mean_foot_clearance", 0.0)),
+        "legacy_contact_frame_ratio_pred": float(legacy_pred_contact.get("contact_frame_ratio", 0.0)),
+        "legacy_contact_frame_ratio_ref": float(legacy_ref_contact.get("contact_frame_ratio", 0.0)),
+        "legacy_contact_frame_ratio_delta": abs(float(legacy_pred_contact.get("contact_frame_ratio", 0.0)) - float(legacy_ref_contact.get("contact_frame_ratio", 0.0))),
+        "legacy_contact_slide_mps_pred": float(legacy_pred_contact.get("max_contact_slide_speed", 0.0)),
+        "legacy_contact_slide_mps_ref": float(legacy_ref_contact.get("max_contact_slide_speed", 0.0)),
+        "legacy_contact_slide_delta_mps": abs(float(legacy_pred_contact.get("max_contact_slide_speed", 0.0)) - float(legacy_ref_contact.get("max_contact_slide_speed", 0.0))),
+        "legacy_foot_penetration_depth_pred_m": float(legacy_pred_contact.get("penetration_depth", 0.0)),
+        "legacy_foot_penetration_depth_ref_m": float(legacy_ref_contact.get("penetration_depth", 0.0)),
+        "legacy_mean_foot_clearance_pred_m": float(legacy_pred_contact.get("mean_foot_clearance", 0.0)),
+        "legacy_mean_foot_clearance_ref_m": float(legacy_ref_contact.get("mean_foot_clearance", 0.0)),
+        "legacy_contact_lr_asymmetry_pred": float(legacy_pred_lr.get("lr_contact_ratio_asymmetry", 0.0)),
+        "legacy_contact_lr_asymmetry_ref": float(legacy_ref_lr.get("lr_contact_ratio_asymmetry", 0.0)),
     }
     metrics = {
         "full_evaluator_status": "ok",
@@ -1213,6 +1400,9 @@ def full_evaluator_metrics(pred: Motion, ref: Motion, evaluator: Mapping[str, An
         "contact_pred_json": json.dumps(round_float_mapping(pred_contact), sort_keys=True),
         "contact_ref_json": json.dumps(round_float_mapping(ref_contact), sort_keys=True),
         "contact_lr_json": json.dumps({"pred": pred_lr, "ref": ref_lr}, sort_keys=True),
+        "legacy_contact_pred_json": json.dumps(round_float_mapping(legacy_pred_contact), sort_keys=True),
+        "legacy_contact_ref_json": json.dumps(round_float_mapping(legacy_ref_contact), sort_keys=True),
+        "legacy_contact_lr_json": json.dumps({"pred": legacy_pred_lr, "ref": legacy_ref_lr}, sort_keys=True),
     }
     return metrics
 
@@ -1250,6 +1440,216 @@ def load_full_evaluator(model_xml: Path | None = None) -> dict[str, Any]:
         "body_count": len(model.bodies),
         "foot_bodies": list(model.foot_body_names),
     }
+
+
+def corrected_contact_context(config: Mapping[str, Any], evaluator: Mapping[str, Any]) -> dict[str, Any]:
+    if evaluator.get("status") != "ok":
+        return {"status": "blocked", "reason": "full_evaluator_unavailable"}
+    model = evaluator["model"]
+    model_xml = Path(str(evaluator["model_xml"]))
+    audit_path = contact_audit_report_path(config, {})
+    audit: dict[str, Any] = {}
+    if audit_path.exists():
+        try:
+            audit = read_json(audit_path)
+        except Exception:  # noqa: BLE001
+            audit = {}
+    selected = audit.get("selected_floor_convention", {})
+    inventory = audit.get("mjcf_feature_inventory", {})
+    spheres = load_foot_collision_spheres(model_xml, model.foot_body_names)
+    ground_height = float(selected.get("ground_height_m", CORRECTED_CONTACT_GROUND_HEIGHT_M))
+    contact_threshold = float(selected.get("contact_threshold_m", CORRECTED_CONTACT_THRESHOLD_M))
+    definition = str(selected.get("definition", CORRECTED_CONTACT_HEIGHT_DEFINITION))
+    floor_rule = str(selected.get("floor_rule", CORRECTED_CONTACT_FLOOR_RULE))
+    mesh_extent_blocker = bool(selected.get("mesh_extent_blocker", True))
+    status = "ok"
+    reason = ""
+    if definition != CORRECTED_CONTACT_HEIGHT_DEFINITION:
+        status = "blocked"
+        reason = "contact_height_definition_mismatch"
+    elif len(spheres) != CORRECTED_CONTACT_EXPECTED_SPHERE_COUNT:
+        status = "blocked"
+        reason = "collision_sphere_count_mismatch"
+    return {
+        "status": status,
+        "reason": reason,
+        "evaluator_id": CORRECTED_CONTACT_EVALUATOR_ID,
+        "height_definition": CORRECTED_CONTACT_HEIGHT_DEFINITION,
+        "floor_rule": floor_rule,
+        "ground_height_m": ground_height,
+        "contact_threshold_m": contact_threshold,
+        "audit_report": str(audit_path),
+        "floor_provenance": {
+            "source": "E_contact_metric_body_floor_audit",
+            "audit_report": str(audit_path),
+            "audit_status": audit.get("status", ""),
+            "selected_floor_convention": selected,
+        },
+        "mesh_extent_blocker": mesh_extent_blocker,
+        "mesh_extent_status": "git_lfs_pointer_no_mesh_vertices" if mesh_extent_blocker else "not_blocked",
+        "collision_sphere_count": len(spheres),
+        "audit_collision_sphere_count": int(inventory.get("foot_collision_sphere_count", 0) or 0),
+        "spheres": spheres,
+    }
+
+
+def contact_audit_report_path(config: Mapping[str, Any], gate: Mapping[str, Any]) -> Path:
+    value = (
+        str(gate.get("path", "")).strip()
+        or str(config.get("provenance", {}).get("inputs", {}).get("contact_metric_body_floor_audit_report_json", "")).strip()
+        or str(DEFAULT_CONTACT_METRIC_BODY_FLOOR_AUDIT_REPORT)
+    )
+    path = Path(value)
+    return path if path.is_absolute() else REPO_ROOT / path
+
+
+def corrected_contact_stats(motion: Motion, model: Any, context: Mapping[str, Any], fps: float) -> dict[str, Any]:
+    spheres = list(context.get("spheres", ()))
+    ground_height = float(context.get("ground_height_m", CORRECTED_CONTACT_GROUND_HEIGHT_M))
+    threshold = float(context.get("contact_threshold_m", CORRECTED_CONTACT_THRESHOLD_M))
+    frame_min_heights: list[float] = []
+    left_heights: list[float] = []
+    right_heights: list[float] = []
+    left_xy: list[tuple[float, float]] = []
+    right_xy: list[tuple[float, float]] = []
+    for frame_idx in range(motion.frame_count):
+        transforms = g1_body_transforms(model, motion, frame_idx)
+        side_features: dict[str, list[tuple[float, tuple[float, float]]]] = {"left": [], "right": []}
+        for sphere in spheres:
+            if sphere.body_name not in transforms:
+                continue
+            rot, body_pos = transforms[sphere.body_name]
+            center = body_pos + rot @ sphere.local_pos
+            bottom_z = float(center[2] - sphere.radius)
+            side_features.setdefault(sphere.side, []).append((bottom_z, (float(center[0]), float(center[1]))))
+        lows = [item for values in side_features.values() for item in values]
+        frame_min_heights.append(min((item[0] for item in lows), default=float("nan")))
+        for side, heights, xys in (("left", left_heights, left_xy), ("right", right_heights, right_xy)):
+            values = side_features.get(side, [])
+            if values:
+                z, xy = min(values, key=lambda item: item[0])
+                heights.append(z)
+                xys.append(xy)
+            else:
+                heights.append(float("nan"))
+                xys.append((float("nan"), float("nan")))
+
+    clearances = finite_array([height - ground_height for height in frame_min_heights])
+    penetration = np.maximum(0.0, -clearances)
+    contact_flags = clearances <= threshold
+    slide_speeds = corrected_contact_slide_speeds(
+        left_heights,
+        right_heights,
+        left_xy,
+        right_xy,
+        ground_height=ground_height,
+        threshold=threshold,
+        fps=fps,
+    )
+    left_clearances = finite_array([height - ground_height for height in left_heights])
+    right_clearances = finite_array([height - ground_height for height in right_heights])
+    return {
+        "definition": CORRECTED_CONTACT_HEIGHT_DEFINITION,
+        "ground_height": ground_height,
+        "contact_height_threshold": threshold,
+        "min_foot_height": finite_stat_min(frame_min_heights),
+        "mean_foot_clearance": finite_stat_mean(clearances.tolist()),
+        "max_foot_clearance": finite_stat_max(clearances.tolist()),
+        "below_floor_ratio": float(np.mean(clearances < 0.0)) if clearances.size else 0.0,
+        "p95_penetration": float(np.percentile(penetration, 95)) if penetration.size else 0.0,
+        "penetration_depth": finite_stat_max(penetration.tolist()),
+        "contact_frame_ratio": float(np.mean(contact_flags)) if contact_flags.size else 0.0,
+        "max_contact_slide_speed": finite_stat_max(slide_speeds.tolist()),
+        "contact_slide_rate": float(np.mean(slide_speeds > 0.50)) if slide_speeds.size else 0.0,
+        "left_contact_ratio": float(np.mean(left_clearances <= threshold)) if left_clearances.size else 0.0,
+        "right_contact_ratio": float(np.mean(right_clearances <= threshold)) if right_clearances.size else 0.0,
+        "lr_contact_ratio_asymmetry": abs(
+            (float(np.mean(left_clearances <= threshold)) if left_clearances.size else 0.0)
+            - (float(np.mean(right_clearances <= threshold)) if right_clearances.size else 0.0)
+        ),
+        "collision_sphere_count": len(spheres),
+        "mesh_extent_blocker": bool(context.get("mesh_extent_blocker", False)),
+    }
+
+
+def corrected_contact_lr_asymmetry(stats: Mapping[str, Any]) -> dict[str, float]:
+    return {
+        "left_contact_ratio": float(stats.get("left_contact_ratio", 0.0)),
+        "right_contact_ratio": float(stats.get("right_contact_ratio", 0.0)),
+        "lr_contact_ratio_asymmetry": float(stats.get("lr_contact_ratio_asymmetry", 0.0)),
+    }
+
+
+def public_corrected_contact_context(context: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in context.items()
+        if key != "spheres"
+    } | {"collision_sphere_count": int(context.get("collision_sphere_count", 0))}
+
+
+def corrected_contact_slide_speeds(
+    left_heights: Sequence[float],
+    right_heights: Sequence[float],
+    left_xy: Sequence[tuple[float, float]],
+    right_xy: Sequence[tuple[float, float]],
+    *,
+    ground_height: float,
+    threshold: float,
+    fps: float,
+) -> np.ndarray:
+    speeds: list[float] = []
+    for heights, xys in ((left_heights, left_xy), (right_heights, right_xy)):
+        for idx in range(1, len(heights)):
+            prev_z = float(heights[idx - 1])
+            cur_z = float(heights[idx])
+            if not (math.isfinite(prev_z) and math.isfinite(cur_z)):
+                continue
+            if prev_z - ground_height > threshold or cur_z - ground_height > threshold:
+                continue
+            prev_xy = np.asarray(xys[idx - 1], dtype=np.float64)
+            cur_xy = np.asarray(xys[idx], dtype=np.float64)
+            if np.all(np.isfinite(prev_xy)) and np.all(np.isfinite(cur_xy)):
+                speeds.append(float(np.linalg.norm(cur_xy - prev_xy) * fps))
+    return np.asarray(speeds, dtype=np.float64)
+
+
+def load_foot_collision_spheres(model_xml: Path, foot_body_names: Sequence[str]) -> list[FootCollisionSphere]:
+    if not model_xml or not model_xml.exists():
+        return []
+    root = ET.parse(model_xml).getroot()
+    worldbody = root.find("worldbody")
+    if worldbody is None:
+        return []
+    wanted = set(foot_body_names)
+    spheres: list[FootCollisionSphere] = []
+
+    def visit(element: ET.Element) -> None:
+        if element.tag != "body":
+            return
+        body_name = element.attrib.get("name", "")
+        if body_name in wanted:
+            for geom in element.findall("geom"):
+                geom_type = geom.attrib.get("type", "sphere")
+                size = parse_float_tuple(geom.attrib.get("size", ""))
+                if geom_type == "sphere" and size and not is_visual_geom(geom.attrib):
+                    spheres.append(
+                        FootCollisionSphere(
+                            body_name=body_name,
+                            side=side_from_name(body_name),
+                            local_pos=np.asarray(parse_vec3(geom.attrib.get("pos", "0 0 0")), dtype=np.float64),
+                            radius=float(size[0]),
+                            attrs=dict(geom.attrib),
+                        )
+                    )
+        for child in element:
+            if child.tag == "body":
+                visit(child)
+
+    for child in worldbody:
+        if child.tag == "body":
+            visit(child)
+    return spheres
 
 
 def motion_metrics(pred: Motion, ref: Motion) -> dict[str, float | int | str]:
@@ -1418,8 +1818,18 @@ def public_evaluator_report(evaluator: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def finite_array(values: Sequence[float] | np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    return arr[np.isfinite(arr)]
+
+
 def finite_stat_mean(values: Sequence[float]) -> float:
     return float(np.mean(values)) if values else 0.0
+
+
+def finite_stat_min(values: Sequence[float]) -> float:
+    finite = [float(value) for value in values if math.isfinite(float(value))]
+    return float(np.min(finite)) if finite else 0.0
 
 
 def finite_stat_percentile(values: Sequence[float], percentile: float) -> float:
@@ -1781,6 +2191,69 @@ def rotation_geodesic_errors(pred_euler: np.ndarray, ref_euler: np.ndarray) -> n
     return np.asarray(errors, dtype=np.float64)
 
 
+def g1_body_transforms(model: Any, motion: Motion, frame_idx: int) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    joint_values = {
+        column[:-4] if column.endswith("_dof") else column: float(value)
+        for column, value in zip(G1_JOINT_COLUMNS, motion.dof[frame_idx])
+    }
+    transforms_list: list[tuple[np.ndarray, np.ndarray]] = []
+    transforms: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for body in model.bodies:
+        local_rotation = quat_wxyz_to_matrix(body.quat)
+        local_position = np.asarray(body.pos, dtype=np.float64)
+        if body.has_freejoint:
+            local_rotation = euler_xyz_to_matrix(motion.root_euler[frame_idx])
+            local_position = np.asarray(motion.root_pos[frame_idx], dtype=np.float64)
+        if body.joint_name and body.joint_axis is not None:
+            local_rotation = local_rotation @ axis_angle_matrix(
+                np.asarray(body.joint_axis, dtype=np.float64),
+                joint_values.get(body.joint_name, 0.0),
+            )
+        if body.parent is None:
+            world_rotation = local_rotation
+            world_position = local_position
+        else:
+            parent_rotation, parent_position = transforms_list[body.parent]
+            world_rotation = parent_rotation @ local_rotation
+            world_position = parent_position + parent_rotation @ local_position
+        transforms_list.append((world_rotation, world_position))
+        transforms[body.name] = (world_rotation, world_position)
+    return transforms
+
+
+def quat_wxyz_to_matrix(quat: Sequence[float]) -> np.ndarray:
+    w, x, y, z = [float(value) for value in quat[:4]]
+    norm = math.sqrt(w * w + x * x + y * y + z * z)
+    if norm == 0.0:
+        return np.eye(3, dtype=np.float64)
+    w, x, y, z = w / norm, x / norm, y / norm, z / norm
+    return np.asarray(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def axis_angle_matrix(axis: np.ndarray, angle: float) -> np.ndarray:
+    norm = float(np.linalg.norm(axis))
+    if norm == 0.0:
+        return np.eye(3, dtype=np.float64)
+    x, y, z = axis / norm
+    c, s = math.cos(angle), math.sin(angle)
+    t = 1.0 - c
+    return np.asarray(
+        [
+            [t * x * x + c, t * x * y - s * z, t * x * z + s * y],
+            [t * x * y + s * z, t * y * y + c, t * y * z - s * x],
+            [t * x * z - s * y, t * y * z + s * x, t * z * z + c],
+        ],
+        dtype=np.float64,
+    )
+
+
 def euler_xyz_to_matrix(euler_xyz: Sequence[float]) -> np.ndarray:
     rx, ry, rz = [float(value) for value in euler_xyz[:3]]
     cx, sx = math.cos(rx), math.sin(rx)
@@ -1790,6 +2263,35 @@ def euler_xyz_to_matrix(euler_xyz: Sequence[float]) -> np.ndarray:
     mat_y = np.asarray([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
     mat_z = np.asarray([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
     return mat_x @ mat_y @ mat_z
+
+
+def parse_vec3(value: str) -> tuple[float, float, float]:
+    parsed = parse_float_tuple(value)
+    padded = (*parsed, 0.0, 0.0, 0.0)
+    return (padded[0], padded[1], padded[2])
+
+
+def parse_float_tuple(value: str) -> tuple[float, ...]:
+    return tuple(float(part) for part in value.split()) if value else ()
+
+
+def is_visual_geom(attrs: Mapping[str, str]) -> bool:
+    return (
+        attrs.get("contype") == "0"
+        and attrs.get("conaffinity") == "0"
+    ) or (
+        attrs.get("group") == "1"
+        and attrs.get("density") == "0"
+    )
+
+
+def side_from_name(*values: str) -> str:
+    text = " ".join(values).lower()
+    if "left" in text:
+        return "left"
+    if "right" in text:
+        return "right"
+    return "center"
 
 
 def velocity_heading_delta(pred_pos: np.ndarray, ref_pos: np.ndarray) -> float:

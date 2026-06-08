@@ -168,12 +168,22 @@ class Lr272BonesSomaAblationHarnessTests(unittest.TestCase):
                 for row in rows
                 if row["candidate_id"] == "baseline_b3ef2708_soma" and row["stage"] == "smoke1"
             )
+            baseline_config = json.loads(
+                (output_dir / "configs" / "baseline_b3ef2708_soma.json").read_text(encoding="utf-8")
+            )
             self.assertIn("lr272_bones_soma_candidate_runner.py", baseline_smoke["retarget_command"])
             self.assertIn("--mode retarget", baseline_smoke["retarget_command"])
             self.assertIn("--mode metric", baseline_smoke["metric_command"])
             self.assertIn("--mode visual", baseline_smoke["visual_command"])
             self.assertIn("--render-isaac", baseline_smoke["visual_command"])
             self.assertIn("/opt/run/python", baseline_smoke["retarget_command"])
+            gates = baseline_config["candidate"]["validation"]["run_start_gates"]
+            self.assertTrue(gates["frame_consistency_report"]["required"])
+            self.assertTrue(gates["contact_metric_body_floor_audit"]["required"])
+            self.assertEqual(
+                gates["contact_metric_body_floor_audit"]["expected_definition"],
+                "foot_collision_sphere_bottom_min_z",
+            )
 
     def test_print_run_resolves_stage_from_candidate_config(self):
         with tempfile.TemporaryDirectory() as tmp:
