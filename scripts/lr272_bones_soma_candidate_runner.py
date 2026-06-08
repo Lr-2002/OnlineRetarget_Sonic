@@ -1116,8 +1116,6 @@ def build_isaac_render_command(
         "--target-fps",
         str(float(row.get("source_bvh_fps") or 120.0048)),
         "--preserve-world-root",
-        "--overlay-world-root-axes",
-        "--overlay-semantic-lr",
         "--draw-orientation-labels",
         "--fast-exit-after-report",
     ]
