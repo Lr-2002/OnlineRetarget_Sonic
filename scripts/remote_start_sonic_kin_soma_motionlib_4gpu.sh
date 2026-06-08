@@ -53,7 +53,49 @@ for key in ("robot_motion_dir", "soma_motion_dir"):
         raise SystemExit(f"{key} is missing: {path}")
 PY
 
-if "${PYTHON_BIN}" -c 'import sys; text=open(sys.argv[1], encoding="utf-8").read(); bad=("train_agent_trl.py","KinematicActionUniversalTokenModule","sonic_hydra","num_envs","reward","episode_length"); sys.exit(1 if any(item in text for item in bad) else 0)' "${CONFIG}"; then
+if "${PYTHON_BIN}" - "${CONFIG}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+bad_tokens = (
+    "train_agent_trl.py",
+    "KinematicActionUniversalTokenModule",
+    "sonic_hydra",
+    "num_envs",
+    "reward",
+    "episode_length",
+)
+descriptive_string_fields = {"purpose"}
+
+
+def iter_forbidden_matches(value, path=()):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_text = str(key)
+            child_path = (*path, key_text)
+            for token in bad_tokens:
+                if token in key_text:
+                    yield ".".join(child_path), token, "key"
+            yield from iter_forbidden_matches(child, child_path)
+    elif isinstance(value, list):
+        for idx, child in enumerate(value):
+            yield from iter_forbidden_matches(child, (*path, str(idx)))
+    elif isinstance(value, str) and (not path or path[-1] not in descriptive_string_fields):
+        for token in bad_tokens:
+            if token in value:
+                yield ".".join(path), token, "value"
+
+
+matches = list(iter_forbidden_matches(config))
+if matches:
+    location, token, kind = matches[0]
+    raise SystemExit(
+        f"CONFIG contains forbidden strict-supervised token {token!r} in {kind} at {location}"
+    )
+PY
+then
   :
 else
   echo "CONFIG contains PPO/Isaac/reward/episode-length tokens and is not a strict supervised config: ${CONFIG}" >&2

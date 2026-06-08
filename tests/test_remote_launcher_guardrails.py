@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import shlex
+import subprocess
+import sys
+import tempfile
 import unittest
 
 
@@ -301,6 +306,68 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.launcher_text = SUPERVISED_DDP_LAUNCHER.read_text(encoding="utf-8")
 
+    def _run_supervised_launcher_until_cuda_smoke(
+        self, config: dict[str, object], temp_root: Path
+    ) -> subprocess.CompletedProcess[str]:
+        (temp_root / "configs").mkdir()
+        robot_motion_dir = temp_root / "robot_motion"
+        soma_motion_dir = temp_root / "soma_motion"
+        robot_motion_dir.mkdir()
+        soma_motion_dir.mkdir()
+        config["input_data"] = {
+            "robot_motion_dir": str(robot_motion_dir),
+            "soma_motion_dir": str(soma_motion_dir),
+        }
+        config_path = temp_root / "configs" / "guardrail_config.json"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+
+        fake_python = temp_root / "python.sh"
+        python_bin = shlex.quote(sys.executable)
+        fake_python.write_text(
+            "\n".join(
+                (
+                    "#!/usr/bin/env bash",
+                    "set -uo pipefail",
+                    'if [[ "${1:-}" == "-" ]]; then',
+                    '  payload="$(mktemp)"',
+                    '  cat > "${payload}"',
+                    '  if grep -q "import torch" "${payload}"; then',
+                    '    echo "CUDA is required for strict supervised 4-GPU smoke" >&2',
+                    '    rm -f "${payload}"',
+                    "    exit 1",
+                    "  fi",
+                    f"  {python_bin} \"$@\" < \"${{payload}}\"",
+                    "  status=$?",
+                    '  rm -f "${payload}"',
+                    '  exit "${status}"',
+                    "fi",
+                    f"exec {python_bin} \"$@\"",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        fake_python.chmod(0o755)
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "ROOT": str(temp_root),
+                "PYTHON_BIN": str(fake_python),
+                "CONFIG": "configs/guardrail_config.json",
+                "NPROC_PER_NODE": "4",
+                "CUDA_VISIBLE_DEVICES": "0,1,2,3",
+            }
+        )
+        return subprocess.run(
+            ["bash", str(SUPERVISED_DDP_LAUNCHER)],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
     def test_launcher_uses_torch_distributed_supervised_entrypoint(self) -> None:
         text = self.launcher_text
         self.assertIn("LR-273 temporal-consistency loss-on treatment", text)
@@ -321,6 +388,46 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
         self.assertIn("sonic_hydra", text)
         self.assertIn("episode_length", text)
         self.assertIn("NPROC_PER_NODE must match required_gpu_count", text)
+
+    def test_launcher_guard_allows_descriptive_reward_prose(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {
+                "training_lane": "soma_motionlib_kin_only",
+                "purpose": "Strict supervised baseline with no rollout or reward surface.",
+                "runtime": {"required_gpu_count": 4},
+                "training": {"required_gpu_count": 4},
+            }
+            result = self._run_supervised_launcher_until_cuda_smoke(config, Path(tmp))
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("CUDA is required for strict supervised 4-GPU smoke", result.stderr)
+        self.assertNotIn("CONFIG contains PPO/Isaac/reward/episode-length tokens", result.stderr)
+
+    def test_launcher_guard_allows_loss_off_baseline_config_purpose(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = json.loads(LOSS_OFF_BASELINE_CONFIG.read_text(encoding="utf-8"))
+            result = self._run_supervised_launcher_until_cuda_smoke(config, Path(tmp))
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("reward surface", config["purpose"])
+        self.assertIn("CUDA is required for strict supervised 4-GPU smoke", result.stderr)
+        self.assertNotIn("CONFIG contains PPO/Isaac/reward/episode-length tokens", result.stderr)
+
+    def test_launcher_guard_still_rejects_reward_config_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {
+                "training_lane": "soma_motionlib_kin_only",
+                "purpose": "Strict supervised baseline.",
+                "reward": {"scale": 1.0},
+                "runtime": {"required_gpu_count": 4},
+                "training": {"required_gpu_count": 4},
+            }
+            result = self._run_supervised_launcher_until_cuda_smoke(config, Path(tmp))
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("forbidden strict-supervised token 'reward' in key at reward", result.stderr)
+        self.assertIn("CONFIG contains PPO/Isaac/reward/episode-length tokens", result.stderr)
+        self.assertNotIn("CUDA is required for strict supervised 4-GPU smoke", result.stderr)
 
     def test_launcher_supports_short_smoke_overrides(self) -> None:
         text = self.launcher_text
