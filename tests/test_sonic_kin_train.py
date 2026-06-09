@@ -1,4 +1,5 @@
 import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -695,6 +696,8 @@ class SonicKinTrainTimingTests(unittest.TestCase):
                 "format": "soma_motionlib",
                 "robot_motion_dir": "/robot",
                 "soma_motion_dir": "/soma",
+                "source_fps": 120.0,
+                "target_fps": 50.0,
                 "max_clips": 10,
                 "max_duration_delta_sec": 0.05,
                 "data_package": {
@@ -712,12 +715,73 @@ class SonicKinTrainTimingTests(unittest.TestCase):
         payload = sonic_train.rows_from_index_cache_payload(config, Path("/data_root"), rows, skipped=3)
 
         self.assertEqual(payload["cache_version"], 2)
+        self.assertEqual(payload["config"]["source_fps"], 120.0)
+        self.assertEqual(payload["config"]["target_fps"], 50.0)
+        self.assertEqual(payload["config"]["max_clips"], 10)
+        self.assertEqual(payload["config"]["max_duration_delta_sec"], 0.05)
         self.assertEqual(payload["config"]["data_package"]["spec"], "kin")
         self.assertEqual(payload["config"]["data_package"]["package_rows_sha256"], "a" * 64)
         self.assertEqual(
             payload["config_sha256"],
             sonic_train.rows_from_index_cache_signature(payload["config"]),
         )
+
+    def test_rows_from_index_cache_rejects_row_affecting_input_changes(self):
+        base_input = {
+            "format": "soma_motionlib",
+            "robot_motion_dir": "/robot",
+            "soma_motion_dir": "/soma",
+            "source_fps": 120.0,
+            "target_fps": 50.0,
+            "max_clips": 10,
+            "max_duration_delta_sec": 0.05,
+            "data_package": {
+                "spec": "kin",
+                "category": "walk",
+                "indicator": "/packages/kin/walk.txt",
+                "missing_policy": "error",
+                "expected_row_count": 2,
+                "package_rows_sha256": "a" * 64,
+            },
+        }
+        base_config = {"input_data": base_input}
+        rows = [{"relative_path": "clip.pkl"}]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = Path(tmpdir) / "rows_from_index_cache.json"
+            payload = sonic_train.rows_from_index_cache_payload(
+                base_config,
+                Path("/data_root"),
+                rows,
+                skipped=0,
+            )
+            sonic_train.write_rows_from_index_cache(cache_path, payload)
+
+            mutations = {
+                "source_fps": {"source_fps": 100.0},
+                "target_fps": {"target_fps": 60.0},
+                "max_clips": {"max_clips": 5},
+                "max_duration_delta_sec": {"max_duration_delta_sec": 0.01},
+                "data_package_digest": {
+                    "data_package": {
+                        **base_input["data_package"],
+                        "package_rows_sha256": "b" * 64,
+                    }
+                },
+            }
+            for field, update in mutations.items():
+                mutated_input = copy.deepcopy(base_input)
+                mutated_input.update(update)
+                expected_config = sonic_train.rows_from_index_cache_config(
+                    {"input_data": mutated_input},
+                    Path("/data_root"),
+                )
+                with self.subTest(field=field):
+                    with self.assertRaisesRegex(ValueError, "cache config mismatch"):
+                        sonic_train.read_rows_from_index_cache(
+                            cache_path,
+                            expected_config=expected_config,
+                        )
 
     def test_rows_from_index_ignores_stale_data_package_cache_before_barrier(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -800,6 +864,64 @@ class SonicKinTrainTimingTests(unittest.TestCase):
             current_payload = json.loads(cache_path.read_text(encoding="utf-8"))
             self.assertEqual(current_payload["config"]["robot_motion_dir"], "/new_robot")
             self.assertEqual(current_payload["rows"], rebuilt_rows)
+
+    def test_rows_from_index_reuses_valid_current_cache_on_rank0_and_non_main_once(self):
+        config = {
+            "input_data": {
+                "format": "soma_motionlib",
+                "robot_motion_dir": "/robot",
+                "soma_motion_dir": "/soma",
+                "source_fps": 120.0,
+                "target_fps": 50.0,
+                "max_clips": 10,
+                "max_duration_delta_sec": 0.05,
+            }
+        }
+        cached_rows = [{"relative_path": "current.pkl", "split": "train"}]
+
+        for rank in (0, 2):
+            with self.subTest(rank=rank), tempfile.TemporaryDirectory() as tmpdir:
+                output_dir = Path(tmpdir)
+                cache_path = sonic_train.rows_from_index_cache_path(output_dir)
+                payload = sonic_train.rows_from_index_cache_payload(
+                    config,
+                    Path("/data_root"),
+                    cached_rows,
+                    skipped=4,
+                )
+                sonic_train.write_rows_from_index_cache(cache_path, payload)
+
+                runtime = {"distributed": True, "rank": rank, "world_size": 4}
+                calls = {"rebuilt": 0, "barrier": 0}
+                original_rows_from_pair = sonic_train.rows_from_soma_motionlib_pair
+                original_barrier = sonic_train.distributed_barrier
+                try:
+                    sonic_train.rows_from_soma_motionlib_pair = lambda *_args, **_kwargs: (
+                        calls.__setitem__("rebuilt", calls["rebuilt"] + 1) or [{"relative_path": "rebuilt.pkl"}],
+                        0,
+                    )
+                    sonic_train.distributed_barrier = lambda _runtime: calls.__setitem__(
+                        "barrier",
+                        calls["barrier"] + 1,
+                    )
+
+                    rows, skipped, summary = sonic_train.rows_from_index(
+                        config,
+                        Path("/data_root"),
+                        output_dir=output_dir,
+                        runtime=runtime,
+                        return_package_summary=True,
+                    )
+                finally:
+                    sonic_train.rows_from_soma_motionlib_pair = original_rows_from_pair
+                    sonic_train.distributed_barrier = original_barrier
+
+                self.assertEqual(rows, cached_rows)
+                self.assertEqual(skipped, 4)
+                self.assertIsNone(summary)
+                self.assertEqual(calls, {"rebuilt": 0, "barrier": 1})
+                current_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+                self.assertEqual(current_payload["rows"], cached_rows)
 
     def test_wait_for_rows_from_index_cache_rejects_wrong_cache_identity(self):
         with tempfile.TemporaryDirectory() as tmpdir:

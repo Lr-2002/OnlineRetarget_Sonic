@@ -2231,22 +2231,50 @@ def rows_from_index_cache_path(output_dir: Path) -> Path:
     return output_dir / ROWS_FROM_INDEX_CACHE_SUBDIR / "rows_from_index_cache.json"
 
 
+def _rows_cache_float(value: Any, default: float) -> float:
+    if value in {"", None}:
+        return float(default)
+    return float(value)
+
+
 def rows_from_index_cache_config(config: Mapping[str, Any], data_root: Path) -> dict[str, Any]:
-    raw_indexing = resolved_raw_sonic_indexing(config) if is_raw_sonic_npz_config(config) else {}
+    input_cfg = config["input_data"]
+    is_raw_config = is_raw_sonic_npz_config(config)
+    raw_indexing = resolved_raw_sonic_indexing(config) if is_raw_config else {}
     package_cfg = data_package_config(config["input_data"])
+    if is_raw_config:
+        max_clips = int(raw_indexing.get("max_clips", 0))
+        max_duration_delta_sec = _rows_cache_float(raw_indexing.get("max_duration_delta_sec"), 0.02)
+        source_fps = _rows_cache_float(raw_indexing.get("source_fps"), 120.0)
+        target_fps: float | str = ""
+        raw_indexing_identity: dict[str, Any] = {
+            "index_csv": raw_indexing.get("index_csv", ""),
+            "prebuilt_index_jsonl": raw_indexing.get("prebuilt_index_jsonl", ""),
+            "source_path_prefix": raw_indexing.get("source_path_prefix", ""),
+            "target_path_prefix": raw_indexing.get("target_path_prefix", ""),
+            "source_fps": source_fps,
+            "max_duration_delta_sec": max_duration_delta_sec,
+        }
+    else:
+        max_clips = int(input_cfg.get("max_clips", 0))
+        max_duration_delta_sec = _rows_cache_float(input_cfg.get("max_duration_delta_sec"), 0.05)
+        target_fps = _rows_cache_float(input_cfg.get("target_fps"), 50.0)
+        source_fps = _rows_cache_float(input_cfg.get("source_fps"), target_fps)
+        raw_indexing_identity = {}
     return {
         "format": input_data_format(config),
-        "dataset": raw_sonic_dataset(config) if is_raw_sonic_npz_config(config) else "",
-        "robot_motion_dir": config["input_data"].get("robot_motion_dir"),
-        "soma_motion_dir": config["input_data"].get("soma_motion_dir"),
+        "dataset": raw_sonic_dataset(config) if is_raw_config else "",
+        "robot_motion_dir": input_cfg.get("robot_motion_dir"),
+        "soma_motion_dir": input_cfg.get("soma_motion_dir"),
         "data_root": str(data_root),
         "manifest_path": (
-            str(raw_sonic_dataset_manifest_path(config) or "") if is_raw_sonic_npz_config(config) else ""
+            str(raw_sonic_dataset_manifest_path(config) or "") if is_raw_config else ""
         ),
-        "max_clips": int(config["input_data"].get("max_clips", raw_indexing.get("max_clips", 0))),
-        "max_duration_delta_sec": float(
-            config["input_data"].get("max_duration_delta_sec", raw_indexing.get("max_duration_delta_sec", 0.05))
-        ),
+        "indexing": raw_indexing_identity,
+        "max_clips": max_clips,
+        "max_duration_delta_sec": max_duration_delta_sec,
+        "source_fps": source_fps,
+        "target_fps": target_fps,
         "data_package": dict(package_cfg) if package_cfg is not None else None,
     }
 
