@@ -490,6 +490,9 @@ class A0FrozenAEConfigTests(unittest.TestCase):
     def test_a0_expected_dims_guard_is_in_normal_dry_run_and_formal_path(self) -> None:
         text = (REPO_ROOT / "scripts" / "train_sonic_kin_skeleton_ae.py").read_text(encoding="utf-8")
         for token in (
+            "def a0_probe_expected_dims",
+            "expected_feature_dims(config, required=True)",
+            "features.expected_dims is required for this A0 path",
             "def assert_expected_feature_dims",
             "features_expected_dims_validate",
             "features.expected_dims mismatch",
@@ -1078,6 +1081,9 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
                 )
 
     def test_expected_feature_dims_rejects_frozen_and_no_encoder_mismatches(self) -> None:
+        with self.assertRaisesRegex(ValueError, "features.expected_dims is required for this A0 path"):
+            sonic_train.a0_probe_expected_dims({"features": {}})
+
         frozen = {
             "features": {
                 "expected_dims": {
