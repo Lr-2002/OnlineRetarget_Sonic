@@ -75,6 +75,11 @@ from online_retarget.metric_validation_artifacts import (  # noqa: E402
     visual_validation_wandb_payload,
     write_metric_validation_artifact,
 )
+from online_retarget.data_package_indicator import (  # noqa: E402
+    data_package_config,
+    filter_rows_by_data_package_config,
+    manifest_summary_from_selected_rows,
+)
 from online_retarget.metrics import compute_metric_bundle  # noqa: E402
 
 
@@ -2328,11 +2333,12 @@ def rows_from_soma_motionlib_pair(
     config: dict[str, Any],
     *,
     stage_trace: StageTracer | None = None,
+    apply_max_clips: bool = True,
 ) -> tuple[list[dict[str, Any]], int]:
     input_cfg = config["input_data"]
     robot_dir = Path(input_cfg["robot_motion_dir"])
     soma_dir = Path(input_cfg["soma_motion_dir"])
-    max_clips = int(input_cfg.get("max_clips", 0))
+    max_clips = int(input_cfg.get("max_clips", 0)) if apply_max_clips else 0
     max_duration_delta = float(input_cfg.get("max_duration_delta_sec", 0.05))
     rows: list[dict[str, Any]] = []
     skipped = 0
@@ -2563,14 +2569,17 @@ def rows_from_index(
     stage_trace: StageTracer | None = None,
     output_dir: Path | None = None,
     runtime: Mapping[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], int]:
+    return_package_summary: bool = False,
+) -> tuple[list[dict[str, Any]], int] | tuple[list[dict[str, Any]], int, dict[str, Any] | None]:
     cache_path = rows_from_index_cache_path(output_dir) if output_dir is not None else None
     use_cache = cache_path is not None
+    package_cfg = data_package_config(config["input_data"])
     if not is_raw_sonic_npz_config(config):
         if use_cache and runtime is not None and runtime.get("distributed"):
             if is_main_process(runtime):
-                if cache_path.exists():
+                if cache_path.exists() and package_cfg is None:
                     rows, skipped = read_rows_from_index_cache(cache_path)
+                    package_summary = None
                     if stage_trace:
                         stage_trace.log(
                             "rows_from_index_cache",
@@ -2580,7 +2589,12 @@ def rows_from_index(
                             skipped_count=int(skipped),
                         )
                 else:
-                    rows, skipped = rows_from_soma_motionlib_pair(config, stage_trace=stage_trace)
+                    rows, skipped = rows_from_soma_motionlib_pair(
+                        config,
+                        stage_trace=stage_trace,
+                        apply_max_clips=package_cfg is None,
+                    )
+                    rows, package_summary = filter_rows_by_data_package_config(rows, config["input_data"])
                     payload = rows_from_index_cache_payload(config, data_root, rows, skipped)
                     write_rows_from_index_cache(cache_path, payload)
                     if stage_trace:
@@ -2591,10 +2605,13 @@ def rows_from_index(
                             row_count=len(rows),
                             skipped_count=int(skipped),
                         )
+                        if package_summary:
+                            stage_trace.log("data_package_filter", "details", **package_summary)
             if not is_main_process(runtime):
                 if stage_trace:
                     stage_trace.log("rows_from_index_cache", "wait_before_read", cache_path=str(cache_path))
                 rows, skipped = wait_for_rows_from_index_cache(cache_path, stage_trace=stage_trace)
+                package_summary = manifest_summary_from_selected_rows(config["input_data"], rows)
                 if stage_trace:
                     stage_trace.log(
                         "rows_from_index_cache",
@@ -2603,9 +2620,20 @@ def rows_from_index(
                         row_count=len(rows),
                         skipped_count=skipped,
                     )
+                    if package_summary:
+                        stage_trace.log("data_package_filter", "details", **package_summary)
             distributed_barrier(runtime)
+            if return_package_summary:
+                return rows, skipped, package_summary
             return rows, skipped
-        rows, skipped = rows_from_soma_motionlib_pair(config, stage_trace=stage_trace)
+        rows, skipped = rows_from_soma_motionlib_pair(
+            config,
+            stage_trace=stage_trace,
+            apply_max_clips=package_cfg is None,
+        )
+        rows, package_summary = filter_rows_by_data_package_config(rows, config["input_data"])
+        if stage_trace and package_summary:
+            stage_trace.log("data_package_filter", "details", **package_summary)
         if use_cache:
             payload = rows_from_index_cache_payload(config, data_root, rows, skipped)
             write_rows_from_index_cache(cache_path, payload)
@@ -2617,7 +2645,14 @@ def rows_from_index(
                     row_count=len(rows),
                     skipped_count=int(skipped),
                 )
+        if return_package_summary:
+            return rows, skipped, package_summary
         return rows, skipped
+    if package_cfg is not None:
+        raise ValueError(
+            "input_data.data_package is currently supported only for paired soma_motionlib configs; "
+            "raw NPZ package indicators require explicit approval before formal paired metric training"
+        )
     indexing = config["input_data"].get("indexing", {})
     if indexing.get("index_csv"):
         rows, skipped = rows_from_csv_index(config, data_root)
@@ -2632,6 +2667,8 @@ def rows_from_index(
             index_path=str(index_path_from_config(config)),
             data_root=str(data_root),
         )
+    if return_package_summary:
+        return rows, skipped, None
     return rows, skipped
 
 
@@ -5560,6 +5597,7 @@ def write_manifest(
     skeleton_feature_lookup: SkeletonAEFeatureLookup | None = None,
     runtime: Mapping[str, Any] | None = None,
     evaluation_cohort_manifest: Mapping[str, Any] | None = None,
+    data_package_summary: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_root = Path(config["source_repo"])
     control_root = Path.cwd()
@@ -5642,6 +5680,8 @@ def write_manifest(
     eval_cohort_summary = evaluation_cohort_artifact_summary(evaluation_cohort_manifest)
     if eval_cohort_summary:
         manifest["evaluation_cohort"] = eval_cohort_summary
+    if data_package_summary is not None:
+        manifest["data_package"] = dict(data_package_summary)
     if skeleton_feature_lookup is not None:
         manifest["skeleton_ae"] = {
             "enabled": True,
@@ -5841,12 +5881,13 @@ def main() -> None:
             index_path=str(index_path_from_config(config)),
             index_only=True,
         ):
-            rows, skipped = rows_from_index(
+            rows, skipped, data_package_summary = rows_from_index(
                 config,
                 data_root,
                 stage_trace=stage_trace,
                 output_dir=output_dir,
                 runtime=index_runtime,
+                return_package_summary=True,
             )
         summary = {
             "event": "index_only_preflight",
@@ -5866,6 +5907,8 @@ def main() -> None:
             "skipped_count": int(skipped),
             "sample_rows": rows[:5],
         }
+        if data_package_summary is not None:
+            summary["data_package"] = data_package_summary
         (output_dir / "index_only_summary.json").write_text(
             json.dumps(summary, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -5969,14 +6012,18 @@ def main() -> None:
             data_root=str(data_root),
             index_path=str(index_path_from_config(config)),
         ):
-            rows, skipped = rows_from_index(
+            rows, skipped, data_package_summary = rows_from_index(
                 config,
                 data_root,
                 stage_trace=stage_trace,
                 output_dir=output_dir,
                 runtime=runtime,
+                return_package_summary=True,
             )
-        stage_trace.log("rows_from_index", "details", row_count=len(rows), skipped_count=int(skipped))
+        rows_log = {"row_count": len(rows), "skipped_count": int(skipped)}
+        if data_package_summary is not None:
+            rows_log["data_package"] = data_package_summary
+        stage_trace.log("rows_from_index", "details", **rows_log)
         with stage_trace.span("deterministic_split", row_count=len(rows)):
             split_rows(rows, float(config["split"]["validation_ratio"]), str(config["split"]["hash_salt"]))
         if skeleton_feature_lookup is not None:
@@ -6253,6 +6300,7 @@ def main() -> None:
                 skeleton_feature_lookup,
                 runtime,
                 evaluation_cohort_manifest=eval_cohort_manifest,
+                data_package_summary=data_package_summary,
             )
         with stage_trace.span("manifest_barrier"):
             distributed_barrier(runtime)
