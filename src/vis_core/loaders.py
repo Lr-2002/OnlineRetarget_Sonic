@@ -45,6 +45,8 @@ def load_vis_packet(path: str | Path, *, validate: bool = True) -> LoadedVisPack
 
 def validate_loaded_packet(loaded: LoadedVisPacket) -> None:
     validate_track_lengths(loaded.track_lengths(), loaded.packet.timeline)
+    for track in loaded.tracks.values():
+        validate_track_payload(track)
 
 
 def load_track_data(track: TrackSpec, *, base_dir: Path | None = None) -> TrackData:
@@ -56,6 +58,19 @@ def load_track_data(track: TrackSpec, *, base_dir: Path | None = None) -> TrackD
     else:
         raise VisPacketLoadError(f"unsupported track format '{track.format}' for {track.role}")
     return TrackData(spec=track, source_path=source_path, frames=frames)
+
+
+def validate_track_payload(track: TrackData) -> None:
+    declared_fields = tuple(track.spec.root_fields) + tuple(track.spec.joint_names)
+    if not declared_fields:
+        return
+    for frame_idx, frame in enumerate(track.frames):
+        for field_name in declared_fields:
+            if not _frame_has_payload(frame, field_name):
+                raise VisPacketLoadError(
+                    f"track '{track.spec.role}' frame {frame_idx} missing declared payload "
+                    f"'{field_name}'"
+                )
 
 
 def _resolve_track_path(uri: str, *, base_dir: Path | None) -> Path:
@@ -92,3 +107,18 @@ def _load_csv_frames(path: Path) -> tuple[dict[str, str], ...]:
             return tuple(dict(row) for row in reader)
     except OSError as exc:
         raise VisPacketLoadError(f"failed to read CSV track: {path}") from exc
+
+
+def _frame_has_payload(frame: Any, field_name: str) -> bool:
+    if not isinstance(frame, Mapping) or field_name not in frame:
+        return False
+    value = frame[field_name]
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, Mapping):
+        return bool(value)
+    if isinstance(value, (list, tuple)):
+        return bool(value)
+    return True

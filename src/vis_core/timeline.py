@@ -57,6 +57,8 @@ def timeline_from_mapping(value: Mapping[str, Any]) -> Timeline:
 
     sim_dt = _optional_positive_float(value.get("sim_dt"), "timeline.sim_dt")
     dte = _optional_positive_int(value.get("dte"), "timeline.dte")
+    if dte is not None and sim_dt is None:
+        raise TimelineValidationError("timeline.dte requires timeline.sim_dt")
     if sim_dt is not None and dte is not None:
         expected_dt = sim_dt * dte
         if not isclose(dt, expected_dt, rel_tol=TIMELINE_TOLERANCE, abs_tol=TIMELINE_TOLERANCE):

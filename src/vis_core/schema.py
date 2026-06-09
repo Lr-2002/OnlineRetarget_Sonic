@@ -208,11 +208,28 @@ def _parse_tracks(
 
 
 def _reject_reserved_keys(value: Mapping[str, Any], field_name: str) -> None:
-    reserved = sorted(RESERVED_CORE_KEYS.intersection(value))
-    if reserved:
+    reserved_paths = _reserved_key_paths(value, field_name)
+    if reserved_paths:
         raise VisPacketSchemaError(
-            f"{field_name} contains reserved keys {reserved}; metrics stay outside vis_core"
+            f"{field_name} contains reserved keys {reserved_paths}; metrics stay outside vis_core"
         )
+
+
+def _reserved_key_paths(value: Any, field_name: str) -> list[str]:
+    if isinstance(value, Mapping):
+        paths: list[str] = []
+        for key, nested_value in value.items():
+            key_path = f"{field_name}.{key}"
+            if key in RESERVED_CORE_KEYS:
+                paths.append(key_path)
+            paths.extend(_reserved_key_paths(nested_value, key_path))
+        return paths
+    if isinstance(value, list):
+        paths = []
+        for idx, item in enumerate(value):
+            paths.extend(_reserved_key_paths(item, f"{field_name}[{idx}]"))
+        return paths
+    return []
 
 
 def _required_mapping(value: Mapping[str, Any], key: str, field_name: str) -> Mapping[str, Any]:

@@ -6,12 +6,14 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from typing import Any
 import unittest
 
 from vis_core import (
     SCHEMA_VERSION,
     CoordinateValidationError,
     TimelineValidationError,
+    VisPacketLoadError,
     VisPacketSchemaError,
     coordinate_from_mapping,
     load_vis_packet,
@@ -48,6 +50,20 @@ class VisCoreTests(unittest.TestCase):
         with self.assertRaisesRegex(VisPacketSchemaError, "metrics stay outside vis_core"):
             parse_vis_packet_manifest(payload)
 
+    def test_schema_rejects_nested_metrics_inside_vis_core_mappings(self) -> None:
+        cases = (
+            ("metadata", {"quality": {"metrics": {"mpjpe": 0.0}}}),
+            ("track metadata", {"tracks": {"human": {"metadata": {"quality": {"metrics": 1}}}}}),
+            ("optional config", {"render": {"config": {"quality": {"metrics": []}}}}),
+        )
+        for label, patch in cases:
+            payload = _manifest_payload()
+            _deep_update(payload, patch)
+
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(VisPacketSchemaError, "metrics stay outside vis_core"):
+                    parse_vis_packet_manifest(payload)
+
     def test_timeline_validates_fps_dt_and_sim_dte_alignment(self) -> None:
         payload = _manifest_payload()
         payload["timeline"]["dt"] = 0.01
@@ -59,6 +75,13 @@ class VisCoreTests(unittest.TestCase):
         payload["timeline"]["dte"] = 3
 
         with self.assertRaisesRegex(TimelineValidationError, "sim_dt \\* timeline.dte"):
+            parse_vis_packet_manifest(payload)
+
+    def test_timeline_rejects_dte_without_sim_dt(self) -> None:
+        payload = _manifest_payload()
+        del payload["timeline"]["sim_dt"]
+
+        with self.assertRaisesRegex(TimelineValidationError, "timeline.dte requires timeline.sim_dt"):
             parse_vis_packet_manifest(payload)
 
     def test_coordinate_validation_requires_isaac_standard_and_explicit_bvh_fields(self) -> None:
@@ -102,6 +125,31 @@ class VisCoreTests(unittest.TestCase):
             with self.assertRaisesRegex(TimelineValidationError, "timeline.frame_count"):
                 load_vis_packet(manifest_path)
 
+    def test_load_validation_rejects_json_frames_missing_declared_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest_path = _write_fixture_packet(root)
+            human = root / "human.json"
+            human.write_text(json.dumps({"frames": [{}, {}]}), encoding="utf-8")
+
+            with self.assertRaisesRegex(VisPacketLoadError, "human.*root_pos"):
+                load_vis_packet(manifest_path)
+
+    def test_load_validation_rejects_csv_frames_missing_declared_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest_path = _write_fixture_packet(root)
+            _write_csv(
+                root / "target.csv",
+                [
+                    {"frame": "0", "root_pos": "", "root_rot": "0 0 0 1", "pelvis": "0 0 0"},
+                    {"frame": "1", "root_pos": "0 0 0", "root_rot": "0 0 0 1", "pelvis": "0 0 0"},
+                ],
+            )
+
+            with self.assertRaisesRegex(VisPacketLoadError, "target_g1.*root_pos"):
+                load_vis_packet(manifest_path)
+
     def test_static_runner_reports_diagnostics_without_physics_imports(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manifest_path = _write_fixture_packet(Path(tmp))
@@ -138,8 +186,18 @@ def _write_fixture_packet(root: Path) -> Path:
         json.dumps(
             {
                 "frames": [
-                    {"frame": 0, "root_pos": [0.0, 0.0, 0.0], "root_rot": [0.0, 0.0, 0.0]},
-                    {"frame": 1, "root_pos": [0.0, 0.0, 1.0], "root_rot": [0.0, 0.0, 0.1]},
+                    {
+                        "frame": 0,
+                        "root_pos": [0.0, 0.0, 0.0],
+                        "root_rot": [0.0, 0.0, 0.0],
+                        "pelvis": [0.0, 0.0, 0.0],
+                    },
+                    {
+                        "frame": 1,
+                        "root_pos": [0.0, 0.0, 1.0],
+                        "root_rot": [0.0, 0.0, 0.1],
+                        "pelvis": [0.0, 0.0, 1.0],
+                    },
                 ]
             }
         ),
@@ -148,15 +206,25 @@ def _write_fixture_packet(root: Path) -> Path:
     _write_csv(
         root / "target.csv",
         [
-            {"frame": "0", "root_x": "0.0", "root_y": "0.0", "root_z": "0.9"},
-            {"frame": "1", "root_x": "0.0", "root_y": "0.0", "root_z": "0.91"},
+            {"frame": "0", "root_pos": "0 0 0.9", "root_rot": "0 0 0 1", "pelvis": "0 0 0.9"},
+            {"frame": "1", "root_pos": "0 0 0.91", "root_rot": "0 0 0 1", "pelvis": "0 0 0.91"},
         ],
     )
     (root / "play.json").write_text(
         json.dumps(
             [
-                {"frame": 0, "root_pos": [0.0, 0.0, 0.9], "root_rot": [0.0, 0.0, 0.0, 1.0]},
-                {"frame": 1, "root_pos": [0.0, 0.0, 0.91], "root_rot": [0.0, 0.0, 0.0, 1.0]},
+                {
+                    "frame": 0,
+                    "root_pos": [0.0, 0.0, 0.9],
+                    "root_rot": [0.0, 0.0, 0.0, 1.0],
+                    "pelvis": [0.0, 0.0, 0.9],
+                },
+                {
+                    "frame": 1,
+                    "root_pos": [0.0, 0.0, 0.91],
+                    "root_rot": [0.0, 0.0, 0.0, 1.0],
+                    "pelvis": [0.0, 0.0, 0.91],
+                },
             ]
         ),
         encoding="utf-8",
@@ -218,6 +286,14 @@ def _write_csv(path: Path, rows: list[dict[str, str]]) -> None:
         writer = csv.DictWriter(f, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _deep_update(target: dict[str, Any], patch: dict[str, Any]) -> None:
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_update(target[key], value)
+        else:
+            target[key] = value
 
 
 if __name__ == "__main__":
