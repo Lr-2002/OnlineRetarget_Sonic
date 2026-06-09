@@ -2,9 +2,17 @@
 
 Date: 2026-05-20. Updated for LR-185 on 2026-05-28.
 
+LR-291 note (2026-06-09): this document still describes the SONIC-native
+shared-token `sonic_kin_only_soma_encoder_*` contract. The default current
+launcher surface has moved to strict supervised `soma_motionlib_kin_only`
+configs through `scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh`. For
+active launch rules, use
+`docs/status/online_retarget_sonic_training_boundary_2026-05-20.md`.
+
 ## Decision
 
-OnlineRetarget's formal training lane is now `sonic_kin_only_soma_encoder`.
+At the time this contract was written, OnlineRetarget's formal training lane was
+`sonic_kin_only_soma_encoder`.
 
 This lane is defined as:
 
@@ -96,12 +104,14 @@ The remote launcher exports `PYTHONPATH=${ROOT}/src` so a SONIC process can
 import these module targets after the SONIC-side observation dimensions and
 Hydra overrides are wired.
 
-## Launcher Surface
+## Historical Launcher Surface
 
-`scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh` launches one active
-baseline config as a single 4-GPU job via
-`scripts/remote_start_sonic_native_retarget_4gpu.sh`. The historical
-`4x1gpu` launcher now refuses to default-launch A1/A2/B1/B2 unless explicitly
+This section is retained for archaeology. The compatibility wrapper
+`scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh` now forwards into the
+strict supervised SOMA motionlib launcher. If the old SONIC-native shared-token
+contract must be revalidated, use `scripts/remote_start_sonic_native_retarget_4gpu.sh`
+directly and make that intent explicit in the issue or run note. The historical
+`4x1gpu` launcher refuses to default-launch A1/A2/B1/B2 unless explicitly
 unlocked for archaeology, and it rejects active kin-only SOMA encoder configs.
 
 Dry-run command surface:
@@ -109,11 +119,11 @@ Dry-run command surface:
 ```bash
 PYTHONPATH=src PYTHON_BIN=python3 \
   CONFIG=configs/sonic_kin_only_soma_encoder_uniform.json \
-  scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh
+  scripts/remote_start_sonic_native_retarget_4gpu.sh
 
 PYTHONPATH=src PYTHON_BIN=python3 \
   CONFIG=configs/sonic_kin_only_soma_encoder_proportional.json \
-  scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh
+  scripts/remote_start_sonic_native_retarget_4gpu.sh
 ```
 
 Remote execution surface:
@@ -121,11 +131,11 @@ Remote execution surface:
 ```bash
 CHECK_SONIC_PATHS=1 EXECUTE_SONIC_NATIVE_TRAINING=1 \
   CONFIG=configs/sonic_kin_only_soma_encoder_uniform.json \
-  scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh
+  scripts/remote_start_sonic_native_retarget_4gpu.sh
 
 CHECK_SONIC_PATHS=1 EXECUTE_SONIC_NATIVE_TRAINING=1 \
   CONFIG=configs/sonic_kin_only_soma_encoder_proportional.json \
-  scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh
+  scripts/remote_start_sonic_native_retarget_4gpu.sh
 ```
 
 Stop condition for MLOps: both baselines either reach 1M training steps with

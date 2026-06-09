@@ -14,7 +14,10 @@ This repository targets a learning-based online retargeter from heterogeneous hu
 
 ## Current Technical Direction
 
-- First output target: direct G1 generalized motion, beginning with joint position/velocity supervision from existing G1 targets.
+- Active training lane: strict supervised `soma_motionlib_kin_only` from paired SOMA motionlib features to G1 `g1_kin` targets. Keep this lane free of PPO, Isaac rollout, reward, episode-length, and `g1_dyn` training surfaces.
+- Current launcher: use `scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh` with one explicit `CONFIG=...` per 4-GPU job. `scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh` is a compatibility wrapper into the same supervised launcher, not a separate current launch family.
+- Current package-focused configs: LR-280 kin/walk data-package A-only and A+B configs are the pinned final data-package smoke targets. LR-273/LR-284 proportional loss-on and LR-274 loss-off configs are the broader proportional treatment/baseline pair.
+- First output target: direct G1 generalized motion, beginning with joint position/velocity plus root pose supervision from existing G1 targets.
 - First model family: compact MLP/temporal MLP or small temporal transformer only after the MLP baseline is measured against the 1 ms inference budget on a 4090.
 - First metrics: MPJPE/body position error, G1 joint RMSE, action similarity, joint jump rate, joint limit violation rate, and downstream tracking success once Isaac Lab integration exists.
 - Latent/VAE, flow matching, and diffusion are research branches, not the baseline path, unless evaluation shows the compact direct model is insufficient.
@@ -36,6 +39,7 @@ This repository targets a learning-based online retargeter from heterogeneous hu
 
 ## Documentation Discipline
 
+- Update `README.md`, `goal.md`, and the Sonic training-boundary status note whenever the active run matrix or default launcher surface changes.
 - Update `docs/research/literature_review.md` when new papers materially change architecture or evaluation choices.
 - Update `docs/research/data_inventory.md` when data layout, skeleton grouping, or loader assumptions change.
 - Update `docs/milestones.md` when a milestone gate is completed or re-scoped.
