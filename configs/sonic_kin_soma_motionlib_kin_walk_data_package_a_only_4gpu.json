@@ -73,7 +73,14 @@
     "motion_feature": "soma_joints_multi_future_local_nonflat_plus_soma_root_ori_b_multi_future",
     "skeleton_feature": "anchor_frame_soma_root_local_joint_positions_plus_joint_distances",
     "target_feature": "command_multi_future_nonflat_plus_root_pos_w_mf_plus_root_rot_w_mf",
-    "include_root_pos_target": true
+    "include_root_pos_target": true,
+    "expected_dims": {
+      "motion_token": 840,
+      "x_skel": 104,
+      "z_skel": 104,
+      "model_input": 944,
+      "target": 670
+    }
   },
   "split": {
     "validation_ratio": 0.005,

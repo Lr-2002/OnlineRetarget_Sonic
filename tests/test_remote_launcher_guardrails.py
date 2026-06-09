@@ -69,6 +69,13 @@ LR270_SHARED_EVAL_COHORT = {
     "metric_num_samples": 100,
     "manifest_path": "eval_cohort_manifest.json",
 }
+FINAL_KIN_WALK_EXPECTED_DIMS = {
+    "motion_token": 840,
+    "x_skel": 104,
+    "z_skel": 104,
+    "model_input": 944,
+    "target": 670,
+}
 A0_FOUR_GPU_CONFIGS = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_uniform_4gpu.json",
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_proportional_4gpu.json",
@@ -258,6 +265,7 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                     config["validation_command"],
                     f"CONFIG=configs/{path.name} scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh",
                 )
+                self.assertEqual(config["features"]["expected_dims"], FINAL_KIN_WALK_EXPECTED_DIMS)
                 self.assertIn("data-package", config["wandb"]["tags"])
                 self.assertIn("kin-walk-package", config["wandb"]["tags"])
 
