@@ -1,7 +1,8 @@
+import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +29,7 @@ REAL_ROBOT_MOTION_DIR = Path(
 REAL_SOMA_MOTION_DIR = Path(
     "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_motionlib/soma_proportional_filtered_v1"
 )
+REAL_KIN_WALK_ROWS_JSONL = REAL_KIN_WALK_INDICATOR.with_suffix(".rows.jsonl")
 REAL_KIN_WALK_ROW_COUNT = 11248
 REAL_KIN_WALK_ROWS_SHA256 = "2fb36f38d023752e2d1113b1c3455dcb98d1c82318262bde6dfc9c3d34fd79cd"
 
@@ -63,6 +65,12 @@ class DataPackageIndicatorTests(unittest.TestCase):
         self.assertIsNone(summary)
         self.assertEqual(len(selected), len(rows))
         self.assertEqual(package_rows_sha256(selected), before_digest)
+
+    def test_package_rows_digest_matches_inventory_line_contract(self):
+        self.assertEqual(
+            package_rows_sha256([_walk_rows()[0]]),
+            "335e9fe7c34da47f57bfb11cff03a32edadbffa4288fb72e0ec2a3a18a2e34db",
+        )
 
     def test_max_clips_is_applied_after_package_filter(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -132,10 +140,17 @@ class DataPackageIndicatorTests(unittest.TestCase):
     def test_real_kin_walk_package_selects_expected_paired_rows_when_available(self):
         if not REAL_KIN_WALK_INDICATOR.exists():
             self.skipTest(f"real kin/walk indicator is not available locally: {REAL_KIN_WALK_INDICATOR}")
-        if not REAL_ROBOT_MOTION_DIR.exists() or not REAL_SOMA_MOTION_DIR.exists():
-            self.skipTest("real paired soma_motionlib dirs are not available locally")
+        if (
+            not REAL_KIN_WALK_ROWS_JSONL.exists()
+            and (not REAL_ROBOT_MOTION_DIR.exists() or not REAL_SOMA_MOTION_DIR.exists())
+        ):
+            self.skipTest("real paired soma_motionlib dirs/rows artifact are not available locally")
 
-        rows = _load_real_soma_motionlib_rows(REAL_ROBOT_MOTION_DIR, REAL_SOMA_MOTION_DIR)
+        rows = _load_real_soma_motionlib_rows(
+            REAL_ROBOT_MOTION_DIR,
+            REAL_SOMA_MOTION_DIR,
+            rows_jsonl=REAL_KIN_WALK_ROWS_JSONL,
+        )
         unchanged, unchanged_summary = filter_rows_by_data_package_config(rows, {"max_clips": 20000})
         selected, package_summary = filter_rows_by_data_package_config(
             rows,
@@ -220,8 +235,15 @@ def _input_data(indicator: Path, *, max_clips: int = 0):
     }
 
 
-def _load_real_soma_motionlib_rows(robot_dir: Path, soma_dir: Path):
-    import joblib
+def _load_real_soma_motionlib_rows(robot_dir: Path, soma_dir: Path, *, rows_jsonl: Path | None = None):
+    if rows_jsonl is not None and rows_jsonl.exists():
+        return _load_real_soma_motionlib_rows_jsonl(rows_jsonl)
+    try:
+        import joblib
+    except ModuleNotFoundError as exc:
+        raise unittest.SkipTest(
+            "joblib is required to rebuild real motionlib rows when the accepted rows JSONL is unavailable"
+        ) from exc
     import numpy as np
 
     rows = []
@@ -253,6 +275,15 @@ def _load_real_soma_motionlib_rows(robot_dir: Path, soma_dir: Path):
                 "source_bvh": str(soma.get("source_bvh", "")),
             }
         )
+    return rows
+
+
+def _load_real_soma_motionlib_rows_jsonl(path: Path):
+    rows = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                rows.append(json.loads(line))
     return rows
 
 

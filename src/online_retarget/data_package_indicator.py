@@ -96,7 +96,8 @@ def package_rows_sha256(rows: Sequence[Mapping[str, Any] | PackageIndicatorRow])
         else:
             fields = row_package_fields(row)
         lines.append("\t".join(normalize_package_path(field) for field in fields))
-    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+    payload = "".join(line + "\n" for line in lines)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _parse_header_comment(line: str) -> tuple[str, str] | None:
