@@ -2231,30 +2231,43 @@ def rows_from_index_cache_path(output_dir: Path) -> Path:
     return output_dir / ROWS_FROM_INDEX_CACHE_SUBDIR / "rows_from_index_cache.json"
 
 
+def rows_from_index_cache_config(config: Mapping[str, Any], data_root: Path) -> dict[str, Any]:
+    raw_indexing = resolved_raw_sonic_indexing(config) if is_raw_sonic_npz_config(config) else {}
+    package_cfg = data_package_config(config["input_data"])
+    return {
+        "format": input_data_format(config),
+        "dataset": raw_sonic_dataset(config) if is_raw_sonic_npz_config(config) else "",
+        "robot_motion_dir": config["input_data"].get("robot_motion_dir"),
+        "soma_motion_dir": config["input_data"].get("soma_motion_dir"),
+        "data_root": str(data_root),
+        "manifest_path": (
+            str(raw_sonic_dataset_manifest_path(config) or "") if is_raw_sonic_npz_config(config) else ""
+        ),
+        "max_clips": int(config["input_data"].get("max_clips", raw_indexing.get("max_clips", 0))),
+        "max_duration_delta_sec": float(
+            config["input_data"].get("max_duration_delta_sec", raw_indexing.get("max_duration_delta_sec", 0.05))
+        ),
+        "data_package": dict(package_cfg) if package_cfg is not None else None,
+    }
+
+
+def rows_from_index_cache_signature(cache_config: Mapping[str, Any]) -> str:
+    payload = json.dumps(cache_config, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def rows_from_index_cache_payload(
     config: Mapping[str, Any],
     data_root: Path,
     rows: list[dict[str, Any]],
     skipped: int,
 ) -> dict[str, Any]:
-    raw_indexing = resolved_raw_sonic_indexing(config) if is_raw_sonic_npz_config(config) else {}
+    cache_config = rows_from_index_cache_config(config, data_root)
     return {
-        "cache_version": 1,
+        "cache_version": 2,
         "created_at": utc_now(),
-        "config": {
-            "format": input_data_format(config),
-            "dataset": raw_sonic_dataset(config) if is_raw_sonic_npz_config(config) else "",
-            "robot_motion_dir": config["input_data"].get("robot_motion_dir"),
-            "soma_motion_dir": config["input_data"].get("soma_motion_dir"),
-            "data_root": str(data_root),
-            "manifest_path": (
-                str(raw_sonic_dataset_manifest_path(config) or "") if is_raw_sonic_npz_config(config) else ""
-            ),
-            "max_clips": int(config["input_data"].get("max_clips", raw_indexing.get("max_clips", 0))),
-            "max_duration_delta_sec": float(
-                config["input_data"].get("max_duration_delta_sec", raw_indexing.get("max_duration_delta_sec", 0.05))
-            ),
-        },
+        "config": cache_config,
+        "config_sha256": rows_from_index_cache_signature(cache_config),
         "rows": rows,
         "row_count": len(rows),
         "skipped_count": int(skipped),
@@ -2268,8 +2281,22 @@ def write_rows_from_index_cache(cache_path: Path, payload: Mapping[str, Any]) ->
     tmp_path.replace(cache_path)
 
 
-def read_rows_from_index_cache(cache_path: Path) -> tuple[list[dict[str, Any]], int]:
+def read_rows_from_index_cache(
+    cache_path: Path,
+    *,
+    expected_config: Mapping[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
     payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"rows_from_index cache payload must be a mapping: {cache_path}")
+    if expected_config is not None:
+        actual_config = payload.get("config")
+        if not isinstance(actual_config, Mapping):
+            raise ValueError(f"rows_from_index cache lacks config identity: {cache_path}")
+        expected_signature = rows_from_index_cache_signature(expected_config)
+        actual_signature = str(payload.get("config_sha256", ""))
+        if actual_config != expected_config or actual_signature != expected_signature:
+            raise ValueError(f"rows_from_index cache config mismatch: {cache_path}")
     rows = payload["rows"]
     skipped = int(payload["skipped_count"])
     if len(rows) != int(payload["row_count"]):
@@ -2282,6 +2309,7 @@ def read_rows_from_index_cache(cache_path: Path) -> tuple[list[dict[str, Any]], 
 def wait_for_rows_from_index_cache(
     cache_path: Path,
     *,
+    expected_config: Mapping[str, Any] | None = None,
     stage_trace: StageTracer | None = None,
     timeout_sec: float = ROWS_FROM_INDEX_CACHE_WAIT_TIMEOUT_SEC,
     poll_sec: float = ROWS_FROM_INDEX_CACHE_POLL_SEC,
@@ -2300,7 +2328,7 @@ def wait_for_rows_from_index_cache(
     while True:
         try:
             if cache_path.exists():
-                rows, skipped = read_rows_from_index_cache(cache_path)
+                rows, skipped = read_rows_from_index_cache(cache_path, expected_config=expected_config)
                 if stage_trace:
                     stage_trace.log(
                         "rows_from_index_cache_wait",
@@ -2310,7 +2338,7 @@ def wait_for_rows_from_index_cache(
                         skipped_count=skipped,
                     )
                 return rows, skipped
-        except (json.JSONDecodeError, OSError, KeyError, ValueError) as exc:
+        except (json.JSONDecodeError, OSError, KeyError, TypeError, ValueError) as exc:
             last_error = repr(exc)
         now = time.monotonic()
         if now >= deadline:
@@ -2574,21 +2602,40 @@ def rows_from_index(
     cache_path = rows_from_index_cache_path(output_dir) if output_dir is not None else None
     use_cache = cache_path is not None
     package_cfg = data_package_config(config["input_data"])
+    expected_cache_config = rows_from_index_cache_config(config, data_root) if use_cache else None
     if not is_raw_sonic_npz_config(config):
         if use_cache and runtime is not None and runtime.get("distributed"):
             if is_main_process(runtime):
-                if cache_path.exists() and package_cfg is None:
-                    rows, skipped = read_rows_from_index_cache(cache_path)
-                    package_summary = None
-                    if stage_trace:
-                        stage_trace.log(
-                            "rows_from_index_cache",
-                            "reused",
-                            cache_path=str(cache_path),
-                            row_count=len(rows),
-                            skipped_count=int(skipped),
+                if cache_path.exists():
+                    try:
+                        rows, skipped = read_rows_from_index_cache(
+                            cache_path,
+                            expected_config=expected_cache_config,
                         )
+                    except (json.JSONDecodeError, OSError, KeyError, TypeError, ValueError) as exc:
+                        if stage_trace:
+                            stage_trace.log(
+                                "rows_from_index_cache",
+                                "stale",
+                                cache_path=str(cache_path),
+                                reason=repr(exc),
+                            )
+                        rows = []
+                    else:
+                        package_summary = manifest_summary_from_selected_rows(config["input_data"], rows)
+                        if stage_trace:
+                            stage_trace.log(
+                                "rows_from_index_cache",
+                                "reused",
+                                cache_path=str(cache_path),
+                                row_count=len(rows),
+                                skipped_count=int(skipped),
+                            )
+                            if package_summary:
+                                stage_trace.log("data_package_filter", "details", **package_summary)
                 else:
+                    rows = []
+                if not rows:
                     rows, skipped = rows_from_soma_motionlib_pair(
                         config,
                         stage_trace=stage_trace,
@@ -2610,7 +2657,11 @@ def rows_from_index(
             if not is_main_process(runtime):
                 if stage_trace:
                     stage_trace.log("rows_from_index_cache", "wait_before_read", cache_path=str(cache_path))
-                rows, skipped = wait_for_rows_from_index_cache(cache_path, stage_trace=stage_trace)
+                rows, skipped = wait_for_rows_from_index_cache(
+                    cache_path,
+                    expected_config=expected_cache_config,
+                    stage_trace=stage_trace,
+                )
                 package_summary = manifest_summary_from_selected_rows(config["input_data"], rows)
                 if stage_trace:
                     stage_trace.log(

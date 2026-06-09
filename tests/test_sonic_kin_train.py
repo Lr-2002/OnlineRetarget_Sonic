@@ -689,6 +689,141 @@ class SonicKinTrainTimingTests(unittest.TestCase):
                     else:
                         self.assertEqual(loaded, expected)
 
+    def test_rows_from_index_cache_payload_records_data_package_identity(self):
+        config = {
+            "input_data": {
+                "format": "soma_motionlib",
+                "robot_motion_dir": "/robot",
+                "soma_motion_dir": "/soma",
+                "max_clips": 10,
+                "max_duration_delta_sec": 0.05,
+                "data_package": {
+                    "spec": "kin",
+                    "category": "walk",
+                    "indicator": "/packages/kin/walk.txt",
+                    "missing_policy": "error",
+                    "expected_row_count": 2,
+                    "package_rows_sha256": "a" * 64,
+                },
+            }
+        }
+        rows = [{"relative_path": "clip.pkl"}]
+
+        payload = sonic_train.rows_from_index_cache_payload(config, Path("/data_root"), rows, skipped=3)
+
+        self.assertEqual(payload["cache_version"], 2)
+        self.assertEqual(payload["config"]["data_package"]["spec"], "kin")
+        self.assertEqual(payload["config"]["data_package"]["package_rows_sha256"], "a" * 64)
+        self.assertEqual(
+            payload["config_sha256"],
+            sonic_train.rows_from_index_cache_signature(payload["config"]),
+        )
+
+    def test_rows_from_index_ignores_stale_data_package_cache_before_barrier(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            cache_path = sonic_train.rows_from_index_cache_path(output_dir)
+            old_config = {
+                "input_data": {
+                    "format": "soma_motionlib",
+                    "robot_motion_dir": "/old_robot",
+                    "soma_motion_dir": "/soma",
+                    "max_clips": 10,
+                    "max_duration_delta_sec": 0.05,
+                    "data_package": {
+                        "spec": "kin",
+                        "category": "walk",
+                        "indicator": "/packages/old_walk.txt",
+                        "missing_policy": "error",
+                    },
+                }
+            }
+            old_payload = sonic_train.rows_from_index_cache_payload(
+                old_config,
+                Path("/data_root"),
+                [{"relative_path": "old.pkl"}],
+                skipped=0,
+            )
+            sonic_train.write_rows_from_index_cache(cache_path, old_payload)
+
+            config = {
+                "input_data": {
+                    "format": "soma_motionlib",
+                    "robot_motion_dir": "/new_robot",
+                    "soma_motion_dir": "/soma",
+                    "max_clips": 10,
+                    "max_duration_delta_sec": 0.05,
+                    "data_package": {
+                        "spec": "kin",
+                        "category": "walk",
+                        "indicator": "/packages/new_walk.txt",
+                        "missing_policy": "error",
+                    },
+                }
+            }
+            runtime = {"distributed": True, "rank": 0, "world_size": 4}
+            rebuilt_rows = [{"relative_path": "new.pkl", "split": "train"}]
+            calls = {"rebuilt": 0, "barrier": 0}
+            original_rows_from_pair = sonic_train.rows_from_soma_motionlib_pair
+            original_filter = sonic_train.filter_rows_by_data_package_config
+            original_barrier = sonic_train.distributed_barrier
+            try:
+                sonic_train.rows_from_soma_motionlib_pair = lambda *_args, **_kwargs: (
+                    calls.__setitem__("rebuilt", calls["rebuilt"] + 1) or rebuilt_rows,
+                    7,
+                )
+                sonic_train.filter_rows_by_data_package_config = lambda rows, _input_data: (
+                    [dict(row) for row in rows],
+                    {"selected_row_count": len(rows)},
+                )
+                sonic_train.distributed_barrier = lambda _runtime: calls.__setitem__(
+                    "barrier",
+                    calls["barrier"] + 1,
+                )
+
+                rows, skipped, summary = sonic_train.rows_from_index(
+                    config,
+                    Path("/data_root"),
+                    output_dir=output_dir,
+                    runtime=runtime,
+                    return_package_summary=True,
+                )
+            finally:
+                sonic_train.rows_from_soma_motionlib_pair = original_rows_from_pair
+                sonic_train.filter_rows_by_data_package_config = original_filter
+                sonic_train.distributed_barrier = original_barrier
+
+            self.assertEqual(rows, rebuilt_rows)
+            self.assertEqual(skipped, 7)
+            self.assertEqual(summary, {"selected_row_count": 1})
+            self.assertEqual(calls, {"rebuilt": 1, "barrier": 1})
+            current_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.assertEqual(current_payload["config"]["robot_motion_dir"], "/new_robot")
+            self.assertEqual(current_payload["rows"], rebuilt_rows)
+
+    def test_wait_for_rows_from_index_cache_rejects_wrong_cache_identity(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = Path(tmpdir) / "rows_from_index_cache.json"
+            old_config = {"format": "soma_motionlib", "data_package": None}
+            old_payload = {
+                "cache_version": 2,
+                "created_at": "2026-06-09T00:00:00+00:00",
+                "config": old_config,
+                "config_sha256": sonic_train.rows_from_index_cache_signature(old_config),
+                "rows": [{"relative_path": "old.pkl"}],
+                "row_count": 1,
+                "skipped_count": 0,
+            }
+            cache_path.write_text(json.dumps(old_payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(TimeoutError, "cache config mismatch"):
+                sonic_train.wait_for_rows_from_index_cache(
+                    cache_path,
+                    expected_config={"format": "soma_motionlib", "data_package": {"spec": "kin"}},
+                    timeout_sec=0.0,
+                    poll_sec=0.001,
+                )
+
     def test_ab_overlap_loss_weight_is_config_gated(self):
         self.assertEqual(
             sonic_train.command_ab_overlap_loss_weight({"training": {}}),
