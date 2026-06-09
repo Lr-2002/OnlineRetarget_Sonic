@@ -6,6 +6,9 @@ PYTHON_BIN="${PYTHON_BIN:-/workspace/isaaclab/_isaac_sim/python.sh}"
 # Default is the LR-273 temporal-consistency loss-on treatment.
 # For the matched LR-274 loss-off baseline, run:
 # CONFIG=configs/sonic_kin_soma_motionlib_proportional_loss_off_baseline_4gpu.json scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
+# Final LR-280 kin/walk data-package smoke targets:
+# CONFIG=configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_only_4gpu.json scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
+# CONFIG=configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_4gpu.json scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
 CONFIG="${CONFIG:-configs/sonic_kin_soma_motionlib_proportional_4gpu.json}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"

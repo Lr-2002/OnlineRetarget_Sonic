@@ -24,7 +24,27 @@ SUPERVISED_CONFIGS = (
 LOSS_OFF_BASELINE_CONFIG = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_proportional_loss_off_baseline_4gpu.json"
 )
-ACTIVE_FOUR_GPU_SOMA_MOTIONLIB_CONFIGS = (*SUPERVISED_CONFIGS, LOSS_OFF_BASELINE_CONFIG)
+FINAL_KIN_WALK_DATA_PACKAGE_A_ONLY_CONFIG = (
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_kin_walk_data_package_a_only_4gpu.json"
+)
+FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CONFIG = (
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_4gpu.json"
+)
+FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS = (
+    FINAL_KIN_WALK_DATA_PACKAGE_A_ONLY_CONFIG,
+    FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CONFIG,
+)
+FINAL_KIN_WALK_PACKAGE_INDICATOR = (
+    "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/"
+    "lr280_data_package_inventory_20260609T0420Z/indicators/soma_motionlib/kin/walk.txt"
+)
+FINAL_KIN_WALK_ROW_COUNT = 11248
+FINAL_KIN_WALK_ROWS_SHA256 = "2fb36f38d023752e2d1113b1c3455dcb98d1c82318262bde6dfc9c3d34fd79cd"
+ACTIVE_FOUR_GPU_SOMA_MOTIONLIB_CONFIGS = (
+    *SUPERVISED_CONFIGS,
+    LOSS_OFF_BASELINE_CONFIG,
+    *FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS,
+)
 PROPORTIONAL_TREATMENT_AND_BASELINE_CONFIGS = (SUPERVISED_CONFIGS[1], LOSS_OFF_BASELINE_CONFIG)
 ACCEPTED_SOMAMESH_VISUAL_FIELDS = {
     "soma_retargeter_root": "/home/user/project/ContextRetarget/third_party/soma-retargeter",
@@ -212,6 +232,113 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                 self.assertNotIn("g1_dyn", text)
                 self.assertNotIn("g1_target_action", text)
                 self.assertNotIn("episode_length", text)
+
+    def test_final_kin_walk_data_package_configs_are_present_and_pinned(self) -> None:
+        self.assertEqual(len(FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS), 2)
+        for path in FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS:
+            with self.subTest(path=path.name):
+                self.assertTrue(path.exists(), f"missing final kin/walk package config: {path}")
+                config = json.loads(path.read_text(encoding="utf-8"))
+                data_package = config["input_data"].get("data_package")
+
+                self.assertIsInstance(data_package, dict)
+                self.assertEqual(config["input_data"]["format"], "soma_motionlib")
+                self.assertEqual(config["input_data"]["soma_topology"], "proportional")
+                self.assertIn("soma_proportional_filtered_v1", config["input_data"]["soma_motion_dir"])
+                self.assertEqual(data_package["spec"], "kin")
+                self.assertEqual(data_package["category"], "walk")
+                self.assertEqual(data_package["indicator"], FINAL_KIN_WALK_PACKAGE_INDICATOR)
+                self.assertEqual(data_package["missing_policy"], "error")
+                self.assertEqual(data_package["expected_row_count"], FINAL_KIN_WALK_ROW_COUNT)
+                self.assertEqual(data_package["package_rows_sha256"], FINAL_KIN_WALK_ROWS_SHA256)
+                self.assertNotIn("raw_sonic", data_package["indicator"])
+                self.assertEqual(config["training"]["required_gpu_count"], 4)
+                self.assertEqual(config["runtime"]["required_gpu_count"], 4)
+                self.assertEqual(
+                    config["validation_command"],
+                    f"CONFIG=configs/{path.name} scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh",
+                )
+                self.assertIn("data-package", config["wandb"]["tags"])
+                self.assertIn("kin-walk-package", config["wandb"]["tags"])
+
+    def test_final_kin_walk_data_package_loss_toggles_match_contract(self) -> None:
+        a_only = json.loads(FINAL_KIN_WALK_DATA_PACKAGE_A_ONLY_CONFIG.read_text(encoding="utf-8"))
+        a_plus_b = json.loads(FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CONFIG.read_text(encoding="utf-8"))
+
+        self.assertIs(a_only["training"]["temporal_consistency_loss_enabled"], True)
+        self.assertEqual(a_only["training"]["temporal_consistency_loss_weight"], 0.01)
+        self.assertIs(a_only["training"]["ab_overlap_loss_enabled"], False)
+        self.assertEqual(a_only["training"]["ab_overlap_loss_weight"], 0.0)
+        self.assertEqual(
+            a_only["losses"]["auxiliary"],
+            ["g1_kin_command_temporal_consistency_delta_mse"],
+        )
+        self.assertIn("temporal-consistency-loss-on", a_only["wandb"]["tags"])
+        self.assertIn("ab-overlap-loss-off", a_only["wandb"]["tags"])
+        self.assertIn("a-only", a_only["wandb"]["tags"])
+
+        self.assertIs(a_plus_b["training"]["temporal_consistency_loss_enabled"], True)
+        self.assertEqual(a_plus_b["training"]["temporal_consistency_loss_weight"], 0.01)
+        self.assertIs(a_plus_b["training"]["ab_overlap_loss_enabled"], True)
+        self.assertEqual(a_plus_b["training"]["ab_overlap_loss_weight"], 0.01)
+        self.assertEqual(
+            a_plus_b["losses"]["auxiliary"],
+            [
+                "g1_kin_command_temporal_consistency_delta_mse",
+                "g1_kin_command_ab_overlap_mse",
+            ],
+        )
+        self.assertIn("temporal-consistency-loss-on", a_plus_b["wandb"]["tags"])
+        self.assertIn("ab-overlap-loss-on", a_plus_b["wandb"]["tags"])
+        self.assertIn("a-plus-b", a_plus_b["wandb"]["tags"])
+
+    def test_final_kin_walk_a_plus_b_preserves_a_only_contract_except_overlap_identity(self) -> None:
+        a_only = json.loads(FINAL_KIN_WALK_DATA_PACKAGE_A_ONLY_CONFIG.read_text(encoding="utf-8"))
+        a_plus_b = json.loads(FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CONFIG.read_text(encoding="utf-8"))
+        preserved_keys = (
+            "source_repo",
+            "source_rev",
+            "input_data",
+            "source_features",
+            "target_decoder",
+            "decoder_targets",
+            "target_features",
+            "features",
+            "split",
+            "normalization",
+            "model",
+            "visual_validation",
+            "metric_validation",
+            "evaluation_cohort",
+            "runtime",
+            "expected_artifacts",
+        )
+        for key in preserved_keys:
+            self.assertEqual(a_plus_b[key], a_only[key], key)
+
+        a_only_training = dict(a_only["training"])
+        a_plus_b_training = dict(a_plus_b["training"])
+        for key in ("ab_overlap_loss_enabled", "ab_overlap_loss_weight"):
+            a_only_training.pop(key)
+            a_plus_b_training.pop(key)
+        self.assertEqual(a_plus_b_training, a_only_training)
+        self.assertEqual(a_plus_b["losses"]["primary"], a_only["losses"]["primary"])
+        self.assertEqual(
+            a_plus_b["losses"]["auxiliary"],
+            [*a_only["losses"]["auxiliary"], "g1_kin_command_ab_overlap_mse"],
+        )
+
+    def test_final_kin_walk_package_configs_preserve_shared_metric_eval_cohort(self) -> None:
+        for path in FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS:
+            with self.subTest(path=path.name):
+                config = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(config["metric_validation"], ACCEPTED_VISUAL_METRIC_VALIDATION)
+                self.assertEqual(config["evaluation_cohort"], LR270_SHARED_EVAL_COHORT)
+                self.assertEqual(config["visual_validation"]["num_videos"], LR270_SHARED_EVAL_COHORT["visual_num_samples"])
+                self.assertEqual(
+                    config["metric_validation"]["every_steps"],
+                    config["visual_validation"]["every_steps"],
+                )
 
     def test_loss_off_baseline_config_matches_proportional_treatment_except_loss_contract(self) -> None:
         treatment = json.loads(SUPERVISED_CONFIGS[1].read_text(encoding="utf-8"))
@@ -404,10 +531,10 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
         soma_motion_dir = temp_root / "soma_motion"
         robot_motion_dir.mkdir()
         soma_motion_dir.mkdir()
-        config["input_data"] = {
-            "robot_motion_dir": str(robot_motion_dir),
-            "soma_motion_dir": str(soma_motion_dir),
-        }
+        input_data = dict(config.get("input_data", {}))
+        input_data["robot_motion_dir"] = str(robot_motion_dir)
+        input_data["soma_motion_dir"] = str(soma_motion_dir)
+        config["input_data"] = input_data
         config_path = temp_root / "configs" / "guardrail_config.json"
         config_path.write_text(json.dumps(config), encoding="utf-8")
 
@@ -462,8 +589,11 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
         text = self.launcher_text
         self.assertIn("LR-273 temporal-consistency loss-on treatment", text)
         self.assertIn("LR-274 loss-off baseline", text)
+        self.assertIn("LR-280 kin/walk data-package smoke targets", text)
         self.assertIn("configs/sonic_kin_soma_motionlib_proportional_4gpu.json", text)
         self.assertIn("configs/sonic_kin_soma_motionlib_proportional_loss_off_baseline_4gpu.json", text)
+        self.assertIn("configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_only_4gpu.json", text)
+        self.assertIn("configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_4gpu.json", text)
         self.assertIn('NPROC_PER_NODE="${NPROC_PER_NODE:-4}"', text)
         self.assertIn("torch.distributed.run", text)
         self.assertIn("scripts/train_sonic_kin_skeleton_ae.py", text)
@@ -502,6 +632,17 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
         self.assertIn("reward surface", config["purpose"])
         self.assertIn("CUDA is required for strict supervised 4-GPU smoke", result.stderr)
         self.assertNotIn("CONFIG contains PPO/Isaac/reward/episode-length tokens", result.stderr)
+
+    def test_launcher_guard_accepts_final_kin_walk_package_configs_until_cuda_smoke(self) -> None:
+        for path in FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS:
+            with self.subTest(path=path.name), tempfile.TemporaryDirectory() as tmp:
+                config = json.loads(path.read_text(encoding="utf-8"))
+                result = self._run_supervised_launcher_until_cuda_smoke(config, Path(tmp))
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("CUDA is required for strict supervised 4-GPU smoke", result.stderr)
+                self.assertNotIn("CONFIG contains PPO/Isaac/reward/episode-length tokens", result.stderr)
+                self.assertNotIn("NPROC_PER_NODE must match required_gpu_count", result.stderr)
 
     def test_launcher_guard_still_rejects_reward_config_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

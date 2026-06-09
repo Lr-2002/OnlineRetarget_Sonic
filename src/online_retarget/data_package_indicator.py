@@ -215,12 +215,33 @@ def data_package_config(input_data: Mapping[str, Any]) -> Mapping[str, Any] | No
     missing_policy = str(cfg.get("missing_policy", "error")).strip() or "error"
     if missing_policy != "error":
         raise ValueError("input_data.data_package.missing_policy currently supports only 'error'")
-    return {
+    normalized: dict[str, Any] = {
         "spec": spec,
         "category": category,
         "indicator": indicator,
         "missing_policy": missing_policy,
     }
+    if cfg.get("expected_row_count") not in (None, ""):
+        normalized["expected_row_count"] = int(cfg["expected_row_count"])
+    package_rows_digest = str(cfg.get("package_rows_sha256", "")).strip()
+    if package_rows_digest:
+        normalized["package_rows_sha256"] = package_rows_digest
+    return normalized
+
+
+def _validate_package_indicator_contract(cfg: Mapping[str, Any], indicator: PackageIndicator) -> None:
+    expected_row_count = cfg.get("expected_row_count")
+    if expected_row_count is not None and len(indicator.rows) != int(expected_row_count):
+        raise ValueError(
+            "data_package indicator row count mismatch: "
+            f"config={int(expected_row_count)} indicator={len(indicator.rows)}"
+        )
+    expected_digest = str(cfg.get("package_rows_sha256", "")).strip()
+    if expected_digest and indicator.package_rows_sha256 != expected_digest:
+        raise ValueError(
+            "data_package indicator package_rows_sha256 mismatch: "
+            f"config={expected_digest} indicator={indicator.package_rows_sha256}"
+        )
 
 
 def _copy_package_row(row: Mapping[str, Any], indicator_row: PackageIndicatorRow) -> dict[str, Any]:
@@ -245,6 +266,7 @@ def filter_rows_by_data_package_config(
             "data_package indicator identity mismatch: "
             f"config={cfg['spec']}/{cfg['category']} indicator={indicator.spec}/{indicator.category}"
         )
+    _validate_package_indicator_contract(cfg, indicator)
 
     rows_by_pair_id: dict[str, list[Mapping[str, Any]]] = {}
     for row in rows:
@@ -351,6 +373,7 @@ def manifest_summary_from_selected_rows(
             "data_package indicator identity mismatch: "
             f"config={cfg['spec']}/{cfg['category']} indicator={indicator.spec}/{indicator.category}"
         )
+    _validate_package_indicator_contract(cfg, indicator)
     max_clips = int(input_data.get("max_clips", 0) or 0)
     return data_package_manifest_summary(
         cfg,
