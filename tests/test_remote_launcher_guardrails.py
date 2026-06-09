@@ -41,6 +41,8 @@ FINAL_KIN_WALK_PACKAGE_INDICATOR = (
 FINAL_KIN_WALK_ROW_COUNT = 11248
 FINAL_KIN_WALK_ROWS_SHA256 = "2fb36f38d023752e2d1113b1c3455dcb98d1c82318262bde6dfc9c3d34fd79cd"
 FINAL_KIN_WALK_VALIDATION_RATIO = 0.015
+FINAL_KIN_WALK_VISUAL_EVERY_STEPS = 100000
+FINAL_KIN_WALK_METRIC_EVERY_STEPS = 100000
 ACTIVE_FOUR_GPU_SOMA_MOTIONLIB_CONFIGS = (
     *SUPERVISED_CONFIGS,
     LOSS_OFF_BASELINE_CONFIG,
@@ -60,6 +62,10 @@ ACCEPTED_VISUAL_METRIC_VALIDATION = {
     "output_dir": "metrics",
     "primary": "mpjpe",
     "requested_metrics": ["mpjpe", "w_mpjpe", "context_compositing"],
+}
+FINAL_KIN_WALK_METRIC_VALIDATION = {
+    **ACCEPTED_VISUAL_METRIC_VALIDATION,
+    "every_steps": FINAL_KIN_WALK_METRIC_EVERY_STEPS,
 }
 LR270_SHARED_EVAL_COHORT = {
     "enabled": True,
@@ -272,6 +278,7 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                     f"CONFIG=configs/{path.name} scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh",
                 )
                 self.assertEqual(config["features"]["expected_dims"], FINAL_KIN_WALK_EXPECTED_DIMS)
+                self.assertEqual(config["metric_validation"]["every_steps"], FINAL_KIN_WALK_METRIC_EVERY_STEPS)
                 self.assertIn("data-package", config["wandb"]["tags"])
                 self.assertIn("kin-walk-package", config["wandb"]["tags"])
 
@@ -346,12 +353,14 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
         for path in FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS:
             with self.subTest(path=path.name):
                 config = json.loads(path.read_text(encoding="utf-8"))
-                self.assertEqual(config["metric_validation"], ACCEPTED_VISUAL_METRIC_VALIDATION)
+                self.assertEqual(config["metric_validation"], FINAL_KIN_WALK_METRIC_VALIDATION)
                 self.assertEqual(config["evaluation_cohort"], LR270_SHARED_EVAL_COHORT)
                 self.assertEqual(config["visual_validation"]["num_videos"], LR270_SHARED_EVAL_COHORT["visual_num_samples"])
+                self.assertEqual(config["visual_validation"]["every_steps"], FINAL_KIN_WALK_VISUAL_EVERY_STEPS)
+                self.assertEqual(config["metric_validation"]["every_steps"], FINAL_KIN_WALK_METRIC_EVERY_STEPS)
                 self.assertEqual(
-                    config["metric_validation"]["every_steps"],
                     config["visual_validation"]["every_steps"],
+                    config["metric_validation"]["every_steps"],
                 )
 
     def test_loss_off_baseline_config_matches_proportional_treatment_except_loss_contract(self) -> None:
@@ -417,7 +426,12 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                 visual = config["visual_validation"]
                 self.assertIs(visual["enabled"], True)
                 self.assertIs(visual["acceptance_backend"], True)
-                self.assertEqual(visual["every_steps"], 20000)
+                expected_every_steps = (
+                    FINAL_KIN_WALK_VISUAL_EVERY_STEPS
+                    if path in FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS
+                    else 20000
+                )
+                self.assertEqual(visual["every_steps"], expected_every_steps)
                 self.assertEqual(visual["every_minutes"], 60)
                 self.assertEqual(visual["num_videos"], 8)
                 for key, expected in ACCEPTED_SOMAMESH_VISUAL_FIELDS.items():
