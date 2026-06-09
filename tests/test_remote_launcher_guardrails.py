@@ -592,6 +592,15 @@ class SupervisedTrainerDdpGuardrailTests(unittest.TestCase):
         self.assertIn('step = int(resume_state["step"]) if resume_state is not None else 0', text)
         self.assertIn('start_event["resume_checkpoint"] = resume_state["path"]', text)
 
+    def test_trainer_data_package_stays_paired_soma_motionlib_only(self) -> None:
+        text = self.trainer_text
+        self.assertIn("filter_rows_by_data_package_config", text)
+        self.assertIn("manifest_summary_from_selected_rows", text)
+        self.assertIn("apply_max_clips=package_cfg is None", text)
+        self.assertIn("input_data.data_package is currently supported only for paired soma_motionlib configs", text)
+        self.assertIn("raw NPZ package indicators require explicit approval", text)
+        self.assertIn("data_package_summary=data_package_summary", text)
+
     def test_trainer_waits_on_rank0_visual_status_before_ddp_barrier(self) -> None:
         text = self.trainer_text
         self.assertIn("rank0_stage_status_path", text)
