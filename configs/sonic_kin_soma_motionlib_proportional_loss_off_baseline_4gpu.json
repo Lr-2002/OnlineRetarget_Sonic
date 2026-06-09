@@ -2,7 +2,7 @@
   "schema_version": "1.1.0",
   "owner": "OnlineRetarget",
   "training_lane": "soma_motionlib_kin_only",
-  "purpose": "Strict 4-GPU supervised proportional-SOMA loss-off baseline for LR-274. Same dataset, split, model, seed, and eval contract as the LR-273 proportional temporal-consistency treatment, but with temporal_consistency_loss_enabled=false, no temporal auxiliary loss, and no PPO, Isaac rollout, or reward surface.",
+  "purpose": "Strict 4-GPU supervised proportional-SOMA loss-off baseline for LR-274. Same dataset, split, model, seed, and eval contract as the LR-273/LR-284 proportional treatment, but with temporal_consistency_loss_enabled=false, ab_overlap_loss_enabled=false, no temporal or A/B overlap auxiliary loss, and no PPO, Isaac rollout, or reward surface.",
   "source_repo": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training",
   "source_rev": "remote-latest-required-before-training",
   "input_data": {
@@ -99,7 +99,9 @@
     "root_pos_loss_weight": 0.25,
     "root_rot_loss_weight": 0.5,
     "temporal_consistency_loss_enabled": false,
-    "temporal_consistency_loss_weight": 0.0
+    "temporal_consistency_loss_weight": 0.0,
+    "ab_overlap_loss_enabled": false,
+    "ab_overlap_loss_weight": 0.0
   },
   "visual_validation": {
     "enabled": true,
@@ -167,6 +169,7 @@
       "supervised",
       "proportional",
       "temporal-consistency-loss-off",
+      "ab-overlap-loss-off",
       "baseline",
       "acceptance-backend",
       "4gpu"

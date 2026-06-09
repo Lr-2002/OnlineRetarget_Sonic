@@ -193,12 +193,18 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                 self.assertEqual(config["decoder_targets"], ["g1_kin"])
                 self.assertEqual(
                     config["losses"]["auxiliary"],
-                    ["g1_kin_command_temporal_consistency_delta_mse"],
+                    [
+                        "g1_kin_command_temporal_consistency_delta_mse",
+                        "g1_kin_command_ab_overlap_mse",
+                    ],
                 )
                 self.assertIs(config["training"]["temporal_consistency_loss_enabled"], True)
                 self.assertEqual(config["training"]["temporal_consistency_loss_weight"], 0.01)
+                self.assertIs(config["training"]["ab_overlap_loss_enabled"], True)
+                self.assertEqual(config["training"]["ab_overlap_loss_weight"], 0.01)
                 self.assertIn(f"soma_{topology}_filtered_v1", config["input_data"]["soma_motion_dir"])
                 self.assertIn("temporal-consistency-loss-on", config["wandb"]["tags"])
+                self.assertIn("ab-overlap-loss-on", config["wandb"]["tags"])
                 text = path.read_text(encoding="utf-8")
                 self.assertNotIn("sonic_hydra", text)
                 self.assertNotIn("train_agent_trl.py", text)
@@ -234,7 +240,12 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
             self.assertEqual(baseline[key], treatment[key])
         treatment_training = dict(treatment["training"])
         baseline_training = dict(baseline["training"])
-        for key in ("temporal_consistency_loss_enabled", "temporal_consistency_loss_weight"):
+        for key in (
+            "temporal_consistency_loss_enabled",
+            "temporal_consistency_loss_weight",
+            "ab_overlap_loss_enabled",
+            "ab_overlap_loss_weight",
+        ):
             treatment_training.pop(key)
             baseline_training.pop(key)
         self.assertEqual(baseline_training, treatment_training)
@@ -242,6 +253,8 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
         self.assertEqual(baseline["losses"]["auxiliary"], [])
         self.assertIs(baseline["training"]["temporal_consistency_loss_enabled"], False)
         self.assertEqual(baseline["training"]["temporal_consistency_loss_weight"], 0.0)
+        self.assertIs(baseline["training"]["ab_overlap_loss_enabled"], False)
+        self.assertEqual(baseline["training"]["ab_overlap_loss_weight"], 0.0)
         self.assertEqual(baseline["training"]["seed"], treatment["training"]["seed"])
         self.assertEqual(baseline["training"]["max_steps"], 1000000)
         self.assertEqual(baseline["training"]["required_gpu_count"], 4)
@@ -252,7 +265,9 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
             "scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh",
         )
         self.assertNotIn("g1_kin_command_temporal_consistency_delta_mse", LOSS_OFF_BASELINE_CONFIG.read_text())
+        self.assertNotIn("g1_kin_command_ab_overlap_mse", LOSS_OFF_BASELINE_CONFIG.read_text())
         self.assertIn("temporal-consistency-loss-off", baseline["wandb"]["tags"])
+        self.assertIn("ab-overlap-loss-off", baseline["wandb"]["tags"])
 
     def test_active_four_gpu_configs_use_accepted_somamesh_visual_backend(self) -> None:
         for path in ACTIVE_FOUR_GPU_SOMA_MOTIONLIB_CONFIGS:

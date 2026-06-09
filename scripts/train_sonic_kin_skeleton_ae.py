@@ -201,6 +201,7 @@ EVAL_METRIC_CONTRACT: dict[str, Any] = {
     },
 }
 TEMPORAL_CONSISTENCY_LOSS_WEIGHT_DEFAULT = 0.01
+AB_OVERLAP_LOSS_WEIGHT_DEFAULT = 0.01
 RAW_SONIC_DATASET_KIN = "kin"
 RAW_SONIC_DATASET_PHY = "phy"
 RAW_SONIC_DATASETS = (RAW_SONIC_DATASET_KIN, RAW_SONIC_DATASET_PHY)
@@ -3239,6 +3240,46 @@ def temporal_consistency_loss_weight(config: Mapping[str, Any]) -> float:
     )
 
 
+def command_ab_overlap_loss_weight(config: Mapping[str, Any]) -> float:
+    training = config.get("training")
+    if not isinstance(training, Mapping) or not training.get("ab_overlap_loss_enabled", False):
+        return 0.0
+    return float(training.get("ab_overlap_loss_weight", AB_OVERLAP_LOSS_WEIGHT_DEFAULT))
+
+
+def command_ab_overlap_batch_offset(config: Mapping[str, Any]) -> int:
+    training = config.get("training")
+    features = config.get("features")
+    if not isinstance(training, Mapping) or not isinstance(features, Mapping):
+        raise ValueError("ab_overlap_loss requires training and features config sections")
+    frame_stride = int(training.get("frame_stride", 1))
+    future_step = int(features.get("future_step", 1))
+    if frame_stride <= 0:
+        raise ValueError("ab_overlap_loss requires training.frame_stride > 0")
+    if future_step <= 0:
+        raise ValueError("ab_overlap_loss requires features.future_step > 0")
+    if future_step % frame_stride != 0:
+        raise ValueError(
+            "ab_overlap_loss requires features.future_step to be an integer multiple "
+            f"of training.frame_stride; got future_step={future_step} frame_stride={frame_stride}"
+        )
+    return future_step // frame_stride
+
+
+def command_ab_overlap_horizon_frames(config: Mapping[str, Any], window: int) -> int:
+    training = config.get("training")
+    max_overlap = max(0, int(window) - 1)
+    if not isinstance(training, Mapping):
+        return max_overlap
+    configured = training.get("ab_overlap_horizon_frames")
+    if configured in ("", None):
+        return max_overlap
+    frames = int(configured)
+    if frames <= 0:
+        raise ValueError("ab_overlap_loss requires ab_overlap_horizon_frames > 0 when configured")
+    return min(frames, max_overlap)
+
+
 def command_temporal_consistency_loss(
     pred_command: torch.Tensor,
     target_command: torch.Tensor,
@@ -3260,6 +3301,55 @@ def command_temporal_consistency_loss(
     return torch.mean((pred_delta - target_delta) ** 2)
 
 
+def command_ab_overlap_loss(
+    pred_command: torch.Tensor,
+    *,
+    joint_dim: int,
+    batch_offset: int,
+    overlap_horizon_frames: int | None = None,
+) -> torch.Tensor:
+    command_frame_dim = int(joint_dim) * 2
+    if command_frame_dim <= 0 or pred_command.shape[-1] % command_frame_dim != 0:
+        raise ValueError(
+            f"command_dim={pred_command.shape[-1]} is incompatible with joint_dim={joint_dim}"
+        )
+    batch_offset = int(batch_offset)
+    if batch_offset <= 0:
+        raise ValueError(f"batch_offset must be positive, got {batch_offset}")
+    window = pred_command.shape[-1] // command_frame_dim
+    max_overlap = max(0, window - 1)
+    if overlap_horizon_frames is None:
+        overlap = max_overlap
+    else:
+        overlap = min(int(overlap_horizon_frames), max_overlap)
+    if pred_command.shape[0] <= batch_offset or overlap <= 0:
+        return pred_command.new_tensor(0.0)
+    pred_frames = pred_command.reshape(pred_command.shape[0], window, command_frame_dim)
+    earlier = pred_frames[:-batch_offset, 1 : 1 + overlap, :]
+    later = pred_frames[batch_offset:, :overlap, :]
+    return torch.mean((later - earlier) ** 2)
+
+
+def select_training_batch_frames(
+    motion: torch.Tensor,
+    skeleton: torch.Tensor,
+    target: torch.Tensor,
+    per_batch_frames: int,
+    rng: torch.Generator,
+    *,
+    preserve_order: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if motion.shape[0] <= per_batch_frames:
+        return motion, skeleton, target
+    if preserve_order:
+        max_start = motion.shape[0] - per_batch_frames
+        start = int(torch.randint(0, max_start + 1, (1,), generator=rng, device=motion.device).item())
+        stop = start + per_batch_frames
+        return motion[start:stop], skeleton[start:stop], target[start:stop]
+    select = torch.randint(0, motion.shape[0], (per_batch_frames,), generator=rng, device=motion.device)
+    return motion[select], skeleton[select], target[select]
+
+
 def loss_and_metrics(
     pred_norm: torch.Tensor,
     target_norm: torch.Tensor,
@@ -3273,6 +3363,9 @@ def loss_and_metrics(
     root_pos_weight: float,
     root_rot_weight: float,
     temporal_consistency_weight: float = 0.0,
+    ab_overlap_weight: float = 0.0,
+    ab_overlap_batch_offset: int = 1,
+    ab_overlap_horizon_frames: int | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     pred_command = pred_norm[:, :command_dim]
     target_command = target_norm[:, :command_dim]
@@ -3304,6 +3397,15 @@ def loss_and_metrics(
             joint_dim=joint_dim,
         )
         loss = loss + temporal_consistency_weight * temporal_consistency_loss
+    ab_overlap_loss = pred_norm.new_tensor(0.0)
+    if ab_overlap_weight > 0.0:
+        ab_overlap_loss = command_ab_overlap_loss(
+            pred_command,
+            joint_dim=joint_dim,
+            batch_offset=ab_overlap_batch_offset,
+            overlap_horizon_frames=ab_overlap_horizon_frames,
+        )
+        loss = loss + ab_overlap_weight * ab_overlap_loss
 
     with torch.no_grad():
         pred_raw = pred_norm * stats["target_std"] + stats["target_mean"]
@@ -3330,6 +3432,8 @@ def loss_and_metrics(
             "root_rot_mse_norm": float(root_rot_loss.detach().item()),
             "temporal_consistency_mse_norm": float(temporal_consistency_loss.detach().item()),
             "temporal_consistency_loss_weight": float(temporal_consistency_weight),
+            "ab_overlap_mse_norm": float(ab_overlap_loss.detach().item()),
+            "ab_overlap_loss_weight": float(ab_overlap_weight),
             "joint_pos_rmse_raw": joint_pos_rmse,
             "g1_joint_pos_rmse_rad": joint_pos_rmse,
             "joint_vel_rmse_raw": float(torch.sqrt(torch.mean(joint_vel_error**2)).item()),
@@ -3369,6 +3473,13 @@ def validate(
         )
     )
     temporal_consistency_weight = temporal_consistency_loss_weight(config)
+    ab_overlap_weight = command_ab_overlap_loss_weight(config)
+    ab_overlap_batch_offset = command_ab_overlap_batch_offset(config) if ab_overlap_weight > 0.0 else 1
+    ab_overlap_horizon_frames = (
+        command_ab_overlap_horizon_frames(config, command_dim // (joint_dim * 2))
+        if ab_overlap_weight > 0.0
+        else None
+    )
     with torch.no_grad():
         for batch_idx, (motion, skeleton, target) in enumerate(loader):
             if max_batches is not None and max_batches > 0 and batch_idx >= max_batches:
@@ -3391,6 +3502,9 @@ def validate(
                 root_pos_weight,
                 root_rot_weight,
                 temporal_consistency_weight,
+                ab_overlap_weight,
+                ab_overlap_batch_offset,
+                ab_overlap_horizon_frames,
             )
             rows.append(metrics)
     model.train()
@@ -5362,6 +5476,8 @@ def write_loss_header(path: Path) -> None:
                 "train_root_rot_mse_norm",
                 "train_temporal_consistency_mse_norm",
                 "train_temporal_consistency_loss_weight",
+                "train_ab_overlap_mse_norm",
+                "train_ab_overlap_loss_weight",
                 "train_joint_pos_rmse_raw",
                 "train_g1_joint_pos_rmse_rad",
                 "train_joint_vel_rmse_raw",
@@ -5386,6 +5502,8 @@ def append_loss_row(path: Path, step: int, elapsed: float, metrics: dict[str, fl
                 f"{metrics.get('root_rot_mse_norm', float('nan')):.10f}",
                 f"{metrics.get('temporal_consistency_mse_norm', 0.0):.10f}",
                 f"{metrics.get('temporal_consistency_loss_weight', 0.0):.10f}",
+                f"{metrics.get('ab_overlap_mse_norm', 0.0):.10f}",
+                f"{metrics.get('ab_overlap_loss_weight', 0.0):.10f}",
                 f"{metrics['joint_pos_rmse_raw']:.10f}",
                 f"{metrics['g1_joint_pos_rmse_rad']:.10f}",
                 f"{metrics['joint_vel_rmse_raw']:.10f}",
@@ -6264,6 +6382,11 @@ def main() -> None:
             )
         )
         temporal_consistency_weight = temporal_consistency_loss_weight(config)
+        ab_overlap_weight = command_ab_overlap_loss_weight(config)
+        ab_overlap_batch_offset = command_ab_overlap_batch_offset(config) if ab_overlap_weight > 0.0 else 1
+        ab_overlap_horizon_frames = (
+            command_ab_overlap_horizon_frames(config, window) if ab_overlap_weight > 0.0 else None
+        )
         precision = config["training"].get("precision", "bf16")
         use_amp = precision in {"bf16", "fp16"}
         amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
@@ -6304,11 +6427,14 @@ def main() -> None:
                 motion = motion.to(device, non_blocking=True)
                 skeleton = skeleton.to(device, non_blocking=True)
                 target = target.to(device, non_blocking=True)
-                if motion.shape[0] > per_batch_frames:
-                    select = torch.randint(0, motion.shape[0], (per_batch_frames,), generator=rng, device=device)
-                    motion = motion[select]
-                    skeleton = skeleton[select]
-                    target = target[select]
+                motion, skeleton, target = select_training_batch_frames(
+                    motion,
+                    skeleton,
+                    target,
+                    per_batch_frames,
+                    rng,
+                    preserve_order=ab_overlap_weight > 0.0,
+                )
                 motion_n, skeleton_n, target_n = normalize_batch(motion, skeleton, target, stats, config)
 
                 optimizer.zero_grad(set_to_none=True)
@@ -6327,6 +6453,9 @@ def main() -> None:
                         root_pos_weight,
                         root_rot_weight,
                         temporal_consistency_weight,
+                        ab_overlap_weight,
+                        ab_overlap_batch_offset,
+                        ab_overlap_horizon_frames,
                     )
                 loss.backward()
                 if grad_clip > 0:
