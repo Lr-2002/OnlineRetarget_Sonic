@@ -770,6 +770,31 @@ class SupervisedTrainerDdpGuardrailTests(unittest.TestCase):
         self.assertIn("raw NPZ package indicators require explicit approval", text)
         self.assertIn("data_package_summary=data_package_summary", text)
 
+    def test_trainer_rows_from_index_cache_validates_current_config_identity(self) -> None:
+        text = self.trainer_text
+        for token in (
+            "rows_from_index_cache_config",
+            "rows_from_index_cache_signature",
+            '"cache_version": 2',
+            '"config_sha256": rows_from_index_cache_signature(cache_config)',
+            '"source_fps": source_fps',
+            '"target_fps": target_fps',
+            '"max_clips": max_clips',
+            '"max_duration_delta_sec": max_duration_delta_sec',
+            '"data_package": dict(package_cfg) if package_cfg is not None else None',
+            "def read_rows_from_index_cache(",
+            "expected_config: Mapping[str, Any] | None = None",
+            "expected_config=expected_cache_config",
+            "rows_from_index cache config mismatch",
+            '"stale"',
+            "manifest_summary_from_selected_rows(config[\"input_data\"], rows)",
+        ):
+            self.assertIn(token, text)
+        self.assertLess(
+            text.index("expected_cache_config = rows_from_index_cache_config"),
+            text.index("rows, skipped = wait_for_rows_from_index_cache"),
+        )
+
     def test_trainer_waits_on_rank0_visual_status_before_ddp_barrier(self) -> None:
         text = self.trainer_text
         self.assertIn("rank0_stage_status_path", text)
