@@ -1,6 +1,7 @@
+import copy
+import tempfile
 import unittest
 from pathlib import Path
-import tempfile
 
 import numpy as np
 
@@ -637,6 +638,56 @@ class SonicKinTrainTimingTests(unittest.TestCase):
         self.assertAlmostEqual(float(metrics["temporal_consistency_mse_norm"]), 0.5)
         self.assertAlmostEqual(float(metrics["temporal_consistency_loss_weight"]), 0.01)
         self.assertAlmostEqual(float(loss), 0.255)
+
+    def test_supervised_resume_checkpoint_restores_model_optimizer_and_step(self):
+        torch = sonic_train.torch
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            model = sonic_train.nn.Linear(2, 1)
+            optimizer = torch.optim.AdamW(model.parameters(), lr=0.01, weight_decay=0.1)
+            x = torch.tensor([[1.0, 2.0]], dtype=torch.float32)
+            loss = model(x).sum()
+            loss.backward()
+            optimizer.step()
+            saved_model_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
+            saved_optimizer_state = copy.deepcopy(optimizer.state_dict())
+            sonic_train.save_checkpoint(
+                output_dir,
+                model,
+                optimizer,
+                step=1234,
+                metrics={"loss": 0.5},
+                keep_last=2,
+            )
+
+            resumed_model = sonic_train.nn.Linear(2, 1)
+            resumed_optimizer = torch.optim.AdamW(resumed_model.parameters(), lr=0.01, weight_decay=0.1)
+            resume_state = sonic_train.load_supervised_resume_checkpoint(
+                output_dir / "checkpoints" / "latest.pt",
+                resumed_model,
+                resumed_optimizer,
+                torch.device("cpu"),
+            )
+
+            self.assertEqual(resume_state["step"], 1234)
+            self.assertEqual(resume_state["metrics_keys"], ["loss"])
+            for key, expected in saved_model_state.items():
+                torch.testing.assert_close(resumed_model.state_dict()[key], expected)
+            self.assertEqual(
+                resumed_optimizer.state_dict()["param_groups"],
+                saved_optimizer_state["param_groups"],
+            )
+            for loaded_state, expected_state in zip(
+                resumed_optimizer.state_dict()["state"].values(),
+                saved_optimizer_state["state"].values(),
+            ):
+                self.assertEqual(loaded_state.keys(), expected_state.keys())
+                for key, expected in expected_state.items():
+                    loaded = loaded_state[key]
+                    if torch.is_tensor(expected):
+                        torch.testing.assert_close(loaded, expected)
+                    else:
+                        self.assertEqual(loaded, expected)
 
     def test_ab_overlap_loss_weight_is_config_gated(self):
         self.assertEqual(

@@ -528,6 +528,13 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
         self.assertIn("DISABLE_VISUAL_VALIDATION", text)
         self.assertIn("--disable-visual-validation", text)
 
+    def test_launcher_supports_supervised_resume_checkpoint_override(self) -> None:
+        text = self.launcher_text
+        self.assertIn("RESUME_CHECKPOINT", text)
+        self.assertIn("missing supervised resume checkpoint", text)
+        self.assertIn("--resume-checkpoint", text)
+        self.assertIn('"resume_checkpoint": sys.argv[13]', text)
+
     def test_launcher_accepts_2gpu_configs_by_matching_required_gpu_count(self) -> None:
         text = self.launcher_text
         self.assertIn('NPROC_PER_NODE="${NPROC_PER_NODE:-4}"', text)
@@ -574,6 +581,16 @@ class SupervisedTrainerDdpGuardrailTests(unittest.TestCase):
         self.assertIn("run_visual_validation", text)
         self.assertIn("save_checkpoint(output_dir, unwrap_model(model)", text)
         self.assertIn("distributed_barrier(runtime)", text)
+
+    def test_trainer_exposes_supervised_resume_checkpoint_restore_path(self) -> None:
+        text = self.trainer_text
+        self.assertIn("--resume-checkpoint", text)
+        self.assertIn("load_supervised_resume_checkpoint", text)
+        self.assertIn('required_keys = ("model", "optimizer", "step")', text)
+        self.assertIn("unwrap_model(model).load_state_dict(payload[\"model\"])", text)
+        self.assertIn("optimizer.load_state_dict(payload[\"optimizer\"])", text)
+        self.assertIn('step = int(resume_state["step"]) if resume_state is not None else 0', text)
+        self.assertIn('start_event["resume_checkpoint"] = resume_state["path"]', text)
 
     def test_trainer_data_package_stays_paired_soma_motionlib_only(self) -> None:
         text = self.trainer_text

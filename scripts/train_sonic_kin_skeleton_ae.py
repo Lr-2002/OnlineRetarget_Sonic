@@ -5577,6 +5577,38 @@ def save_checkpoint(
         old.unlink(missing_ok=True)
 
 
+def load_supervised_resume_checkpoint(
+    checkpoint_path: Path,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device | str,
+) -> dict[str, Any]:
+    checkpoint_path = Path(checkpoint_path).expanduser()
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"resume checkpoint is missing: {checkpoint_path}")
+    payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if not isinstance(payload, Mapping):
+        raise TypeError(f"resume checkpoint must contain a mapping payload: {checkpoint_path}")
+    required_keys = ("model", "optimizer", "step")
+    missing = [key for key in required_keys if key not in payload]
+    if missing:
+        raise KeyError(f"resume checkpoint lacks required key(s) {missing}: {checkpoint_path}")
+    step = int(payload["step"])
+    if step < 0:
+        raise ValueError(f"resume checkpoint step must be non-negative: {checkpoint_path}")
+
+    unwrap_model(model).load_state_dict(payload["model"])
+    optimizer.load_state_dict(payload["optimizer"])
+    metrics = payload.get("metrics", {})
+    metrics_keys = sorted(str(key) for key in metrics) if isinstance(metrics, Mapping) else []
+    return {
+        "path": str(checkpoint_path),
+        "step": step,
+        "saved_at": str(payload.get("saved_at", "")),
+        "metrics_keys": metrics_keys,
+    }
+
+
 def trainable_parameter_names(model: nn.Module) -> list[str]:
     return [name for name, parameter in model.named_parameters() if parameter.requires_grad]
 
@@ -5597,6 +5629,7 @@ def write_manifest(
     skeleton_feature_lookup: SkeletonAEFeatureLookup | None = None,
     runtime: Mapping[str, Any] | None = None,
     evaluation_cohort_manifest: Mapping[str, Any] | None = None,
+    resume_checkpoint: Mapping[str, Any] | None = None,
     data_package_summary: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_root = Path(config["source_repo"])
@@ -5680,6 +5713,8 @@ def write_manifest(
     eval_cohort_summary = evaluation_cohort_artifact_summary(evaluation_cohort_manifest)
     if eval_cohort_summary:
         manifest["evaluation_cohort"] = eval_cohort_summary
+    if resume_checkpoint is not None:
+        manifest["resume_checkpoint"] = dict(resume_checkpoint)
     if data_package_summary is not None:
         manifest["data_package"] = dict(data_package_summary)
     if skeleton_feature_lookup is not None:
@@ -5820,6 +5855,11 @@ def main() -> None:
         "--wandb-mode",
         choices=("online", "offline", "disabled"),
         help="Override W&B mode; disabled prevents W&B initialization.",
+    )
+    parser.add_argument(
+        "--resume-checkpoint",
+        type=Path,
+        help="Load a supervised checkpoint written by this script and continue from its saved step.",
     )
     parser.add_argument(
         "--disable-visual-validation",
@@ -6281,6 +6321,24 @@ def main() -> None:
             weight_decay=float(config["training"]["weight_decay"]),
         )
         optimizer_parameter_names = trainable_parameter_names(raw_model)
+        resume_state: dict[str, Any] | None = None
+        if args.resume_checkpoint is not None:
+            with stage_trace.span("supervised_resume_checkpoint_load", checkpoint=str(args.resume_checkpoint)):
+                resume_state = load_supervised_resume_checkpoint(
+                    args.resume_checkpoint,
+                    model,
+                    optimizer,
+                    device,
+                )
+            if is_main:
+                print(
+                    json.dumps(
+                        {"event": "supervised_resume_checkpoint_load", **resume_state},
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+            distributed_barrier(runtime)
         loss_curve = output_dir / "loss_curve.csv"
         if is_main:
             write_loss_header(loss_curve)
@@ -6300,6 +6358,7 @@ def main() -> None:
                 skeleton_feature_lookup,
                 runtime,
                 evaluation_cohort_manifest=eval_cohort_manifest,
+                resume_checkpoint=resume_state,
                 data_package_summary=data_package_summary,
             )
         with stage_trace.span("manifest_barrier"):
@@ -6387,27 +6446,25 @@ def main() -> None:
         rng.manual_seed(seed + 20260520 + rank)
         start = time.perf_counter()
         last_visual_validation_time = start
-        step = 0
-        epoch = 0
+        step = int(resume_state["step"]) if resume_state is not None else 0
+        epoch = step // max(1, len(train_loader))
 
         if is_main:
-            print(
-                json.dumps(
-                    {
-                        "event": "start",
-                        "variant": config["variant"],
-                        "run_group": run_group,
-                        "output_dir": str(output_dir),
-                        "control_commit": manifest["control_revision_actual"],
-                        "source_repo_commit": manifest["source_revision_actual"],
-                        "train_chunks": len(train_dataset),
-                        "validation_chunks": len(validation_dataset),
-                        "world_size": world_size,
-                    },
-                    sort_keys=True,
-                ),
-                flush=True,
-            )
+            start_event = {
+                "event": "start",
+                "variant": config["variant"],
+                "run_group": run_group,
+                "output_dir": str(output_dir),
+                "control_commit": manifest["control_revision_actual"],
+                "source_repo_commit": manifest["source_revision_actual"],
+                "train_chunks": len(train_dataset),
+                "validation_chunks": len(validation_dataset),
+                "world_size": world_size,
+            }
+            if resume_state is not None:
+                start_event["resume_checkpoint"] = resume_state["path"]
+                start_event["resume_step"] = int(resume_state["step"])
+            print(json.dumps(start_event, sort_keys=True), flush=True)
 
         while step < max_steps:
             if train_sampler is not None:

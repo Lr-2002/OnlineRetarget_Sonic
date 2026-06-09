@@ -12,6 +12,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 RUN_GROUP="${KIN_RUN_GROUP:-kin_soma_motionlib_supervised_$(date -u +%Y%m%dT%H%M%SZ)}"
 LAUNCH_ROOT="${LAUNCH_ROOT:-${ROOT}/outputs/sonic_kin_soma_motionlib_supervised_runs/${RUN_GROUP}/_launcher}"
 GIT_FETCH_TIMEOUT_SECONDS="${GIT_FETCH_TIMEOUT_SECONDS:-60}"
+RESUME_CHECKPOINT="${RESUME_CHECKPOINT:-}"
 
 cd "${ROOT}"
 
@@ -25,6 +26,10 @@ if [[ ! -f "${CONFIG}" ]]; then
 fi
 if [[ ! -x "${PYTHON_BIN}" ]]; then
   echo "missing python launcher: ${PYTHON_BIN}" >&2
+  exit 1
+fi
+if [[ -n "${RESUME_CHECKPOINT}" && ! -f "${RESUME_CHECKPOINT}" ]]; then
+  echo "missing supervised resume checkpoint: ${RESUME_CHECKPOINT}" >&2
   exit 1
 fi
 
@@ -195,6 +200,9 @@ fi
 if [[ "${DISABLE_VISUAL_VALIDATION:-0}" == "1" ]]; then
   TRAIN_ARGS+=(--disable-visual-validation)
 fi
+if [[ -n "${RESUME_CHECKPOINT}" ]]; then
+  TRAIN_ARGS+=(--resume-checkpoint "${RESUME_CHECKPOINT}")
+fi
 TRAIN_COMMAND="$(printf '%q ' "${PYTHON_BIN}" -m torch.distributed.run --standalone "--nproc-per-node=${NPROC_PER_NODE}" "${TRAIN_ARGS[@]}")"
 LOG_PATH_QUOTED="$(printf '%q' "${LOG_PATH}")"
 
@@ -210,11 +218,12 @@ export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
 export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
 export NCCL_ALGO="${NCCL_ALGO:-Ring}"
 echo "variant=${VARIANT} nproc=${NPROC_PER_NODE} cuda_visible_devices=${CUDA_VISIBLE_DEVICES} control_commit=${CONTROL_COMMIT} external_source_commit=${EXTERNAL_SOURCE_COMMIT}"
+echo "resume_checkpoint=${RESUME_CHECKPOINT}"
 ${TRAIN_COMMAND} 2>&1 | tee -a ${LOG_PATH_QUOTED}
 EOF
 )
 
-"${PYTHON_BIN}" - "${LAUNCH_ROOT}/launch_manifest.json" "${RUN_GROUP}" "${CONFIG}" "${VARIANT}" "${NPROC_PER_NODE}" "${CUDA_VISIBLE_DEVICES}" "${CONTROL_COMMIT}" "${EXTERNAL_SOURCE_COMMIT}" "${WANDB_MODE:-online}" "${DISABLE_VISUAL_VALIDATION:-0}" "${MAX_STEPS:-}" "${SESSION}" <<'PY'
+"${PYTHON_BIN}" - "${LAUNCH_ROOT}/launch_manifest.json" "${RUN_GROUP}" "${CONFIG}" "${VARIANT}" "${NPROC_PER_NODE}" "${CUDA_VISIBLE_DEVICES}" "${CONTROL_COMMIT}" "${EXTERNAL_SOURCE_COMMIT}" "${WANDB_MODE:-online}" "${DISABLE_VISUAL_VALIDATION:-0}" "${MAX_STEPS:-}" "${SESSION}" "${RESUME_CHECKPOINT}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -233,6 +242,7 @@ manifest = {
     "disable_visual_validation": sys.argv[10] == "1",
     "max_steps_override": sys.argv[11],
     "tmux_session": sys.argv[12],
+    "resume_checkpoint": sys.argv[13],
     "entrypoint": "scripts/train_sonic_kin_skeleton_ae.py",
     "distributed_launcher": "python -m torch.distributed.run",
     "contract": "strict_supervised_soma_motionlib_kin_only_no_ppo_no_isaac_no_reward_episode_length",
