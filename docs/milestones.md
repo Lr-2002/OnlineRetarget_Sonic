@@ -228,6 +228,8 @@ matched proportional loss-off baseline. OnlineRetarget remains responsible for
 registry, curation, split, audit, offline metric, data-package filtering,
 launcher guardrails, and documentation artifacts.
 
+Weekly walk-data outcome target: online retargeter walk should be non-jittery, non-drifting, avoid self-collision, and be at least similar to the source walk data.
+
 ## M6 - Model Design Ablations and Latency Gate
 
 Purpose: compare design choices under the online constraint instead of optimizing only loss.

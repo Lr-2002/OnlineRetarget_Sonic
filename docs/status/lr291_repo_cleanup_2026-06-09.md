@@ -38,6 +38,10 @@ launcher.
 - LR-280 data-package configs pin the paired SOMA motionlib kin/walk package
   indicator, expected row count, and digest.
 
+## Weekly Walk-Data Outcome Target
+
+online retargeter walk should be non-jittery, non-drifting, avoid self-collision, and be at least similar to the source walk data.
+
 ## Verification Targets
 
 - `PYTHONPATH=src:. python3 -m unittest tests.test_remote_launcher_guardrails tests.test_data_package_indicator -q`

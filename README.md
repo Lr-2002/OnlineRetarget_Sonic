@@ -21,6 +21,8 @@ the active supervised training path.
   Skeleton Geometry AE conditioning versus no skeleton encoder. See
   `docs/status/lr177_a0_usage.md`.
 
+Weekly walk-data outcome target: online retargeter walk should be non-jittery, non-drifting, avoid self-collision, and be at least similar to the source walk data.
+
 Historical SONIC-native shared-token configs named
 `sonic_kin_only_soma_encoder_{uniform,proportional}.json` remain in the repo as
 contract and migration artifacts. They are not the default current launcher
