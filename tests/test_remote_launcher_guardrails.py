@@ -40,6 +40,7 @@ FINAL_KIN_WALK_PACKAGE_INDICATOR = (
 )
 FINAL_KIN_WALK_ROW_COUNT = 11248
 FINAL_KIN_WALK_ROWS_SHA256 = "2fb36f38d023752e2d1113b1c3455dcb98d1c82318262bde6dfc9c3d34fd79cd"
+FINAL_KIN_WALK_VALIDATION_RATIO = 0.015
 ACTIVE_FOUR_GPU_SOMA_MOTIONLIB_CONFIGS = (
     *SUPERVISED_CONFIGS,
     LOSS_OFF_BASELINE_CONFIG,
@@ -261,6 +262,11 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                 self.assertNotIn("raw_sonic", data_package["indicator"])
                 self.assertEqual(config["training"]["required_gpu_count"], 4)
                 self.assertEqual(config["runtime"]["required_gpu_count"], 4)
+                self.assertEqual(config["split"]["validation_ratio"], FINAL_KIN_WALK_VALIDATION_RATIO)
+                self.assertGreaterEqual(
+                    FINAL_KIN_WALK_ROW_COUNT * config["split"]["validation_ratio"],
+                    LR270_SHARED_EVAL_COHORT["metric_num_samples"],
+                )
                 self.assertEqual(
                     config["validation_command"],
                     f"CONFIG=configs/{path.name} scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh",
