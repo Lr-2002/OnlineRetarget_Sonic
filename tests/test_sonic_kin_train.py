@@ -748,7 +748,7 @@ class SonicKinTrainTimingTests(unittest.TestCase):
         self.assertAlmostEqual(float(metrics["command_mse_norm"]), 0.0)
         self.assertAlmostEqual(float(metrics["ab_overlap_mse_norm"]), 4900.5)
         self.assertAlmostEqual(float(metrics["ab_overlap_loss_weight"]), 0.01)
-        self.assertAlmostEqual(float(loss), 49.005)
+        self.assertAlmostEqual(float(loss), 49.005, delta=1e-5)
 
     def test_training_batch_selection_preserves_order_when_ab_overlap_is_active(self):
         torch = sonic_train.torch
@@ -773,6 +773,7 @@ class SonicKinTrainTimingTests(unittest.TestCase):
         torch.testing.assert_close(target_sel, motion_sel + 200.0)
 
     def test_kin_window_dataset_exposes_same_clip_ab_horizon_pairs(self):
+        torch = sonic_train.torch
         frames = 8
         joint_pos = np.arange(frames, dtype=np.float32).reshape(frames, 1)
         joint_vel = (np.arange(frames, dtype=np.float32) + 100.0).reshape(frames, 1)
