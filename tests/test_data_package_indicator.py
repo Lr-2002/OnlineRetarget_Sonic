@@ -87,6 +87,22 @@ class DataPackageIndicatorTests(unittest.TestCase):
         self.assertEqual(summary["rejected_row_count"], 1)
         self.assertTrue(summary["max_clips_applied"])
 
+    def test_config_expected_row_count_is_validated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            indicator = _write_indicator(Path(tmp), _walk_rows()[:2])
+            input_data = _input_data(indicator)
+            input_data["data_package"]["expected_row_count"] = 3
+            with self.assertRaisesRegex(ValueError, "row count mismatch"):
+                filter_rows_by_data_package_config(_walk_rows(), input_data)
+
+    def test_config_package_rows_digest_is_validated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            indicator = _write_indicator(Path(tmp), _walk_rows()[:2])
+            input_data = _input_data(indicator)
+            input_data["data_package"]["package_rows_sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "package_rows_sha256 mismatch"):
+                filter_rows_by_data_package_config(_walk_rows(), input_data)
+
     def test_indicator_header_must_match_config_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             indicator = _write_indicator(Path(tmp), _walk_rows()[:1], spec="phy")
