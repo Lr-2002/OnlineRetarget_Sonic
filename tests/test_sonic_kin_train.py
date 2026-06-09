@@ -637,3 +637,170 @@ class SonicKinTrainTimingTests(unittest.TestCase):
         self.assertAlmostEqual(float(metrics["temporal_consistency_mse_norm"]), 0.5)
         self.assertAlmostEqual(float(metrics["temporal_consistency_loss_weight"]), 0.01)
         self.assertAlmostEqual(float(loss), 0.255)
+
+    def test_ab_overlap_loss_weight_is_config_gated(self):
+        self.assertEqual(
+            sonic_train.command_ab_overlap_loss_weight({"training": {}}),
+            0.0,
+        )
+        self.assertEqual(
+            sonic_train.command_ab_overlap_loss_weight(
+                {"training": {"ab_overlap_loss_enabled": True}}
+            ),
+            0.01,
+        )
+        self.assertEqual(
+            sonic_train.command_ab_overlap_loss_weight(
+                {
+                    "training": {
+                        "ab_overlap_loss_enabled": True,
+                        "ab_overlap_loss_weight": 0.03,
+                    }
+                }
+            ),
+            0.03,
+        )
+
+    def test_ab_overlap_batch_offset_uses_future_step_over_frame_stride(self):
+        config = {
+            "features": {"future_step": 5},
+            "training": {"frame_stride": 1},
+        }
+        self.assertEqual(sonic_train.command_ab_overlap_batch_offset(config), 5)
+        with self.assertRaisesRegex(ValueError, "integer multiple"):
+            sonic_train.command_ab_overlap_batch_offset(
+                {"features": {"future_step": 5}, "training": {"frame_stride": 2}}
+            )
+
+    def test_command_ab_overlap_loss_detects_between_horizon_error_when_temporal_deltas_match(self):
+        torch = sonic_train.torch
+        # Each row has perfect within-window delta agreement, but sample B horizon 0
+        # disagrees with sample A horizon 1.
+        pred_frames = torch.tensor(
+            [
+                [[0.0, 0.0], [1.0, 0.0]],
+                [[100.0, 0.0], [101.0, 0.0]],
+            ],
+            dtype=torch.float32,
+        )
+        target_frames = torch.tensor(
+            [
+                [[10.0, 0.0], [11.0, 0.0]],
+                [[20.0, 0.0], [21.0, 0.0]],
+            ],
+            dtype=torch.float32,
+        )
+        pred_command = pred_frames.reshape(2, -1)
+        target_command = target_frames.reshape(2, -1)
+
+        temporal = sonic_train.command_temporal_consistency_loss(
+            pred_command,
+            target_command,
+            joint_dim=1,
+        )
+        overlap = sonic_train.command_ab_overlap_loss(
+            pred_command,
+            joint_dim=1,
+            batch_offset=1,
+            overlap_horizon_frames=1,
+        )
+
+        self.assertAlmostEqual(float(temporal), 0.0)
+        self.assertAlmostEqual(float(overlap), 4900.5)
+
+    def test_loss_and_metrics_adds_ab_overlap_mse_when_enabled(self):
+        torch = sonic_train.torch
+        pred_command = torch.tensor(
+            [
+                [0.0, 0.0, 1.0, 0.0],
+                [100.0, 0.0, 101.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        target_command = pred_command.clone()
+        pred_anchor = torch.zeros(2, 18, dtype=torch.float32)
+        target_anchor = torch.zeros(2, 18, dtype=torch.float32)
+        pred = torch.cat([pred_command, pred_anchor], dim=-1)
+        target = torch.cat([target_command, target_anchor], dim=-1)
+        stats = {
+            "target_mean": torch.zeros(pred.shape[-1], dtype=torch.float32),
+            "target_std": torch.ones(pred.shape[-1], dtype=torch.float32),
+        }
+
+        loss, metrics = sonic_train.loss_and_metrics(
+            pred,
+            target,
+            target,
+            stats,
+            4,
+            1,
+            18,
+            True,
+            1.0,
+            0.25,
+            0.5,
+            0.0,
+            0.01,
+            1,
+            1,
+        )
+
+        self.assertAlmostEqual(float(metrics["command_mse_norm"]), 0.0)
+        self.assertAlmostEqual(float(metrics["ab_overlap_mse_norm"]), 4900.5)
+        self.assertAlmostEqual(float(metrics["ab_overlap_loss_weight"]), 0.01)
+        self.assertAlmostEqual(float(loss), 49.005)
+
+    def test_training_batch_selection_preserves_order_when_ab_overlap_is_active(self):
+        torch = sonic_train.torch
+        motion = torch.arange(10, dtype=torch.float32).reshape(10, 1)
+        skeleton = motion + 100.0
+        target = motion + 200.0
+        rng = torch.Generator(device=motion.device)
+        rng.manual_seed(1234)
+
+        motion_sel, skeleton_sel, target_sel = sonic_train.select_training_batch_frames(
+            motion,
+            skeleton,
+            target,
+            4,
+            rng,
+            preserve_order=True,
+        )
+
+        self.assertEqual(motion_sel.shape[0], 4)
+        torch.testing.assert_close(motion_sel[1:] - motion_sel[:-1], torch.ones(3, 1))
+        torch.testing.assert_close(skeleton_sel, motion_sel + 100.0)
+        torch.testing.assert_close(target_sel, motion_sel + 200.0)
+
+    def test_kin_window_dataset_exposes_same_clip_ab_horizon_pairs(self):
+        frames = 8
+        joint_pos = np.arange(frames, dtype=np.float32).reshape(frames, 1)
+        joint_vel = (np.arange(frames, dtype=np.float32) + 100.0).reshape(frames, 1)
+        body_pos = np.zeros((frames, 1, 3), dtype=np.float32)
+        body_quat = np.zeros((frames, 1, 4), dtype=np.float32)
+        body_quat[..., 0] = 1.0
+        arrays = {
+            "joint_pos": joint_pos,
+            "joint_vel": joint_vel,
+            "body_pos_w": body_pos,
+            "body_quat_w": body_quat,
+        }
+        config = {
+            "input_data": {"data_root": "/tmp/unused"},
+            "features": {"future_window_frames": 3, "future_step": 2},
+            "training": {"frame_stride": 1, "loader_chunk_frames": 8},
+        }
+        rows = [{"relative_path": "clip.npz", "frame_count": frames, "split": "train"}]
+        original_load_arrays = sonic_train.load_arrays
+        sonic_train.load_arrays = lambda _path: arrays
+        try:
+            dataset = sonic_train.KinWindowDataset(rows, "train", config)
+            _motion, _skeleton, target = dataset[0]
+        finally:
+            sonic_train.load_arrays = original_load_arrays
+
+        command = target[:, : 3 * 2].reshape(frames, 3, 2)
+        offset = sonic_train.command_ab_overlap_batch_offset(config)
+        self.assertEqual(offset, 2)
+        torch.testing.assert_close(command[0, 1], command[offset, 0])
+        torch.testing.assert_close(command[1, 1], command[1 + offset, 0])
