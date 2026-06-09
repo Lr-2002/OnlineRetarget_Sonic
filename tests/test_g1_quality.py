@@ -9,6 +9,7 @@ import unittest
 from online_retarget.data.bones_seed import G1_CSV_COLUMNS, G1_JOINT_COLUMNS
 from online_retarget.data.g1_quality import (
     G1QualityConfig,
+    g1_fk_body_positions,
     load_g1_kinematic_model,
     scan_g1_quality_from_index,
     summarize_g1_rows,
@@ -191,6 +192,24 @@ class G1QualityTests(unittest.TestCase):
             self.assertGreater(row["contact_skate_rate"], 0.0)
             self.assertGreater(row["max_contact_skate_distance"], 0.0)
             self.assertGreater(row["joint_limit_violation_rate"], 0.0)
+
+    def test_load_g1_kinematic_model_treats_joint_type_free_as_root_freejoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model_xml = Path(tmp) / "g1.xml"
+            model_xml.write_text(_minimal_g1_mjcf_joint_type_free(), encoding="utf-8")
+            model = load_g1_kinematic_model(model_xml)
+
+            pelvis = next(body for body in model.bodies if body.name == "pelvis")
+            self.assertTrue(pelvis.has_freejoint)
+            self.assertNotIn("floating_base", model.joint_ranges)
+
+            positions = g1_fk_body_positions(
+                model,
+                [0.0] * len(G1_JOINT_COLUMNS),
+                root_position=(1.0, 2.0, 3.0),
+                root_euler=(0.0, 0.0, 0.0),
+            )
+            self.assertEqual(positions["pelvis"][0], (1.0, 2.0, 3.0))
 
     def test_summarize_g1_rows_records_slow_contact_skate_without_flag(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -496,6 +515,25 @@ def _minimal_g1_mjcf() -> str:
       <body name="right_ankle_roll_link" pos="0 -0.1 0">
         <geom pos="0 0 0"/>
         <body name="right_toe_link" pos="0.1 0 0"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+
+
+def _minimal_g1_mjcf_joint_type_free() -> str:
+    return """<mujoco model="minimal_g1_joint_type_free">
+  <worldbody>
+    <body name="pelvis" pos="0 0 0">
+      <joint name="floating_base" type="free"/>
+      <geom pos="0 0 0"/>
+      <body name="left_ankle_roll_link" pos="0 0 0">
+        <joint name="left_hip_pitch_joint" axis="0 1 0" range="-1 1"/>
+        <geom pos="0 0 0"/>
+      </body>
+      <body name="right_ankle_roll_link" pos="0 -0.1 0">
+        <geom pos="0 0 0"/>
       </body>
     </body>
   </worldbody>

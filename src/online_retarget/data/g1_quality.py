@@ -504,15 +504,20 @@ def load_g1_kinematic_model(
         joint_name: str | None = None
         joint_axis: tuple[float, float, float] | None = None
         joint_range: tuple[float, float] | None = None
+        has_freejoint = element.find("freejoint") is not None
         if joint_element is not None:
-            joint_name = joint_element.attrib.get("name")
-            joint_axis = _parse_vec3(joint_element.attrib.get("axis", "0 0 1"))
-            if "range" in joint_element.attrib:
-                parsed_range = _parse_float_tuple(joint_element.attrib["range"])
-                if len(parsed_range) >= 2:
-                    joint_range = (parsed_range[0], parsed_range[1])
-                    if joint_name:
-                        joint_ranges[joint_name] = joint_range
+            joint_type = joint_element.attrib.get("type", "hinge")
+            if joint_type == "free":
+                has_freejoint = True
+            else:
+                joint_name = joint_element.attrib.get("name")
+                joint_axis = _parse_vec3(joint_element.attrib.get("axis", "0 0 1"))
+                if "range" in joint_element.attrib:
+                    parsed_range = _parse_float_tuple(joint_element.attrib["range"])
+                    if len(parsed_range) >= 2:
+                        joint_range = (parsed_range[0], parsed_range[1])
+                        if joint_name:
+                            joint_ranges[joint_name] = joint_range
         body = G1MJCFBody(
             name=element.attrib.get("name", f"body_{body_index}"),
             parent=parent,
@@ -521,7 +526,7 @@ def load_g1_kinematic_model(
             joint_name=joint_name,
             joint_axis=joint_axis,
             joint_range=joint_range,
-            has_freejoint=element.find("freejoint") is not None,
+            has_freejoint=has_freejoint,
             geom_points=_local_geom_points(element),
         )
         bodies.append(body)
