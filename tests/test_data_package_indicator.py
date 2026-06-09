@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -32,6 +33,9 @@ REAL_SOMA_MOTION_DIR = Path(
 REAL_KIN_WALK_ROWS_JSONL = REAL_KIN_WALK_INDICATOR.with_suffix(".rows.jsonl")
 REAL_KIN_WALK_ROW_COUNT = 11248
 REAL_KIN_WALK_ROWS_SHA256 = "2fb36f38d023752e2d1113b1c3455dcb98d1c82318262bde6dfc9c3d34fd79cd"
+REAL_KIN_WALK_VALIDATION_RATIO = 0.015
+REAL_KIN_WALK_SPLIT_SALT = "sonic-kin-soma-motionlib-supervised-20260528"
+REAL_KIN_WALK_METRIC_NUM_SAMPLES = 100
 
 
 class DataPackageIndicatorTests(unittest.TestCase):
@@ -189,6 +193,24 @@ class DataPackageIndicatorTests(unittest.TestCase):
         self.assertEqual(package_summary["selected_row_count"], REAL_KIN_WALK_ROW_COUNT)
         self.assertEqual(package_summary["package_rows_sha256"], REAL_KIN_WALK_ROWS_SHA256)
 
+    def test_real_kin_walk_split_can_fill_metric_cohort_when_available(self):
+        if not REAL_KIN_WALK_ROWS_JSONL.exists():
+            self.skipTest(f"real kin/walk rows JSONL is not available locally: {REAL_KIN_WALK_ROWS_JSONL}")
+
+        rows = _load_real_soma_motionlib_rows_jsonl(REAL_KIN_WALK_ROWS_JSONL)
+        threshold = int(REAL_KIN_WALK_VALIDATION_RATIO * 1_000_000)
+        validation_rows = [
+            row
+            for row in rows
+            if _stable_hash_int(row["relative_path"] + REAL_KIN_WALK_SPLIT_SALT) % 1_000_000 < threshold
+        ]
+        eligible_rows = [row for row in validation_rows if int(row.get("frame_count", 0)) > 1]
+
+        self.assertEqual(len(rows), REAL_KIN_WALK_ROW_COUNT)
+        self.assertEqual(len(validation_rows), 141)
+        self.assertEqual(len(eligible_rows), 141)
+        self.assertGreaterEqual(len(eligible_rows), REAL_KIN_WALK_METRIC_NUM_SAMPLES)
+
 
 def _walk_rows():
     return [
@@ -301,6 +323,10 @@ def _load_real_soma_motionlib_rows_jsonl(path: Path):
             if line.strip():
                 rows.append(json.loads(line))
     return rows
+
+
+def _stable_hash_int(text: str) -> int:
+    return int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:16], 16)
 
 
 def _single_joblib_entry(loaded, path: Path):

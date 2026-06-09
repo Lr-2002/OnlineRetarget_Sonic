@@ -84,7 +84,7 @@
     }
   },
   "split": {
-    "validation_ratio": 0.005,
+    "validation_ratio": 0.015,
     "hash_salt": "sonic-kin-soma-motionlib-supervised-20260528"
   },
   "normalization": {
