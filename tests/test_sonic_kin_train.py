@@ -29,7 +29,7 @@ if sonic_train is not None:
 
 @unittest.skipIf(sonic_train is None, "torch is required for sonic kin trainer tests")
 class SonicKinTrainTimingTests(unittest.TestCase):
-    def test_shared_evaluation_cohort_ignores_variant_name_and_keeps_visual_subset(self):
+    def test_shared_evaluation_cohort_ignores_variant_name_and_run_group(self):
         rows = [
             {
                 "relative_path": f"sample_{index:03d}.pkl",
@@ -56,13 +56,13 @@ class SonicKinTrainTimingTests(unittest.TestCase):
             "variant": {"name": "treatment_variant"},
             "wandb": {"name": "treatment_run"},
         }
-        treatment = sonic_train.build_evaluation_cohort(rows, base_config, run_group="shared_group")
+        treatment = sonic_train.build_evaluation_cohort(rows, base_config, run_group="treatment_group")
         baseline_config = {
             **base_config,
             "variant": {"name": "loss_off_baseline_variant"},
             "wandb": {"name": "baseline_run"},
         }
-        baseline = sonic_train.build_evaluation_cohort(rows, baseline_config, run_group="shared_group")
+        baseline = sonic_train.build_evaluation_cohort(rows, baseline_config, run_group="baseline_group")
 
         treatment_metric_keys = [
             sonic_train.evaluation_row_stable_key(row) for row in treatment["metric_rows"]
@@ -83,6 +83,9 @@ class SonicKinTrainTimingTests(unittest.TestCase):
         self.assertEqual(treatment_visual_keys, baseline_visual_keys)
         self.assertEqual(treatment_visual_keys, treatment_metric_keys[:8])
         self.assertTrue(treatment["visual_subset_of_metric"])
+        self.assertIs(treatment["include_run_group"], False)
+        self.assertEqual(treatment["run_group"], "")
+        self.assertEqual(treatment["salt_sha256"], baseline["salt_sha256"])
 
         manifest = sonic_train.evaluation_cohort_manifest_payload(treatment, Path("eval_cohort_manifest.json"))
         baseline_manifest = sonic_train.evaluation_cohort_manifest_payload(
@@ -99,6 +102,9 @@ class SonicKinTrainTimingTests(unittest.TestCase):
         self.assertEqual(len(manifest["visual_rows_sha256"]), 64)
         self.assertEqual(manifest["metric_rows_sha256"], baseline_manifest["metric_rows_sha256"])
         self.assertEqual(manifest["visual_rows_sha256"], baseline_manifest["visual_rows_sha256"])
+        self.assertIs(manifest["include_run_group"], False)
+        self.assertEqual(manifest["run_group"], "")
+        self.assertNotIn("run_group", manifest["sampling"]["salt_fields"])
         self.assertIn("variant.name", manifest["sampling"]["excluded_config_fields"])
         self.assertIn("wandb.name", manifest["sampling"]["excluded_config_fields"])
 

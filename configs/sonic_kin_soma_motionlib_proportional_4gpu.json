@@ -144,7 +144,7 @@
     "enabled": true,
     "id": "lr270_shared_eval_v1",
     "seed": 20260608,
-    "include_run_group": true,
+    "include_run_group": false,
     "visual_num_samples": 8,
     "metric_num_samples": 100,
     "manifest_path": "eval_cohort_manifest.json"

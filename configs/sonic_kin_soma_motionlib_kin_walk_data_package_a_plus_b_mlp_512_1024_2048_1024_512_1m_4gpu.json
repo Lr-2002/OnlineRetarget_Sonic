@@ -2,7 +2,7 @@
   "schema_version": "1.1.0",
   "owner": "OnlineRetarget",
   "training_lane": "soma_motionlib_kin_only",
-  "purpose": "Strict 4-GPU supervised proportional-SOMA kin/walk data-package A-only treatment for LR-280. Pins the accepted paired soma_motionlib kin/walk package digest, enables g1_kin command temporal-consistency auxiliary loss at weight 0.01, keeps A/B overlap off, and exposes the shared LR-270 metric/eval cohort; no PPO, no Isaac rollout, and no reward surface.",
+  "purpose": "Strict 4-GPU supervised proportional-SOMA kin/walk data-package A+B non-uniform MLP capacity experiment (512-1024-2048-1024-512 hidden layer widths) for LR-290. Pins the accepted paired soma_motionlib kin/walk package digest and preserves the A+B data, split, loss, visual, metric, fixed eval-item cohort, seed, and launcher contract; changes only model capacity and uses max_steps=1000000.",
   "source_repo": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training",
   "source_rev": "remote-latest-required-before-training",
   "input_data": {
@@ -48,11 +48,12 @@
       "g1_kin_root_orientation_rmse"
     ],
     "auxiliary": [
-      "g1_kin_command_temporal_consistency_delta_mse"
+      "g1_kin_command_temporal_consistency_delta_mse",
+      "g1_kin_command_ab_overlap_mse"
     ]
   },
-  "output_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_kin_soma_motionlib_kin_walk_data_package_runs/{run_group}/a_only",
-  "validation_command": "CONFIG=configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_only_4gpu.json scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh",
+  "output_dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/sonic_kin_soma_motionlib_kin_walk_data_package_runs/{run_group}/a_plus_b_mlp_512_1024_2048_1024_512_1m",
+  "validation_command": "CONFIG=configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_2048_1024_512_1m_4gpu.json scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh",
   "expected_artifacts": [
     "manifest.json",
     "loss_curve.csv",
@@ -61,8 +62,8 @@
     "logs/train.log"
   ],
   "variant": {
-    "name": "sonic_kin_soma_motionlib_kin_walk_data_package_a_only",
-    "family": "soma_encoder_temporal_consistency_a_only",
+    "name": "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_2048_1024_512_1m",
+    "family": "soma_encoder_temporal_consistency_a_plus_b_capacity",
     "type": "concat",
     "soma_topology": "proportional",
     "gpu_topology": "single_4gpu_ddp_job"
@@ -91,8 +92,13 @@
     "frames_per_chunk": 1024
   },
   "model": {
-    "hidden_dim": 512,
-    "num_layers": 3,
+    "hidden_dims": [
+      512,
+      1024,
+      2048,
+      1024,
+      512
+    ],
     "dropout": 0.0
   },
   "training": {
@@ -117,8 +123,8 @@
     "root_rot_loss_weight": 0.5,
     "temporal_consistency_loss_enabled": true,
     "temporal_consistency_loss_weight": 0.01,
-    "ab_overlap_loss_enabled": false,
-    "ab_overlap_loss_weight": 0.0
+    "ab_overlap_loss_enabled": true,
+    "ab_overlap_loss_weight": 0.01
   },
   "visual_validation": {
     "enabled": true,
@@ -178,7 +184,7 @@
     "project": "OnlineRetarget",
     "entity": null,
     "group": "sonic_kin_walk_data_package_{run_group}",
-    "name": "sonic_kin_soma_motionlib_kin_walk_data_package_a_only_{run_group}",
+    "name": "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_2048_1024_512_1m_{run_group}",
     "dir": "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/wandb",
     "tags": [
       "sonic-kin-only",
@@ -188,10 +194,13 @@
       "kin-walk-package",
       "data-package",
       "temporal-consistency-loss-on",
-      "ab-overlap-loss-off",
-      "a-only",
+      "ab-overlap-loss-on",
+      "a-plus-b",
       "acceptance-backend",
-      "4gpu"
+      "4gpu",
+      "capacity-sweep",
+      "mlp-512-1024-2048-1024-512",
+      "1m-steps"
     ]
   }
 }
