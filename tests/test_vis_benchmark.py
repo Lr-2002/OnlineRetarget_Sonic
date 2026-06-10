@@ -26,7 +26,7 @@ class VisBenchmarkTests(unittest.TestCase):
 
         self.assertTrue(hasattr(module, "run_phase3_benchmark"))
 
-    def test_synthetic_smoke_reports_observed_throughput_without_conclusion(self) -> None:
+    def test_synthetic_smoke_reports_no_observed_benchmark_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             report = run_phase3_benchmark(
                 BenchmarkConfig(
@@ -41,10 +41,62 @@ class VisBenchmarkTests(unittest.TestCase):
         self.assertEqual(report["status"], "ok")
         self.assertEqual(report["benchmark_scope"], "synthetic_smoke")
         self.assertIsNone(report["performance_conclusion"])
-        self.assertEqual(report["throughput"]["observed"]["completed_packets"], 2)
-        self.assertIn("effective_fps", report["throughput"]["observed"])
+        self.assertEqual(report["throughput"]["observed"], {})
+        self.assertIn("effective_fps", report["throughput"]["unavailable"])
+        self.assertIn("packets_per_hour", report["throughput"]["unavailable"])
+        self.assertEqual(report["resource_metrics"]["observed"], {})
+        self.assertIn("cpu_user_sec", report["resource_metrics"]["unavailable"])
+        self.assertIn("process_max_rss_mb", report["resource_metrics"]["unavailable"])
+        self.assertEqual(report["concurrency"]["observed"], {})
+        self.assertIn("worker_idle_sec", report["concurrency"]["unavailable"])
         self.assertIn("timeline_align_wall_sec", report["stage_times_sec"]["unavailable"])
         self.assertIn("encode_wall_sec", report["stage_times_sec"]["unavailable"])
+        self.assertEqual(report["stage_times_sec"]["observed"], {})
+        smoke = report["harness_smoke_diagnostics"]
+        self.assertTrue(smoke["not_benchmark_metrics"])
+        self.assertEqual(smoke["packet_execution"]["completed_packets"], 2)
+        self.assertIn("process_max_rss_mb", smoke["resource_sampler_self_check"])
+
+    def test_synthetic_multigpu_request_is_not_observed_concurrency(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        script = repo_root / "scripts" / "benchmark_vis_phase3.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            output_json = Path(tmp) / "report.json"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(script),
+                    "--synthetic-smoke",
+                    "--packets",
+                    "2",
+                    "--workers",
+                    "2",
+                    "--gpu-devices",
+                    "0,1",
+                    "--output-dir",
+                    str(Path(tmp) / "out"),
+                    "--output-json",
+                    str(output_json),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(output_json.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["throughput"]["observed"], {})
+        self.assertEqual(report["resource_metrics"]["observed"], {})
+        self.assertEqual(report["concurrency"]["observed"], {})
+        self.assertEqual(report["concurrency"]["requested"]["gpu_devices_requested"], ["0", "1"])
+        self.assertIn("multi_gpu_packet_concurrency", report["concurrency"]["unavailable"])
+        smoke = report["harness_smoke_diagnostics"]
+        self.assertTrue(smoke["not_benchmark_metrics"])
+        self.assertEqual(
+            smoke["concurrency_request_self_check"]["gpu_devices_requested"],
+            ["0", "1"],
+        )
 
     def test_dry_run_builds_isaac_adapter_command_without_executing_renderer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

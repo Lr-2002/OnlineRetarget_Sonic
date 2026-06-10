@@ -61,13 +61,26 @@ def run_phase3_benchmark(config: BenchmarkConfig) -> dict[str, Any]:
         {
             "status": "failed" if failed else "ok",
             "runs": runs,
-            "stage_times_sec": _stage_times(completed, dry_run=False, adapter=config.adapter),
-            "resource_metrics": resource_metrics,
-            "throughput": _throughput(completed, batch_wall_sec),
-            "concurrency": _concurrency(config, runs, batch_wall_sec),
+            "stage_times_sec": _stage_times(
+                completed,
+                dry_run=False,
+                adapter=config.adapter,
+                synthetic_smoke=config.synthetic_smoke,
+            ),
+            "resource_metrics": _resource_metrics(config, resource_metrics),
+            "throughput": _throughput(config, completed, batch_wall_sec),
+            "concurrency": _concurrency(config, runs, batch_wall_sec, resource_metrics),
             "failures": failed,
         }
     )
+    smoke_diagnostics = _harness_smoke_diagnostics(
+        config,
+        runs,
+        batch_wall_sec=batch_wall_sec,
+        raw_resource_metrics=resource_metrics,
+    )
+    if smoke_diagnostics:
+        report["harness_smoke_diagnostics"] = smoke_diagnostics
     return report
 
 
@@ -112,6 +125,7 @@ def _run_dry_plan(config: BenchmarkConfig, manifest_path: Path) -> dict[str, Any
                 [{"diagnostics": static_result.diagnostics.as_dict()}],
                 dry_run=True,
                 adapter=config.adapter,
+                synthetic_smoke=config.synthetic_smoke,
             ),
             "resource_metrics": {
                 "observed": {},
@@ -130,7 +144,8 @@ def _run_dry_plan(config: BenchmarkConfig, manifest_path: Path) -> dict[str, Any
                 },
             },
             "concurrency": {
-                "observed": {
+                "observed": {},
+                "requested": {
                     "requested_packets": config.packets,
                     "workers": config.workers,
                     "gpu_devices_requested": list(config.gpu_devices),
@@ -143,6 +158,11 @@ def _run_dry_plan(config: BenchmarkConfig, manifest_path: Path) -> dict[str, Any
             },
         }
     )
+    report["harness_smoke_diagnostics"] = {
+        "mode": "dry_run",
+        "packet_load_validate": static_result.diagnostics.as_dict(),
+        "adapter_plan": adapter_plan,
+    }
     return report
 
 
@@ -309,6 +329,7 @@ def _stage_times(
     *,
     dry_run: bool,
     adapter: str,
+    synthetic_smoke: bool,
 ) -> dict[str, Any]:
     diagnostics = [run.get("diagnostics", {}) for run in runs]
     observed = {
@@ -329,6 +350,17 @@ def _stage_times(
             "adapter_render_wall_sec includes render subprocess wall time when an adapter runs"
         ),
     }
+    if synthetic_smoke:
+        return {
+            "observed": {},
+            "unavailable": {
+                **unavailable,
+                "packet_load_wall_sec": "synthetic_smoke_harness_diagnostic_only",
+                "packet_validate_wall_sec": "synthetic_smoke_harness_diagnostic_only",
+                "static_runner_wall_sec": "synthetic_smoke_harness_diagnostic_only",
+                "adapter_render_wall_sec": "synthetic_smoke_harness_diagnostic_only",
+            },
+        }
     if dry_run:
         unavailable["adapter_render_wall_sec"] = "dry_run_does_not_execute_renderer"
     elif adapter == "none":
@@ -336,7 +368,23 @@ def _stage_times(
     return {"observed": observed, "unavailable": unavailable}
 
 
-def _throughput(runs: list[dict[str, Any]], batch_wall_sec: float) -> dict[str, Any]:
+def _throughput(
+    config: BenchmarkConfig,
+    runs: list[dict[str, Any]],
+    batch_wall_sec: float,
+) -> dict[str, Any]:
+    if not _is_real_baseline_measurement(config):
+        return {
+            "observed": {},
+            "unavailable": {
+                "effective_fps": "requires_real_baseline_packet",
+                "packets_per_hour": "requires_real_baseline_packet",
+                "completed_packets": "synthetic_or_dry_run_harness_diagnostic_only",
+                "total_frames": "synthetic_or_dry_run_harness_diagnostic_only",
+                "batch_wall_sec": "synthetic_or_dry_run_harness_diagnostic_only",
+            },
+        }
+
     frame_count = sum(int(run["diagnostics"].get("frame_count", 0)) for run in runs)
     observed: dict[str, Any] = {
         "completed_packets": len(runs),
@@ -357,6 +405,7 @@ def _concurrency(
     config: BenchmarkConfig,
     runs: list[dict[str, Any]],
     batch_wall_sec: float,
+    resource_metrics: Mapping[str, Any],
 ) -> dict[str, Any]:
     completed = [run for run in runs if run["status"] == "ok"]
     failed = [run for run in runs if run["status"] != "ok"]
@@ -364,17 +413,33 @@ def _concurrency(
         float(run.get("diagnostics", {}).get("wall_sec", 0.0)) for run in completed
     )
     worker_slot_wall_sec = max(config.workers, 1) * batch_wall_sec
-    observed = {
+    requested = {
         "requested_packets": config.packets,
-        "completed_packets": len(completed),
-        "failed_packets": len(failed),
         "workers": config.workers,
-        "mode": "single_process" if config.workers <= 1 else "multi_process",
         "gpu_devices_requested": list(config.gpu_devices),
         "gpu_device_assignments": [
             {"packet_index": run.get("packet_index"), "gpu_device": run.get("gpu_device")}
             for run in runs
         ],
+    }
+    if not _is_real_baseline_measurement(config):
+        return {
+            "observed": {},
+            "requested": requested,
+            "unavailable": {
+                "packet_concurrency": "requires_real_baseline_packet",
+                "worker_idle_sec": "synthetic_or_dry_run_harness_diagnostic_only",
+                "multi_gpu_packet_concurrency": (
+                    "requires_real_gpu_observation_and_adapter_workload"
+                ),
+            },
+        }
+
+    observed = {
+        "completed_packets": len(completed),
+        "failed_packets": len(failed),
+        "workers": config.workers,
+        "mode": "single_process" if config.workers <= 1 else "multi_process",
         "worker_slot_wall_sec": worker_slot_wall_sec,
         "worker_busy_wall_sec": packet_wall_total,
         "worker_idle_sec": max(0.0, worker_slot_wall_sec - packet_wall_total),
@@ -382,9 +447,101 @@ def _concurrency(
     if worker_slot_wall_sec > 0.0:
         observed["worker_utilization_ratio"] = min(packet_wall_total / worker_slot_wall_sec, 1.0)
     unavailable = {}
-    if not config.gpu_devices:
+    if _real_multi_gpu_concurrency_observed(config, resource_metrics):
+        observed["gpu_device_assignments"] = requested["gpu_device_assignments"]
+    elif not config.gpu_devices:
         unavailable["multi_gpu_packet_concurrency"] = "no_gpu_devices_requested"
-    return {"observed": observed, "unavailable": unavailable}
+    elif config.adapter == "none":
+        unavailable["multi_gpu_packet_concurrency"] = "no_render_adapter_selected"
+    else:
+        unavailable["multi_gpu_packet_concurrency"] = "gpu_devices_not_observed_by_nvidia_smi"
+    return {"observed": observed, "requested": requested, "unavailable": unavailable}
+
+
+def _resource_metrics(
+    config: BenchmarkConfig,
+    resource_metrics: Mapping[str, Any],
+) -> dict[str, Any]:
+    if _is_real_baseline_measurement(config):
+        return {
+            "observed": dict(_mapping_value(resource_metrics, "observed")),
+            "unavailable": dict(_mapping_value(resource_metrics, "unavailable")),
+        }
+    unavailable = dict(_mapping_value(resource_metrics, "unavailable"))
+    unavailable.update(
+        {
+            "cpu_user_sec": "synthetic_or_dry_run_harness_diagnostic_only",
+            "cpu_system_sec": "synthetic_or_dry_run_harness_diagnostic_only",
+            "process_max_rss_mb": "synthetic_or_dry_run_harness_diagnostic_only",
+            "io_input_blocks": "synthetic_or_dry_run_harness_diagnostic_only",
+            "io_output_blocks": "synthetic_or_dry_run_harness_diagnostic_only",
+        }
+    )
+    if config.synthetic_smoke:
+        unavailable.setdefault("gpu_utilization_percent", "requires_real_baseline_packet")
+        unavailable.setdefault("vram_peak_mb", "requires_real_baseline_packet")
+    return {"observed": {}, "unavailable": unavailable}
+
+
+def _harness_smoke_diagnostics(
+    config: BenchmarkConfig,
+    runs: list[dict[str, Any]],
+    *,
+    batch_wall_sec: float,
+    raw_resource_metrics: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if _is_real_baseline_measurement(config):
+        return None
+    completed = [run for run in runs if run["status"] == "ok"]
+    diagnostics = [run.get("diagnostics", {}) for run in completed]
+    return {
+        "mode": "synthetic_smoke" if config.synthetic_smoke else "non_benchmark",
+        "packet_execution": {
+            "completed_packets": len(completed),
+            "failed_packets": len(runs) - len(completed),
+            "total_frames_loaded": sum(int(item.get("frame_count", 0)) for item in diagnostics),
+            "batch_wall_sec": batch_wall_sec,
+        },
+        "stage_timing_self_check_sec": {
+            "packet_load_wall_sec": _sum_diagnostic(diagnostics, "load_sec"),
+            "packet_validate_wall_sec": _sum_diagnostic(diagnostics, "validate_sec"),
+            "static_runner_wall_sec": _sum_diagnostic(diagnostics, "wall_sec"),
+            "adapter_render_wall_sec": _sum_diagnostic(diagnostics, "render_sec"),
+        },
+        "resource_sampler_self_check": dict(_mapping_value(raw_resource_metrics, "observed")),
+        "concurrency_request_self_check": {
+            "requested_packets": config.packets,
+            "workers": config.workers,
+            "gpu_devices_requested": list(config.gpu_devices),
+            "gpu_device_assignments": [
+                {"packet_index": run.get("packet_index"), "gpu_device": run.get("gpu_device")}
+                for run in runs
+            ],
+        },
+        "not_benchmark_metrics": True,
+    }
+
+
+def _is_real_baseline_measurement(config: BenchmarkConfig) -> bool:
+    return not config.dry_run and not config.synthetic_smoke
+
+
+def _real_multi_gpu_concurrency_observed(
+    config: BenchmarkConfig,
+    resource_metrics: Mapping[str, Any],
+) -> bool:
+    if len(config.gpu_devices) < 2 or config.adapter == "none":
+        return False
+    observed = _mapping_value(resource_metrics, "observed")
+    sampled = observed.get("gpu_devices_sampled")
+    if not isinstance(sampled, list):
+        return False
+    return len(set(sampled)) >= 2
+
+
+def _mapping_value(value: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    nested = value.get(key)
+    return nested if isinstance(nested, Mapping) else {}
 
 
 class _ResourceMonitor:
