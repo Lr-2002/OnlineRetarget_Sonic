@@ -2,7 +2,7 @@
   "schema_version": "1.1.0",
   "owner": "OnlineRetarget",
   "training_lane": "soma_motionlib_kin_only",
-  "purpose": "Strict 4-GPU supervised proportional-SOMA kin/walk data-package A+B non-uniform MLP capacity experiment (512-1024-1024-512 hidden layer widths) for LR-290. Pins the accepted paired soma_motionlib kin/walk package digest and preserves the A+B data, split, loss, visual, metric, eval cohort, seed, and launcher contract; changes only model capacity and uses max_steps=1000000.",
+  "purpose": "Strict 4-GPU supervised proportional-SOMA kin/walk data-package A+B non-uniform MLP capacity experiment (512-1024-1024-512 hidden layer widths) for LR-290. Pins the accepted paired soma_motionlib kin/walk package digest and preserves the A+B data, split, loss, visual, metric, fixed eval-item cohort, seed, and launcher contract; changes only model capacity and uses max_steps=1000000.",
   "source_repo": "/mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training",
   "source_rev": "remote-latest-required-before-training",
   "input_data": {
@@ -163,7 +163,7 @@
     "enabled": true,
     "id": "lr270_shared_eval_v1",
     "seed": 20260608,
-    "include_run_group": true,
+    "include_run_group": false,
     "visual_num_samples": 8,
     "metric_num_samples": 100,
     "manifest_path": "eval_cohort_manifest.json"

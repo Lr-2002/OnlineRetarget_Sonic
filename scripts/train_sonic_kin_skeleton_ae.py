@@ -2816,7 +2816,7 @@ def evaluation_cohort_sampling(config: Mapping[str, Any], run_group: str = "") -
     if cfg:
         cohort_id = str(cfg.get("id") or cfg.get("cohort_id") or "default").strip() or "default"
         seed = int(cfg.get("seed", training_cfg.get("seed", 0)))
-        include_run_group = bool(cfg.get("include_run_group", True))
+        include_run_group = False
     else:
         cohort_id = str(visual_cfg.get("cohort_id") or "legacy_visual_validation").strip()
         seed = int(training_cfg.get("seed", 0))
@@ -2954,6 +2954,13 @@ def evaluation_cohort_manifest_payload(
     metric_manifest_rows = [
         _evaluation_cohort_manifest_row(row, index) for index, row in enumerate(metric_rows)
     ]
+    salt_fields = [
+        "evaluation_cohort.id",
+        "evaluation_cohort.seed",
+        "row.stable_key",
+    ]
+    if bool(cohort.get("include_run_group", False)):
+        salt_fields.insert(2, "run_group")
     return {
         "artifact_type": "evaluation_cohort",
         "version": 1,
@@ -2977,12 +2984,7 @@ def evaluation_cohort_manifest_payload(
         ).hexdigest(),
         "sampling": {
             "salt_sha256": str(cohort.get("salt_sha256", "")),
-            "salt_fields": [
-                "evaluation_cohort.id",
-                "evaluation_cohort.seed",
-                "run_group",
-                "row.stable_key",
-            ],
+            "salt_fields": salt_fields,
             "excluded_config_fields": list(cohort.get("excluded_config_fields", [])),
         },
         "visual_rows": visual_manifest_rows,

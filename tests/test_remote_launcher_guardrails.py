@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -40,6 +41,11 @@ FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_1024_512_CONFIG = (
     / "configs"
     / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_1024_512_1m_4gpu.json"
 )
+FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_2048_1024_512_CONFIG = (
+    REPO_ROOT
+    / "configs"
+    / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_2048_1024_512_1m_4gpu.json"
+)
 FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS = (
     FINAL_KIN_WALK_DATA_PACKAGE_A_ONLY_CONFIG,
     FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CONFIG,
@@ -47,6 +53,7 @@ FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS = (
 FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CAPACITY_CONFIGS = (
     FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_512_CONFIG,
     FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_1024_512_CONFIG,
+    FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_2048_1024_512_CONFIG,
 )
 FINAL_KIN_WALK_DATA_PACKAGE_FORMAL_CONFIGS = (
     *FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS,
@@ -89,7 +96,7 @@ LR270_SHARED_EVAL_COHORT = {
     "enabled": True,
     "id": "lr270_shared_eval_v1",
     "seed": 20260608,
-    "include_run_group": True,
+    "include_run_group": False,
     "visual_num_samples": 8,
     "metric_num_samples": 100,
     "manifest_path": "eval_cohort_manifest.json",
@@ -308,6 +315,10 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                 [512, 1024, 1024, 512],
                 2927262,
             ),
+            FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_2048_1024_512_CONFIG: (
+                [512, 1024, 2048, 1024, 512],
+                6075038,
+            ),
         }
         preserved_keys = (
             "source_repo",
@@ -324,7 +335,6 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
             "training",
             "visual_validation",
             "metric_validation",
-            "evaluation_cohort",
             "runtime",
             "expected_artifacts",
         )
@@ -358,6 +368,23 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                 self.assertIn("ab-overlap-loss-on", config["wandb"]["tags"])
                 self.assertIn("a-plus-b", config["wandb"]["tags"])
 
+    def test_final_kin_walk_a_plus_b_capacity_configs_use_fixed_eval_items_across_run_groups(self) -> None:
+        rows = [f"sample_{index:03d}.pkl" for index in range(120)]
+        for path in FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CAPACITY_CONFIGS:
+            with self.subTest(path=path.name):
+                config = json.loads(path.read_text(encoding="utf-8"))
+
+                self.assertEqual(config["evaluation_cohort"], LR270_SHARED_EVAL_COHORT)
+                self.assertEqual(config["evaluation_cohort"]["id"], "lr270_shared_eval_v1")
+                self.assertEqual(config["evaluation_cohort"]["seed"], 20260608)
+                self.assertIs(config["evaluation_cohort"]["include_run_group"], False)
+                self.assertEqual(config["evaluation_cohort"]["visual_num_samples"], 8)
+                self.assertEqual(config["evaluation_cohort"]["metric_num_samples"], 100)
+                self.assertEqual(
+                    self._cohort_row_selection_sha(config, rows, run_group="capacity_a"),
+                    self._cohort_row_selection_sha(config, rows, run_group="capacity_b"),
+                )
+
     @staticmethod
     def _mlp_parameter_numel(input_dim: int, hidden_dims: list[int], output_dim: int) -> int:
         total = 0
@@ -366,6 +393,35 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
             total += previous * hidden_dim + hidden_dim
             previous = hidden_dim
         return total + previous * output_dim + output_dim
+
+    @staticmethod
+    def _cohort_row_selection_sha(config: dict, rows: list[str], *, run_group: str) -> str:
+        cohort = config["evaluation_cohort"]
+        run_group_text = str(run_group or "") if cohort["include_run_group"] else ""
+        salt_parts = [
+            "evaluation_cohort",
+            f"id={cohort['id']}",
+            f"seed={cohort['seed']}",
+        ]
+        if cohort["include_run_group"]:
+            salt_parts.append(f"run_group={run_group_text}")
+        salt = "|".join(salt_parts)
+        ranked = sorted(
+            rows,
+            key=lambda row: (
+                hashlib.sha256(f"{salt}:relative_path={row}".encode()).hexdigest(),
+                row,
+            ),
+        )
+        selected = ranked[: cohort["metric_num_samples"]]
+        payload = {
+            "include_run_group": cohort["include_run_group"],
+            "run_group": run_group_text,
+            "salt_sha256": hashlib.sha256(salt.encode()).hexdigest(),
+            "metric_rows": selected,
+            "visual_rows": selected[: cohort["visual_num_samples"]],
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
     def test_final_kin_walk_data_package_loss_toggles_match_contract(self) -> None:
         a_only = json.loads(FINAL_KIN_WALK_DATA_PACKAGE_A_ONLY_CONFIG.read_text(encoding="utf-8"))
@@ -557,6 +613,14 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
         self.assertIn('"variant.name"', text)
         self.assertIn("salt=f\"{config['variant']['name']}:{config['training']['seed']}\"", text)
 
+    def test_supervised_trainer_forces_evaluation_cohort_salt_to_ignore_run_group(self) -> None:
+        text = SUPERVISED_TRAINER.read_text(encoding="utf-8")
+        self.assertIn("def evaluation_cohort_sampling(", text)
+        self.assertIn("include_run_group = False", text)
+        self.assertNotIn('cfg.get("include_run_group"', text)
+        self.assertIn('if bool(cohort.get("include_run_group", False)):', text)
+        self.assertIn('salt_fields.insert(2, "run_group")', text)
+
 
 class A0TwoGpuAcceptedVisualizationConfigTests(unittest.TestCase):
     def test_original_accepted_a0_four_gpu_configs_remain_formal_records(self) -> None:
@@ -713,6 +777,10 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
         )
         self.assertIn(
             "configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_1024_512_1m_4gpu.json",
+            text,
+        )
+        self.assertIn(
+            "configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_2048_1024_512_1m_4gpu.json",
             text,
         )
         self.assertIn('NPROC_PER_NODE="${NPROC_PER_NODE:-4}"', text)

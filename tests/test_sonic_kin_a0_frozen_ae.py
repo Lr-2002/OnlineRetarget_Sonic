@@ -43,6 +43,13 @@ KIN_WALK_A_PLUS_B_MLP_CAPACITY_CONFIGS = (
         [512, 1024, 1024, 512],
         2927262,
     ),
+    (
+        REPO_ROOT
+        / "configs"
+        / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_2048_1024_512_1m_4gpu.json",
+        [512, 1024, 2048, 1024, 512],
+        6075038,
+    ),
 )
 LR254_2GPU_UNIFORM_CONFIG = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_frozen_ae_uniform_2gpu_2kvis.json"
