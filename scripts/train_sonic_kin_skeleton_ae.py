@@ -1102,9 +1102,8 @@ def run_a0_ddp_probe_suite(
     if not runtime.get("distributed"):
         stage_trace.log("ddp_probe_suite", "skipped", reason="not_distributed")
         return
-    hidden_dim = int(config["model"]["hidden_dim"])
-    num_layers = int(config["model"]["num_layers"])
     dropout = float(config["model"].get("dropout", 0.0))
+    hidden_dims = mlp_hidden_dims_from_config(config["model"])
     concat_input_dim = int(motion_dim) + int(skeleton_dim)
     with stage_trace.span(
         "ddp_probe_suite",
@@ -1125,7 +1124,7 @@ def run_a0_ddp_probe_suite(
         set_model_init_seed(config, stage_trace, "ddp_probe_same_shape_sequential_model_init_seed")
         run_ddp_probe_model(
             stage_name="ddp_probe_same_shape_sequential",
-            model=build_mlp(concat_input_dim, hidden_dim, int(target_dim), num_layers, dropout),
+            model=build_mlp_from_hidden_dims(concat_input_dim, hidden_dims, int(target_dim), dropout),
             input_factory=lambda probe_device: (
                 torch.ones(2, concat_input_dim, device=probe_device),
             ),
@@ -3128,26 +3127,51 @@ class RunningStats:
         return mean.to(torch.float32), std.to(torch.float32)
 
 
-def build_mlp(input_dim: int, hidden_dim: int, output_dim: int, num_layers: int, dropout: float) -> nn.Sequential:
+def mlp_hidden_dims_from_config(cfg: Mapping[str, Any]) -> list[int]:
+    if "hidden_dims" in cfg:
+        raw_hidden_dims = cfg["hidden_dims"]
+        if isinstance(raw_hidden_dims, (str, bytes)) or not isinstance(raw_hidden_dims, Sequence):
+            raise TypeError("model.hidden_dims must be a non-empty sequence of positive integers")
+        hidden_dims = [int(dim) for dim in raw_hidden_dims]
+        if not hidden_dims or any(dim <= 0 for dim in hidden_dims):
+            raise ValueError("model.hidden_dims must be a non-empty sequence of positive integers")
+        return hidden_dims
+
+    hidden_dim = int(cfg["hidden_dim"])
+    num_layers = int(cfg["num_layers"])
+    if hidden_dim <= 0 or num_layers <= 0:
+        raise ValueError("model.hidden_dim and model.num_layers must be positive")
+    return [hidden_dim] * num_layers
+
+
+def build_mlp_from_hidden_dims(
+    input_dim: int,
+    hidden_dims: Sequence[int],
+    output_dim: int,
+    dropout: float,
+) -> nn.Sequential:
     layers: list[nn.Module] = []
     prev = input_dim
-    for _ in range(num_layers):
-        layers.extend([nn.Linear(prev, hidden_dim), nn.SiLU()])
+    for hidden_dim in hidden_dims:
+        layers.extend([nn.Linear(prev, int(hidden_dim)), nn.SiLU()])
         if dropout > 0:
             layers.append(nn.Dropout(dropout))
-        prev = hidden_dim
+        prev = int(hidden_dim)
     layers.append(nn.Linear(prev, output_dim))
     return nn.Sequential(*layers)
+
+
+def build_mlp(input_dim: int, hidden_dim: int, output_dim: int, num_layers: int, dropout: float) -> nn.Sequential:
+    return build_mlp_from_hidden_dims(input_dim, [int(hidden_dim)] * int(num_layers), output_dim, dropout)
 
 
 class ConcatRetargeter(nn.Module):
     def __init__(self, motion_dim: int, skeleton_dim: int, output_dim: int, cfg: dict[str, Any]) -> None:
         super().__init__()
-        self.net = build_mlp(
+        self.net = build_mlp_from_hidden_dims(
             motion_dim + skeleton_dim,
-            int(cfg["hidden_dim"]),
+            mlp_hidden_dims_from_config(cfg),
             output_dim,
-            int(cfg["num_layers"]),
             float(cfg.get("dropout", 0.0)),
         )
 
