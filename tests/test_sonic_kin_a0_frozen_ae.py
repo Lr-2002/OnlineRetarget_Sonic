@@ -28,6 +28,22 @@ NO_ENCODER_CONFIGS = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_uniform_4gpu.json",
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_proportional_4gpu.json",
 )
+KIN_WALK_A_PLUS_B_MLP_CAPACITY_CONFIGS = (
+    (
+        REPO_ROOT
+        / "configs"
+        / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_512_1m_4gpu.json",
+        [512, 1024, 512],
+        1877662,
+    ),
+    (
+        REPO_ROOT
+        / "configs"
+        / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_1024_512_1m_4gpu.json",
+        [512, 1024, 1024, 512],
+        2927262,
+    ),
+)
 LR254_2GPU_UNIFORM_CONFIG = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_frozen_ae_uniform_2gpu_2kvis.json"
 )
@@ -841,6 +857,21 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
         self.assertEqual(tuple(skeleton.shape), (2, 0))
         self.assertEqual(tuple(target.shape), (2, 670))
         self.assertEqual(tuple(pred.shape), (3, 670))
+
+    def test_concat_retargeter_accepts_explicit_hidden_dims_for_capacity_configs(self) -> None:
+        for path, expected_hidden_dims, expected_parameter_numel in KIN_WALK_A_PLUS_B_MLP_CAPACITY_CONFIGS:
+            with self.subTest(path=path.name):
+                config = json.loads(path.read_text(encoding="utf-8"))
+                model = sonic_train.make_model(840, 104, 670, config)
+                linear_layers = [layer for layer in model.net if isinstance(layer, torch.nn.Linear)]
+
+                self.assertEqual(config["model"]["hidden_dims"], expected_hidden_dims)
+                self.assertEqual([layer.out_features for layer in linear_layers[:-1]], expected_hidden_dims)
+                self.assertEqual(linear_layers[-1].out_features, 670)
+                self.assertEqual(
+                    sum(parameter.numel() for parameter in model.parameters()),
+                    expected_parameter_numel,
+                )
 
     def test_accepted_vertical_v2_failed_acceptance_is_not_counted_or_uploaded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -30,9 +30,27 @@ FINAL_KIN_WALK_DATA_PACKAGE_A_ONLY_CONFIG = (
 FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CONFIG = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_4gpu.json"
 )
+FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_512_CONFIG = (
+    REPO_ROOT
+    / "configs"
+    / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_512_1m_4gpu.json"
+)
+FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_1024_512_CONFIG = (
+    REPO_ROOT
+    / "configs"
+    / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_1024_512_1m_4gpu.json"
+)
 FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS = (
     FINAL_KIN_WALK_DATA_PACKAGE_A_ONLY_CONFIG,
     FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CONFIG,
+)
+FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CAPACITY_CONFIGS = (
+    FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_512_CONFIG,
+    FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_1024_512_CONFIG,
+)
+FINAL_KIN_WALK_DATA_PACKAGE_FORMAL_CONFIGS = (
+    *FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS,
+    *FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CAPACITY_CONFIGS,
 )
 FINAL_KIN_WALK_PACKAGE_INDICATOR = (
     "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/"
@@ -46,7 +64,7 @@ FINAL_KIN_WALK_METRIC_EVERY_STEPS = 100000
 ACTIVE_FOUR_GPU_SOMA_MOTIONLIB_CONFIGS = (
     *SUPERVISED_CONFIGS,
     LOSS_OFF_BASELINE_CONFIG,
-    *FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS,
+    *FINAL_KIN_WALK_DATA_PACKAGE_FORMAL_CONFIGS,
 )
 PROPORTIONAL_TREATMENT_AND_BASELINE_CONFIGS = (SUPERVISED_CONFIGS[1], LOSS_OFF_BASELINE_CONFIG)
 ACCEPTED_SOMAMESH_VISUAL_FIELDS = {
@@ -282,6 +300,73 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                 self.assertIn("data-package", config["wandb"]["tags"])
                 self.assertIn("kin-walk-package", config["wandb"]["tags"])
 
+    def test_final_kin_walk_a_plus_b_capacity_configs_preserve_contract_except_model_capacity(self) -> None:
+        base = json.loads(FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CONFIG.read_text(encoding="utf-8"))
+        expected = {
+            FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_512_CONFIG: ([512, 1024, 512], 1877662),
+            FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_1024_512_CONFIG: (
+                [512, 1024, 1024, 512],
+                2927262,
+            ),
+        }
+        preserved_keys = (
+            "source_repo",
+            "source_rev",
+            "input_data",
+            "source_features",
+            "target_decoder",
+            "decoder_targets",
+            "target_features",
+            "losses",
+            "features",
+            "split",
+            "normalization",
+            "training",
+            "visual_validation",
+            "metric_validation",
+            "evaluation_cohort",
+            "runtime",
+            "expected_artifacts",
+        )
+        for path, (hidden_dims, expected_parameter_numel) in expected.items():
+            with self.subTest(path=path.name):
+                config = json.loads(path.read_text(encoding="utf-8"))
+                for key in preserved_keys:
+                    self.assertEqual(config[key], base[key], key)
+                self.assertEqual(config["training"]["max_steps"], 1000000)
+                self.assertEqual(config["model"], {"hidden_dims": hidden_dims, "dropout": 0.0})
+                self.assertNotEqual(config["model"], base["model"])
+                self.assertEqual(
+                    self._mlp_parameter_numel(
+                        config["features"]["expected_dims"]["model_input"],
+                        hidden_dims,
+                        config["features"]["expected_dims"]["target"],
+                    ),
+                    expected_parameter_numel,
+                )
+                self.assertEqual(config["variant"]["type"], "concat")
+                self.assertEqual(config["variant"]["soma_topology"], base["variant"]["soma_topology"])
+                self.assertEqual(config["variant"]["gpu_topology"], base["variant"]["gpu_topology"])
+                self.assertIn("a_plus_b_mlp", config["variant"]["name"])
+                self.assertIn("a_plus_b_mlp", config["output_dir"])
+                self.assertEqual(
+                    config["validation_command"],
+                    f"CONFIG=configs/{path.name} scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh",
+                )
+                self.assertIn("capacity-sweep", config["wandb"]["tags"])
+                self.assertIn("1m-steps", config["wandb"]["tags"])
+                self.assertIn("ab-overlap-loss-on", config["wandb"]["tags"])
+                self.assertIn("a-plus-b", config["wandb"]["tags"])
+
+    @staticmethod
+    def _mlp_parameter_numel(input_dim: int, hidden_dims: list[int], output_dim: int) -> int:
+        total = 0
+        previous = input_dim
+        for hidden_dim in hidden_dims:
+            total += previous * hidden_dim + hidden_dim
+            previous = hidden_dim
+        return total + previous * output_dim + output_dim
+
     def test_final_kin_walk_data_package_loss_toggles_match_contract(self) -> None:
         a_only = json.loads(FINAL_KIN_WALK_DATA_PACKAGE_A_ONLY_CONFIG.read_text(encoding="utf-8"))
         a_plus_b = json.loads(FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CONFIG.read_text(encoding="utf-8"))
@@ -428,7 +513,7 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                 self.assertIs(visual["acceptance_backend"], True)
                 expected_every_steps = (
                     FINAL_KIN_WALK_VISUAL_EVERY_STEPS
-                    if path in FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS
+                    if path in FINAL_KIN_WALK_DATA_PACKAGE_FORMAL_CONFIGS
                     else 20000
                 )
                 self.assertEqual(visual["every_steps"], expected_every_steps)
@@ -622,6 +707,14 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
         self.assertIn("configs/sonic_kin_soma_motionlib_proportional_loss_off_baseline_4gpu.json", text)
         self.assertIn("configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_only_4gpu.json", text)
         self.assertIn("configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_4gpu.json", text)
+        self.assertIn(
+            "configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_512_1m_4gpu.json",
+            text,
+        )
+        self.assertIn(
+            "configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_1024_512_1m_4gpu.json",
+            text,
+        )
         self.assertIn('NPROC_PER_NODE="${NPROC_PER_NODE:-4}"', text)
         self.assertIn("torch.distributed.run", text)
         self.assertIn("scripts/train_sonic_kin_skeleton_ae.py", text)
@@ -662,7 +755,7 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
         self.assertNotIn("CONFIG contains PPO/Isaac/reward/episode-length tokens", result.stderr)
 
     def test_launcher_guard_accepts_final_kin_walk_package_configs_until_cuda_smoke(self) -> None:
-        for path in FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS:
+        for path in FINAL_KIN_WALK_DATA_PACKAGE_FORMAL_CONFIGS:
             with self.subTest(path=path.name), tempfile.TemporaryDirectory() as tmp:
                 config = json.loads(path.read_text(encoding="utf-8"))
                 result = self._run_supervised_launcher_until_cuda_smoke(config, Path(tmp))
@@ -832,6 +925,18 @@ class SupervisedTrainerDdpGuardrailTests(unittest.TestCase):
         self.assertIn("--wandb-mode", text)
         self.assertIn("--disable-visual-validation", text)
         self.assertIn("apply_cli_overrides", text)
+
+    def test_trainer_concat_mlp_supports_explicit_hidden_dims(self) -> None:
+        text = self.trainer_text
+        for token in (
+            "def mlp_hidden_dims_from_config(",
+            '"hidden_dims" in cfg',
+            "model.hidden_dims must be a non-empty sequence of positive integers",
+            "def build_mlp_from_hidden_dims(",
+            "mlp_hidden_dims_from_config(cfg)",
+            "mlp_hidden_dims_from_config(config[\"model\"])",
+        ):
+            self.assertIn(token, text)
 
     def test_trainer_keeps_external_source_as_metadata_not_runtime_guard(self) -> None:
         text = self.trainer_text
