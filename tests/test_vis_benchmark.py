@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import importlib
 import importlib.abc
+import io
 import json
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 
 from vis_benchmark import BenchmarkConfig, run_phase3_benchmark
+from vis_benchmark.cli import main as benchmark_cli_main
 
 
 class VisBenchmarkTests(unittest.TestCase):
@@ -143,6 +146,29 @@ class VisBenchmarkTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = json.loads(output_json.read_text(encoding="utf-8"))
 
+        self.assertEqual(payload["status"], "dry_run")
+        self.assertEqual(payload["benchmark_scope"], "synthetic_smoke")
+
+    def test_package_cli_writes_json_report_for_synthetic_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_json = Path(tmp) / "report.json"
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = benchmark_cli_main(
+                    [
+                        "--synthetic-smoke",
+                        "--dry-run",
+                        "--output-dir",
+                        str(Path(tmp) / "out"),
+                        "--output-json",
+                        str(output_json),
+                    ]
+                )
+            payload = json.loads(output_json.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn('"status": "dry_run"', stdout.getvalue())
         self.assertEqual(payload["status"], "dry_run")
         self.assertEqual(payload["benchmark_scope"], "synthetic_smoke")
 

@@ -34,6 +34,7 @@ web = [
 [project.scripts]
 online-retarget = "online_retarget.cli:main"
 online-retarget-web = "online_retarget.web_app:main"
+vis-benchmark = "vis_benchmark.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
