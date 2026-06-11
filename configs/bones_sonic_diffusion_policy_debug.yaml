@@ -1,6 +1,6 @@
 experiment:
   name: bones_sonic_diffusion_policy_debug
-  project: OnlineRetarget
+  project: OnlineRetarget_DP
   seed: 17
   output_root: runs
 
@@ -14,7 +14,26 @@ policy_presets:
       target_horizon_frames: 10
       target_future_step: 1
       source_body_count: 30
+      source_body_token_dim: 15
+      source_rotation: rot6d
       action_dim: 29
+      build:
+        split: train
+        source_mode: soma_bvh
+        include_mirrors: false
+        limit: 128
+        clip_limit:
+        history_frames: 8
+        target_frame_offset: 0
+        target_horizon_frames: 10
+        target_future_step: 1
+        source_rotation: rot6d
+        include_source_angular_velocity: true
+        window_stride: 10
+        max_windows_per_clip: 1
+        train_ratio: 1.0
+        val_ratio: 0.0
+        position_scale: 0.01
     model:
       family: diffusion_policy
       hidden_dims: [512, 512, 256]
@@ -38,6 +57,23 @@ policy_presets:
       source_body_token_dim: 15
       source_rotation: rot6d
       action_dim: 29
+      build:
+        split: train
+        source_mode: soma_bvh
+        include_mirrors: false
+        limit: 128
+        clip_limit:
+        history_frames: 8
+        target_frame_offset: 0
+        target_horizon_frames: 10
+        target_future_step: 5
+        source_rotation: rot6d
+        include_source_angular_velocity: true
+        window_stride: 10
+        max_windows_per_clip: 1
+        train_ratio: 1.0
+        val_ratio: 0.0
+        position_scale: 0.01
     model:
       family: temporal_diffusion_policy
       d_model: 128
@@ -60,15 +96,19 @@ policy_presets:
       temporal_diffusion_policy: 1.0
 
 data:
-  root: /home/user/data/motion_data
-  index_csv: runs/indices/bones_sonic_index_full_v0/sonic_index.csv
+  root: /mnt/data_cpfs
+  index_csv: /mnt/data_cpfs/code/wxh/OnlineRetarget/runs/indices/bones_sonic_index_full_v0/sonic_index.csv
+  source_bvh_tar: /mnt/data_oss/online_retarget/lr147_delta_bvh_vis_data_20260525/back_data/soma_proportional.tar
+  sonic_npz_root: /mnt/data_cpfs/bones_sonic
+  sonic_path_prefix_from: /home/user/data/motion_data/bones_sonic
+  sonic_path_prefix_to: /mnt/data_cpfs/bones_sonic
   allow_debug_data: true
   source_format: soma_proportional_bvh_fk
   task: walk
 
 train:
-  batch_size: 256
-  max_steps: 200
+  batch_size: 64
+  max_steps: 1000
   learning_rate: 0.0003
   precision: fp32
   ddp: true
@@ -91,5 +131,13 @@ evaluation:
   max_failures: 50
 
 tracking:
-  wandb_mode: disabled
+  wandb_mode: online
   auto_offline_eval: true
+
+visualization:
+  enabled: true
+  artifact_name: route_b_walk_probe
+  output_dir: visualization/route_b_walk_probe
+  num_samples: 4
+  max_joints: 8
+  wandb_upload: true

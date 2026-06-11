@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 import argparse
-from copy import deepcopy
 import csv
 from dataclasses import replace
+import html
 import json
 import os
 from pathlib import Path
@@ -18,6 +18,10 @@ try:
 except ImportError:  # pragma: no cover - environment blocker path
     yaml = None
 
+from online_retarget.config_presets import (
+    apply_config_preset as _apply_config_preset,
+    configured_model_family as _configured_model_family,
+)
 from online_retarget.data.schema import ObservationSpec, OutputSpec, iter_motion_pair_refs
 from online_retarget.evaluation import EvaluationConfig, evaluate_jsonl
 
@@ -214,150 +218,6 @@ def _load_config(path: Path) -> dict[str, Any]:
     return _apply_config_preset(payload)
 
 
-def _apply_config_preset(config: dict[str, Any]) -> dict[str, Any]:
-    preset_name = _selected_config_preset(config)
-    if not preset_name:
-        return config
-    presets = config.get("policy_presets", config.get("config_presets", {}))
-    if not isinstance(presets, dict):
-        raise ValueError("policy_presets/config_presets must be a mapping")
-    preset = presets.get(preset_name)
-    if not isinstance(preset, dict):
-        available = ", ".join(sorted(str(key) for key in presets)) or "none"
-        raise ValueError(f"unknown config preset {preset_name!r}; available: {available}")
-    _validate_config_preset_payload(preset_name, preset)
-    resolved = _deep_merge_dicts(config, preset)
-    resolved["policy_preset"] = preset_name
-    data = resolved.get("data", {})
-    data = dict(data) if isinstance(data, dict) else {}
-    data["policy_preset"] = preset_name
-    resolved["data"] = data
-    _validate_resolved_config_preset(preset_name, resolved)
-    return resolved
-
-
-def _selected_config_preset(config: dict[str, Any]) -> str:
-    data = config.get("data", {}) if isinstance(config.get("data", {}), dict) else {}
-    names = [
-        config.get("policy_preset"),
-        config.get("config_preset"),
-        data.get("policy_preset"),
-        data.get("config_preset"),
-    ]
-    selected = [str(name) for name in names if name not in (None, "")]
-    if not selected:
-        return ""
-    if len(set(selected)) > 1:
-        raise ValueError(f"conflicting config preset names: {selected}")
-    return selected[0]
-
-
-def _deep_merge_dicts(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
-    merged = deepcopy(base)
-    for key, value in overlay.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _deep_merge_dicts(merged[key], value)
-        else:
-            merged[key] = deepcopy(value)
-    return merged
-
-
-def _validate_config_preset_payload(name: str, preset: dict[str, Any]) -> None:
-    data = preset.get("data", {})
-    model = preset.get("model", {})
-    if not isinstance(data, dict) or not isinstance(model, dict):
-        raise ValueError(f"config preset {name!r} must define data and model mappings")
-    required_data = (
-        "samples_jsonl",
-        "target_format",
-        "target_horizon_frames",
-        "target_future_step",
-        "source_body_count",
-        "action_dim",
-    )
-    required_model = ("family", "output")
-    missing = [f"data.{key}" for key in required_data if key not in data]
-    missing.extend(f"model.{key}" for key in required_model if key not in model)
-    family = str(model.get("family", "")).lower().replace("-", "_")
-    if family in {"temporal_diffusion_policy", "dp_temporal", "temporal_dp", "temporal_diffusion"}:
-        route_b_required = (
-            "source_body_token_dim",
-            "source_rotation",
-        )
-        route_b_model_required = (
-            "action_dim",
-            "source_body_token_dim",
-            "source_skeleton_dim",
-            "morphology_dim",
-            "robot_state_dim",
-            "source_body_count",
-            "d_model",
-            "nhead",
-            "num_layers",
-            "dim_feedforward",
-        )
-        missing.extend(f"data.{key}" for key in route_b_required if key not in data)
-        missing.extend(f"model.{key}" for key in route_b_model_required if key not in model)
-    else:
-        if "hidden_dims" not in model and "d_model" not in model:
-            missing.append("model.hidden_dims or model.d_model")
-    if missing:
-        raise ValueError(f"config preset {name!r} missing controlled keys: {', '.join(missing)}")
-
-
-def _validate_resolved_config_preset(name: str, config: dict[str, Any]) -> None:
-    data = config.get("data", {}) if isinstance(config.get("data", {}), dict) else {}
-    model = config.get("model", {}) if isinstance(config.get("model", {}), dict) else {}
-    family = _configured_model_family(config)
-    errors = []
-    if not data.get("samples_jsonl"):
-        errors.append("data.samples_jsonl")
-    if not data.get("target_format"):
-        errors.append("data.target_format")
-    if not model.get("family"):
-        errors.append("model.family")
-    if not model.get("output"):
-        errors.append("model.output")
-    if family == "temporal_diffusion_policy":
-        if data.get("target_format") != "bones_sonic_joint_pos_future_window":
-            errors.append("data.target_format must be bones_sonic_joint_pos_future_window")
-        if model.get("output") != "g1_joint_position_future_window":
-            errors.append("model.output must be g1_joint_position_future_window")
-        for key in (
-            "target_horizon_frames",
-            "target_future_step",
-            "source_body_count",
-            "source_body_token_dim",
-            "action_dim",
-        ):
-            if key not in data:
-                errors.append(f"data.{key}")
-        for key in (
-            "action_dim",
-            "source_body_token_dim",
-            "source_skeleton_dim",
-            "morphology_dim",
-            "robot_state_dim",
-            "source_body_count",
-            "d_model",
-            "nhead",
-            "num_layers",
-            "dim_feedforward",
-        ):
-            if key not in model:
-                errors.append(f"model.{key}")
-        if data.get("action_dim") is not None and model.get("action_dim") is not None:
-            if int(data["action_dim"]) != int(model["action_dim"]):
-                errors.append("data.action_dim must match model.action_dim")
-    elif "route_b" in str(name).lower() or "temporal_diffusion" in str(name).lower():
-        errors.append("route-b preset must resolve model.family=temporal_diffusion_policy")
-    else:
-        if family == "temporal_diffusion_policy":
-            errors.append("flat preset must not resolve temporal_diffusion_policy")
-    if errors:
-        raise ValueError(f"config preset {name!r} is inconsistent: {', '.join(errors)}")
-
-
 def _nested_get(mapping: dict[str, Any], path: tuple[str, ...], default: Any) -> Any:
     current: Any = mapping
     for key in path:
@@ -365,33 +225,6 @@ def _nested_get(mapping: dict[str, Any], path: tuple[str, ...], default: Any) ->
             return default
         current = current[key]
     return current
-
-
-def _configured_model_family(config: dict[str, Any]) -> str:
-    model_cfg = config.get("model", {}) if isinstance(config.get("model", {}), dict) else {}
-    key = str(model_cfg.get("family", "temporal_mlp")).lower().replace("-", "_")
-    aliases = {
-        "mlp": "temporal_mlp",
-        "temporal_mlp": "temporal_mlp",
-        "tf": "temporal_transformer",
-        "transformer": "temporal_transformer",
-        "temporal_transformer": "temporal_transformer",
-        "token_tf": "token_transformer",
-        "token_transformer": "token_transformer",
-        "tokenized_transformer": "token_transformer",
-        "cross_attention_transformer": "token_transformer",
-        "fm": "flow_matching",
-        "flow": "flow_matching",
-        "flow_matching": "flow_matching",
-        "dp": "diffusion_policy",
-        "diffusion": "diffusion_policy",
-        "diffusion_policy": "diffusion_policy",
-        "dp_temporal": "temporal_diffusion_policy",
-        "temporal_dp": "temporal_diffusion_policy",
-        "temporal_diffusion": "temporal_diffusion_policy",
-        "temporal_diffusion_policy": "temporal_diffusion_policy",
-    }
-    return aliases.get(key, key)
 
 
 def _reported_output_dim(
@@ -897,12 +730,20 @@ def _train_jsonl(
             output_root=output_dir,
             config=_evaluation_config(config, run_name="train_offline_eval"),
         )
+    visualization = _write_visualization_artifacts(
+        config=config,
+        predictions_jsonl=predictions_jsonl,
+        output_dir=output_dir,
+        eval_result=eval_result,
+        run_name="train_visualization",
+    )
     report = _build_train_report(
         samples_jsonl=samples_jsonl,
         output_dir=output_dir,
         checkpoint=checkpoint,
         predictions_jsonl=predictions_jsonl,
         offline_eval=eval_result.to_dict() if eval_result is not None else {},
+        visualization=visualization,
         sample_count=len(samples),
         input_dim=input_dim,
         output_dim=output_dim,
@@ -941,6 +782,7 @@ def _train_jsonl(
     _wandb_save(wandb_run, output_dir / "train_report.json")
     if eval_result is not None:
         _wandb_save(wandb_run, eval_result.summary_json)
+    _wandb_log_visualization(wandb_run, visualization, config)
     _wandb_finish(wandb_run)
     print(json.dumps(report, indent=2, sort_keys=True))
 
@@ -1105,12 +947,20 @@ def _train_temporal_diffusion_jsonl(
             output_root=output_dir,
             config=_evaluation_config(config, run_name="train_offline_eval"),
         )
+    visualization = _write_visualization_artifacts(
+        config=config,
+        predictions_jsonl=predictions_jsonl,
+        output_dir=output_dir,
+        eval_result=eval_result,
+        run_name="train_visualization",
+    )
     report = _build_train_report(
         samples_jsonl=samples_jsonl,
         output_dir=output_dir,
         checkpoint=checkpoint,
         predictions_jsonl=predictions_jsonl,
         offline_eval=eval_result.to_dict() if eval_result is not None else {},
+        visualization=visualization,
         sample_count=len(samples),
         input_dim=input_dim,
         output_dim=action_dim,
@@ -1153,6 +1003,7 @@ def _train_temporal_diffusion_jsonl(
     _wandb_save(wandb_run, output_dir / "train_report.json")
     if eval_result is not None:
         _wandb_save(wandb_run, eval_result.summary_json)
+    _wandb_log_visualization(wandb_run, visualization, config)
     _wandb_finish(wandb_run)
     print(json.dumps(report, indent=2, sort_keys=True))
 
@@ -1742,6 +1593,13 @@ def _predict_jsonl(
             output_root=output_dir,
             config=_evaluation_config(config, run_name="offline_eval"),
         )
+    visualization = _write_visualization_artifacts(
+        config=config,
+        predictions_jsonl=predictions_jsonl,
+        output_dir=output_dir,
+        eval_result=eval_result,
+        run_name="predict_visualization",
+    )
     report = {
         "mode": "predict_only",
         "samples_jsonl": str(samples_jsonl),
@@ -1749,6 +1607,7 @@ def _predict_jsonl(
         "output_dir": str(output_dir),
         "predictions_jsonl": str(predictions_jsonl),
         "offline_eval": eval_result.to_dict() if eval_result is not None else {},
+        "visualization": visualization,
         "sample_count": len(samples),
         "input_dim": input_dim,
         "output_dim": output_dim,
@@ -1847,6 +1706,13 @@ def _predict_temporal_diffusion_jsonl(
             output_root=output_dir,
             config=_evaluation_config(config, run_name="offline_eval"),
         )
+    visualization = _write_visualization_artifacts(
+        config=config,
+        predictions_jsonl=predictions_jsonl,
+        output_dir=output_dir,
+        eval_result=eval_result,
+        run_name="predict_visualization",
+    )
     report = {
         "mode": "predict_only",
         "samples_jsonl": str(samples_jsonl),
@@ -1854,6 +1720,7 @@ def _predict_temporal_diffusion_jsonl(
         "output_dir": str(output_dir),
         "predictions_jsonl": str(predictions_jsonl),
         "offline_eval": eval_result.to_dict() if eval_result is not None else {},
+        "visualization": visualization,
         "sample_count": len(samples),
         "input_dim": input_dim,
         "output_dim": action_dim,
@@ -1946,6 +1813,247 @@ def _prediction_sequence(sample: dict[str, Any], prediction: Any) -> list[list[f
     return [[float(value) for value in prediction]]
 
 
+def _write_visualization_artifacts(
+    *,
+    config: dict[str, Any],
+    predictions_jsonl: Path,
+    output_dir: Path,
+    eval_result: Any,
+    run_name: str,
+) -> dict[str, Any]:
+    visual_cfg = config.get("visualization", {})
+    if not isinstance(visual_cfg, dict) or not bool(visual_cfg.get("enabled", False)):
+        return {"enabled": False}
+    artifact_name = str(visual_cfg.get("artifact_name") or visual_cfg.get("run_name") or run_name)
+    configured_output = str(visual_cfg.get("output_dir", "") or "")
+    if configured_output:
+        artifact_dir = Path(configured_output).expanduser()
+        if not artifact_dir.is_absolute():
+            artifact_dir = output_dir / artifact_dir
+    else:
+        artifact_dir = output_dir / "visualization" / artifact_name
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    num_samples = max(1, int(visual_cfg.get("num_samples", visual_cfg.get("max_samples", 4))))
+    max_joints = max(1, int(visual_cfg.get("max_joints", 8)))
+    samples = _read_prediction_samples(predictions_jsonl, limit=num_samples)
+    trajectory_csv = artifact_dir / "trajectory_preview.csv"
+    rows = _visualization_rows(samples, max_joints=max_joints)
+    _write_visualization_csv(trajectory_csv, rows)
+    svg_path = artifact_dir / "trajectory_preview.svg"
+    _write_visualization_svg(svg_path, rows)
+    html_path = artifact_dir / "trajectory_preview.html"
+    _write_visualization_html(html_path, rows, svg_path=svg_path)
+    summary_path = artifact_dir / "visual_manifest.json"
+    eval_payload = eval_result.to_dict() if eval_result is not None else {}
+    summary = {
+        "enabled": True,
+        "artifact_version": "route_b_joint_trajectory_v1",
+        "artifact_name": artifact_name,
+        "status": "ok" if rows else "empty",
+        "predictions_jsonl": str(predictions_jsonl),
+        "output_dir": str(artifact_dir),
+        "trajectory_csv": str(trajectory_csv),
+        "trajectory_svg": str(svg_path),
+        "trajectory_html": str(html_path),
+        "summary_json": str(summary_path),
+        "sample_count": len(samples),
+        "trajectory_row_count": len(rows),
+        "num_samples": num_samples,
+        "max_joints": max_joints,
+        "offline_eval": eval_payload,
+        "wandb_upload": bool(visual_cfg.get("wandb_upload", False)),
+        "git_sha": _git_sha(),
+        "git_dirty": _git_dirty(),
+    }
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return summary
+
+
+def _read_prediction_samples(path: Path, *, limit: int) -> list[dict[str, Any]]:
+    samples = []
+    if not path.exists():
+        return samples
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            samples.append(json.loads(stripped))
+            if len(samples) >= limit:
+                break
+    return samples
+
+
+def _visualization_rows(samples: list[dict[str, Any]], *, max_joints: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for sample in samples:
+        predicted = sample.get("predicted_joints", [])
+        target = sample.get("target_joints", [])
+        if not isinstance(predicted, list) or not isinstance(target, list):
+            continue
+        joint_names = sample.get("target_joint_names", [])
+        if not isinstance(joint_names, list):
+            joint_names = []
+        frame_indices = sample.get("target_frame_indices", [])
+        if not isinstance(frame_indices, list):
+            frame_indices = []
+        for horizon_index, (pred_frame, target_frame) in enumerate(zip(predicted, target)):
+            if not isinstance(pred_frame, list) or not isinstance(target_frame, list):
+                continue
+            joint_count = min(max_joints, len(pred_frame), len(target_frame))
+            for joint_index in range(joint_count):
+                predicted_value = float(pred_frame[joint_index])
+                target_value = float(target_frame[joint_index])
+                rows.append(
+                    {
+                        "sample_id": str(sample.get("sample_id", "")),
+                        "sequence_id": str(sample.get("sequence_id", "")),
+                        "actor_uid": str(sample.get("actor_uid", "")),
+                        "category": str(sample.get("category", "")),
+                        "package": str(sample.get("package", "")),
+                        "horizon_index": horizon_index,
+                        "target_frame": (
+                            frame_indices[horizon_index]
+                            if horizon_index < len(frame_indices)
+                            else sample.get("target_frame", "")
+                        ),
+                        "joint_index": joint_index,
+                        "joint_name": str(joint_names[joint_index]) if joint_index < len(joint_names) else f"joint_{joint_index}",
+                        "predicted": predicted_value,
+                        "target": target_value,
+                        "abs_error": abs(predicted_value - target_value),
+                    }
+                )
+    return rows
+
+
+def _write_visualization_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    fieldnames = [
+        "sample_id",
+        "sequence_id",
+        "actor_uid",
+        "category",
+        "package",
+        "horizon_index",
+        "target_frame",
+        "joint_index",
+        "joint_name",
+        "predicted",
+        "target",
+        "abs_error",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _write_visualization_svg(path: Path, rows: list[dict[str, Any]]) -> None:
+    width = 720
+    height = 260
+    padding = 32
+    series_rows = _first_visual_series(rows)
+    if not series_rows:
+        path.write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="720" height="260">'
+            '<text x="32" y="40">No trajectory rows available</text></svg>\n',
+            encoding="utf-8",
+        )
+        return
+    values = [float(row["predicted"]) for row in series_rows] + [float(row["target"]) for row in series_rows]
+    low = min(values)
+    high = max(values)
+    if abs(high - low) < 1.0e-8:
+        high = low + 1.0
+
+    def point(value: float, index: int) -> tuple[float, float]:
+        if len(series_rows) == 1:
+            x = width * 0.5
+        else:
+            x = padding + (width - 2 * padding) * index / (len(series_rows) - 1)
+        y = height - padding - (height - 2 * padding) * (value - low) / (high - low)
+        return x, y
+
+    pred_points = " ".join(
+        f"{x:.2f},{y:.2f}"
+        for index, row in enumerate(series_rows)
+        for x, y in [point(float(row["predicted"]), index)]
+    )
+    target_points = " ".join(
+        f"{x:.2f},{y:.2f}"
+        for index, row in enumerate(series_rows)
+        for x, y in [point(float(row["target"]), index)]
+    )
+    title = _html_escape(f"{series_rows[0]['sample_id']} {series_rows[0]['joint_name']}")
+    path.write_text(
+        "\n".join(
+            [
+                '<svg xmlns="http://www.w3.org/2000/svg" width="720" height="260" viewBox="0 0 720 260">',
+                '<rect x="0" y="0" width="720" height="260" fill="white"/>',
+                f'<text x="32" y="24" font-size="14" fill="#111">{title}</text>',
+                f'<line x1="{padding}" y1="{height - padding}" x2="{width - padding}" y2="{height - padding}" stroke="#999"/>',
+                f'<polyline points="{target_points}" fill="none" stroke="#2f6fed" stroke-width="2"/>',
+                f'<polyline points="{pred_points}" fill="none" stroke="#d14b2f" stroke-width="2"/>',
+                '<text x="32" y="248" font-size="12" fill="#2f6fed">target</text>',
+                '<text x="96" y="248" font-size="12" fill="#d14b2f">predicted</text>',
+                "</svg>",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_visualization_html(path: Path, rows: list[dict[str, Any]], *, svg_path: Path) -> None:
+    table_rows = "\n".join(
+        "<tr>"
+        f"<td>{_html_escape(row['sample_id'])}</td>"
+        f"<td>{_html_escape(row['joint_name'])}</td>"
+        f"<td>{row['horizon_index']}</td>"
+        f"<td>{float(row['predicted']):.6f}</td>"
+        f"<td>{float(row['target']):.6f}</td>"
+        f"<td>{float(row['abs_error']):.6f}</td>"
+        "</tr>"
+        for row in rows[:200]
+    )
+    svg_text = svg_path.read_text(encoding="utf-8") if svg_path.exists() else ""
+    path.write_text(
+        "\n".join(
+            [
+                "<!doctype html>",
+                '<html><head><meta charset="utf-8"><title>Route B trajectory preview</title></head>',
+                "<body>",
+                "<h1>Route B trajectory preview</h1>",
+                svg_text,
+                "<table border=\"1\" cellspacing=\"0\" cellpadding=\"4\">",
+                "<thead><tr><th>sample_id</th><th>joint</th><th>horizon</th><th>predicted</th><th>target</th><th>abs_error</th></tr></thead>",
+                f"<tbody>{table_rows}</tbody>",
+                "</table>",
+                "</body></html>",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _html_escape(value: Any) -> str:
+    return html.escape(str(value), quote=True)
+
+
+def _first_visual_series(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    first = rows[0]
+    sample_id = first["sample_id"]
+    joint_index = first["joint_index"]
+    return [
+        row
+        for row in rows
+        if row["sample_id"] == sample_id and row["joint_index"] == joint_index
+    ]
+
+
 def _build_train_report(
     *,
     samples_jsonl: Path,
@@ -1953,6 +2061,7 @@ def _build_train_report(
     checkpoint: Path,
     predictions_jsonl: Path,
     offline_eval: dict[str, Any],
+    visualization: dict[str, Any] | None,
     sample_count: int,
     input_dim: int,
     output_dim: int,
@@ -1981,6 +2090,7 @@ def _build_train_report(
         "checkpoint": str(checkpoint),
         "predictions_jsonl": str(predictions_jsonl),
         "offline_eval": offline_eval,
+        "visualization": visualization or {"enabled": False},
         "sample_count": sample_count,
         "input_dim": input_dim,
         "output_dim": output_dim,
@@ -2051,6 +2161,34 @@ def _wandb_log(run, payload: dict[str, Any], step: int | None = None) -> None:
 def _wandb_save(run, path: Path) -> None:
     if run is not None and path.exists():
         run.save(str(path))
+
+
+def _wandb_log_visualization(run, visualization: dict[str, Any], config: dict[str, Any]) -> None:
+    if run is None or not visualization.get("enabled"):
+        return
+    if not bool(_nested_get(config, ("visualization", "wandb_upload"), False)):
+        return
+    for key in ("summary_json", "trajectory_csv", "trajectory_svg", "trajectory_html"):
+        path_text = visualization.get(key)
+        if path_text:
+            _wandb_save(run, Path(str(path_text)))
+    payload = {
+        "visualization/status": visualization.get("status", ""),
+        "visualization/summary_json": visualization.get("summary_json", ""),
+        "visualization/sample_count": visualization.get("sample_count", 0),
+        "visualization/trajectory_row_count": visualization.get("trajectory_row_count", 0),
+    }
+    html_path = Path(str(visualization.get("trajectory_html", "")))
+    if html_path.exists():
+        try:
+            import wandb
+
+            payload["visualization/trajectory_preview"] = wandb.Html(
+                html_path.read_text(encoding="utf-8")
+            )
+        except Exception:
+            pass
+    _wandb_log(run, payload)
 
 
 def _wandb_finish(run) -> None:

@@ -93,7 +93,11 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(flat["data"]["samples_jsonl"], "runs/supervised/flat/samples.jsonl")
         self.assertEqual(flat["data"]["target_horizon_frames"], 10)
         self.assertEqual(flat["data"]["target_future_step"], 1)
+        self.assertEqual(flat["data"]["source_body_token_dim"], 15)
+        self.assertEqual(flat["data"]["source_rotation"], "rot6d")
         self.assertEqual(flat["data"]["action_dim"], 29)
+        self.assertEqual(flat["data"]["build"]["target_future_step"], 1)
+        self.assertEqual(flat["data"]["build"]["source_rotation"], "rot6d")
         self.assertEqual(flat["model"]["family"], "diffusion_policy")
         self.assertEqual(flat["model"]["hidden_dims"], [512, 512, 256])
         self.assertEqual(flat["model"]["output"], "g1_joint_position_future_window")
@@ -103,7 +107,10 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(route_b["data"]["target_horizon_frames"], 10)
         self.assertEqual(route_b["data"]["target_future_step"], 5)
         self.assertEqual(route_b["data"]["source_body_token_dim"], 15)
+        self.assertEqual(route_b["data"]["source_rotation"], "rot6d")
         self.assertEqual(route_b["data"]["action_dim"], 29)
+        self.assertEqual(route_b["data"]["build"]["target_future_step"], 5)
+        self.assertEqual(route_b["data"]["build"]["source_rotation"], "rot6d")
         self.assertEqual(route_b["model"]["family"], "temporal_diffusion_policy")
         self.assertEqual(route_b["model"]["action_dim"], 29)
         self.assertEqual(route_b["model"]["d_model"], 128)
@@ -178,6 +185,7 @@ class TrainEntryTests(unittest.TestCase):
             checkpoint=Path("runs/train/run/checkpoint.pt"),
             predictions_jsonl=Path("runs/train/run/train_predictions.jsonl"),
             offline_eval={"summary_json": "runs/train/run/eval/train_offline_eval/eval_summary.json"},
+            visualization={"enabled": True, "summary_json": "runs/train/run/visualization/visual_manifest.json"},
             sample_count=2,
             input_dim=1547,
             output_dim=29,
@@ -200,9 +208,102 @@ class TrainEntryTests(unittest.TestCase):
             report["offline_eval"]["summary_json"],
             "runs/train/run/eval/train_offline_eval/eval_summary.json",
         )
+        self.assertEqual(
+            report["visualization"]["summary_json"],
+            "runs/train/run/visualization/visual_manifest.json",
+        )
         self.assertEqual(report["quality_gate"]["policy_id"], "policy")
         self.assertEqual(report["resume_checkpoint"], "runs/train/prev/checkpoint.pt")
         self.assertFalse(report["wandb"]["enabled"])
+
+    def test_visualization_artifacts_write_traceable_preview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            predictions = root / "train_predictions.jsonl"
+            predictions.write_text(
+                json.dumps(
+                    {
+                        "sample_id": "s1",
+                        "sequence_id": "bones_sonic/230101/walk.npz",
+                        "actor_uid": "A001",
+                        "category": "walk",
+                        "package": "Locomotion",
+                        "target_frame_indices": [10, 15],
+                        "target_joint_names": ["hip", "knee"],
+                        "predicted_joints": [[0.5, 1.5], [0.75, 1.75]],
+                        "target_joints": [[0.0, 1.0], [1.0, 2.0]],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = train_entry._write_visualization_artifacts(
+                config={
+                    "visualization": {
+                        "enabled": True,
+                        "artifact_name": "route_b_probe",
+                        "num_samples": 1,
+                        "max_joints": 2,
+                    }
+                },
+                predictions_jsonl=predictions,
+                output_dir=root / "train",
+                eval_result=None,
+                run_name="train_visualization",
+            )
+
+            summary = json.loads(Path(result["summary_json"]).read_text(encoding="utf-8"))
+            csv_text = Path(result["trajectory_csv"]).read_text(encoding="utf-8")
+            svg_exists = Path(result["trajectory_svg"]).exists()
+            svg_text = Path(result["trajectory_svg"]).read_text(encoding="utf-8")
+            html_text = Path(result["trajectory_html"]).read_text(encoding="utf-8")
+
+        self.assertTrue(result["enabled"])
+        self.assertEqual(summary["artifact_version"], "route_b_joint_trajectory_v1")
+        self.assertEqual(summary["trajectory_row_count"], 4)
+        self.assertIn("s1", csv_text)
+        self.assertTrue(svg_exists)
+        self.assertIn("trajectory preview", html_text)
+
+    def test_visualization_artifacts_escape_markup_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            predictions = root / "train_predictions.jsonl"
+            predictions.write_text(
+                json.dumps(
+                    {
+                        "sample_id": "<script>alert(1)</script>",
+                        "target_joint_names": ["hip<script>"],
+                        "predicted_joints": [[0.5]],
+                        "target_joints": [[0.0]],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = train_entry._write_visualization_artifacts(
+                config={
+                    "visualization": {
+                        "enabled": True,
+                        "artifact_name": "route_b_probe",
+                        "num_samples": 1,
+                        "max_joints": 1,
+                    }
+                },
+                predictions_jsonl=predictions,
+                output_dir=root / "train",
+                eval_result=None,
+                run_name="train_visualization",
+            )
+            svg_text = Path(result["trajectory_svg"]).read_text(encoding="utf-8")
+            html_text = Path(result["trajectory_html"]).read_text(encoding="utf-8")
+
+        self.assertNotIn("<script>", svg_text)
+        self.assertNotIn("<script>", html_text)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", svg_text)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html_text)
 
     def test_quality_gate_blocks_formal_training_without_policy(self):
         context = train_entry._quality_gate_context(
@@ -603,15 +704,22 @@ def _write_policy_audit(
 def _preset_switch_config(policy_preset: str) -> dict:
     return {
         "policy_preset": policy_preset,
-        "data": {"root": "/data", "index_csv": "runs/index.csv"},
+        "data": {
+            "root": "/data",
+            "index_csv": "runs/index.csv",
+            "build": {"target_future_step": 5, "source_rotation": "quat"},
+        },
         "policy_presets": {
             "flat_diffusion_policy": {
                 "data": {
                     "samples_jsonl": "runs/supervised/flat/samples.jsonl",
                     "target_format": "bones_sonic_joint_pos_future_window",
+                    "history_frames": 8,
                     "target_horizon_frames": 10,
                     "target_future_step": 1,
                     "source_body_count": 30,
+                    "source_body_token_dim": 15,
+                    "source_rotation": "rot6d",
                     "action_dim": 29,
                 },
                 "model": {
@@ -629,6 +737,7 @@ def _preset_switch_config(policy_preset: str) -> dict:
                 "data": {
                     "samples_jsonl": "runs/supervised/route_b/samples.jsonl",
                     "target_format": "bones_sonic_joint_pos_future_window",
+                    "history_frames": 8,
                     "target_horizon_frames": 10,
                     "target_future_step": 5,
                     "source_body_count": 30,

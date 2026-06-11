@@ -53,6 +53,10 @@ class SonicWindowedBuildConfig:
     position_scale: float = 0.01
     root_body: str = "Hips"
     source_body_names: tuple[str, ...] = DEFAULT_SOURCE_BODY_NAMES
+    source_bvh_tar: str | None = None
+    sonic_npz_root: str | None = None
+    sonic_path_prefix_from: str | None = None
+    sonic_path_prefix_to: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
@@ -127,9 +131,10 @@ def build_sonic_windowed_jsonl(
     output_dim = len(SONIC_JOINT_NAMES) * config.target_horizon_frames
     input_dim = spec.flattened_dim()
     source_tar = None
+    source_bvh_tar_path = _source_bvh_tar_path(data_root, config)
     try:
         if config.source_mode == "soma_bvh":
-            source_tar = tarfile.open(data_root.expanduser() / "soma_proportional.tar", "r:*")
+            source_tar = tarfile.open(source_bvh_tar_path, "r:*")
         with samples_jsonl.open("w", encoding="utf-8") as handle:
             for row in split_rows:
                 if sample_count >= config.limit:
@@ -163,6 +168,12 @@ def build_sonic_windowed_jsonl(
             "reported as retargeting. This is not a promoted M2Q-gated dataset."
         ),
         "source_format": config.source_mode,
+        "source_bvh_tar": str(source_bvh_tar_path) if config.source_mode == "soma_bvh" else "",
+        "sonic_npz_root": str(_path_or_empty(config.sonic_npz_root)),
+        "sonic_path_prefix_rewrite": {
+            "from": config.sonic_path_prefix_from or "",
+            "to": config.sonic_path_prefix_to or "",
+        },
         "target_format": _target_format(config),
         "observation_spec": spec.to_dict(),
         "config": config.to_dict(),
@@ -236,7 +247,7 @@ def _samples_for_row(
     *,
     np: Any,
 ) -> list[dict[str, object]]:
-    target_joints, fps, sonic_source = _read_sonic_motion(row, config, np=np)
+    target_joints, fps, sonic_source, sonic_path = _read_sonic_motion(row, config, np=np)
     if target_joints is None:
         return []
     if config.source_mode == "soma_bvh":
@@ -315,6 +326,8 @@ def _samples_for_row(
                 [float(value) for value in frame] for frame in future_targets
             ],
         }
+        if sonic_path is not None:
+            sample["target_g1_path"] = str(sonic_path)
         samples.append(sample)
         windows_for_clip += 1
         if windows_for_clip >= config.max_windows_per_clip:
@@ -370,12 +383,12 @@ def _read_sonic_motion(
     config: SonicWindowedBuildConfig,
     *,
     np: Any,
-) -> tuple[list[list[float]] | None, float, SourceMotionFeatures | None]:
-    path_text = row.get("sonic_path", "")
-    if not path_text:
-        return None, 0.0, None
+) -> tuple[list[list[float]] | None, float, SourceMotionFeatures | None, Path | None]:
+    path = _resolve_sonic_npz_path(row, config)
+    if path is None:
+        return None, 0.0, None, None
     try:
-        with np.load(Path(path_text)) as data:
+        with np.load(path) as data:
             fps = float(np.asarray(data["fps"]).reshape(-1)[0])
             joint_pos = np.asarray(data["joint_pos"], dtype=float)
             body_pos = np.asarray(data["body_pos_w"], dtype=float)
@@ -385,13 +398,13 @@ def _read_sonic_motion(
             else:
                 body_ang_vel = np.zeros_like(body_pos)
     except Exception:
-        return None, 0.0, None
+        return None, 0.0, None, path
     if joint_pos.ndim != 2 or joint_pos.shape[1] != len(SONIC_JOINT_NAMES):
-        return None, fps, None
+        return None, fps, None, path
     if body_pos.ndim != 3 or body_pos.shape[1:] != (30, 3):
-        return None, fps, None
+        return None, fps, None, path
     if body_quat.ndim != 3 or body_quat.shape[1:] != (30, 4):
-        return None, fps, None
+        return None, fps, None, path
     if body_ang_vel.ndim != 3 or body_ang_vel.shape[1:] != (30, 3):
         body_ang_vel = np.zeros_like(body_pos)
     if (
@@ -400,12 +413,41 @@ def _read_sonic_motion(
         or not bool(np.isfinite(body_quat).all())
         or not bool(np.isfinite(body_ang_vel).all())
     ):
-        return None, fps, None
+        return None, fps, None, path
     return (
         joint_pos.tolist(),
         fps,
         _source_features_from_sonic(body_pos, body_quat, body_ang_vel, config=config, np=np),
+        path,
     )
+
+
+def _source_bvh_tar_path(data_root: Path, config: SonicWindowedBuildConfig) -> Path:
+    if config.source_bvh_tar:
+        return Path(config.source_bvh_tar).expanduser()
+    return data_root.expanduser() / "soma_proportional.tar"
+
+
+def _resolve_sonic_npz_path(
+    row: Mapping[str, str],
+    config: SonicWindowedBuildConfig,
+) -> Path | None:
+    relative_path = row.get("sonic_relative_path", "")
+    if config.sonic_npz_root and relative_path:
+        return Path(config.sonic_npz_root).expanduser() / relative_path
+    path_text = row.get("sonic_path", "")
+    if not path_text:
+        return None
+    if config.sonic_path_prefix_from is not None and config.sonic_path_prefix_to is not None:
+        prefix = str(config.sonic_path_prefix_from)
+        if path_text.startswith(prefix):
+            rewritten = str(config.sonic_path_prefix_to) + path_text[len(prefix) :]
+            return Path(rewritten).expanduser()
+    return Path(path_text).expanduser()
+
+
+def _path_or_empty(path_text: str | None) -> Path | str:
+    return Path(path_text).expanduser() if path_text else ""
 
 
 def _body_positions_from_sonic(body_pos: Any, *, np: Any) -> list[list[float]]:
@@ -800,6 +842,8 @@ def _validate_config(config: SonicWindowedBuildConfig) -> None:
         raise ValueError("clip_limit must be positive when provided")
     if config.train_ratio < 0 or config.val_ratio < 0 or config.train_ratio + config.val_ratio > 1:
         raise ValueError("train_ratio and val_ratio must be non-negative and sum to <= 1")
+    if (config.sonic_path_prefix_from is None) != (config.sonic_path_prefix_to is None):
+        raise ValueError("sonic path prefix rewrite requires both from and to values")
 
 
 def _maybe_float(value: str | None) -> float:
