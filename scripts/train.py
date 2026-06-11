@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import csv
 from dataclasses import replace
 import json
@@ -64,6 +65,11 @@ def main() -> None:
     sample_manifest = _load_sample_manifest(Path(samples_jsonl) if samples_jsonl else None)
     observation = _observation_spec_from_config_and_manifest(config, sample_manifest)
     output = OutputSpec(target=str(_nested_get(config, ("model", "output"), "g1_joint_position")))
+    reported_output_dim = _reported_output_dim(
+        config,
+        output_spec=output,
+        sample_manifest=sample_manifest,
+    )
     action_column = args.action_column or str(_nested_get(config, ("data", "action_column"), "curation_action"))
     quality_gate = _quality_gate_context(
         config,
@@ -81,7 +87,7 @@ def main() -> None:
     print(f"git_sha={git_sha}")
     print(f"git_dirty={_git_dirty()}")
     print(f"observation_dim={observation.flattened_dim()}")
-    print(f"output_dim={output.output_dim()}")
+    print(f"output_dim={reported_output_dim}")
     print(f"quality_gate={json.dumps(quality_gate, sort_keys=True)}")
     if index_csv:
         index_path = Path(index_csv)
@@ -114,6 +120,11 @@ def main() -> None:
         return
 
     _validate_quality_gate(quality_gate)
+    _validate_sample_manifest_contract(
+        config,
+        sample_manifest,
+        Path(samples_jsonl) if samples_jsonl else None,
+    )
 
     try:
         import torch
@@ -192,12 +203,159 @@ def _index_supports_motion_pair_refs(index_csv: Path, *, action_column: str) -> 
 
 def _load_config(path: Path) -> dict[str, Any]:
     if yaml is None:
-        return {}
+        raise SystemExit(
+            "PyYAML is required to read --config. Install the project environment "
+            f"from environment.yml or pass a Python environment with pyyaml available: {path}"
+        )
     with path.open(encoding="utf-8") as f:
         payload = yaml.safe_load(f) or {}
     if not isinstance(payload, dict):
         raise ValueError(f"config must be a mapping: {path}")
-    return payload
+    return _apply_config_preset(payload)
+
+
+def _apply_config_preset(config: dict[str, Any]) -> dict[str, Any]:
+    preset_name = _selected_config_preset(config)
+    if not preset_name:
+        return config
+    presets = config.get("policy_presets", config.get("config_presets", {}))
+    if not isinstance(presets, dict):
+        raise ValueError("policy_presets/config_presets must be a mapping")
+    preset = presets.get(preset_name)
+    if not isinstance(preset, dict):
+        available = ", ".join(sorted(str(key) for key in presets)) or "none"
+        raise ValueError(f"unknown config preset {preset_name!r}; available: {available}")
+    _validate_config_preset_payload(preset_name, preset)
+    resolved = _deep_merge_dicts(config, preset)
+    resolved["policy_preset"] = preset_name
+    data = resolved.get("data", {})
+    data = dict(data) if isinstance(data, dict) else {}
+    data["policy_preset"] = preset_name
+    resolved["data"] = data
+    _validate_resolved_config_preset(preset_name, resolved)
+    return resolved
+
+
+def _selected_config_preset(config: dict[str, Any]) -> str:
+    data = config.get("data", {}) if isinstance(config.get("data", {}), dict) else {}
+    names = [
+        config.get("policy_preset"),
+        config.get("config_preset"),
+        data.get("policy_preset"),
+        data.get("config_preset"),
+    ]
+    selected = [str(name) for name in names if name not in (None, "")]
+    if not selected:
+        return ""
+    if len(set(selected)) > 1:
+        raise ValueError(f"conflicting config preset names: {selected}")
+    return selected[0]
+
+
+def _deep_merge_dicts(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    merged = deepcopy(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def _validate_config_preset_payload(name: str, preset: dict[str, Any]) -> None:
+    data = preset.get("data", {})
+    model = preset.get("model", {})
+    if not isinstance(data, dict) or not isinstance(model, dict):
+        raise ValueError(f"config preset {name!r} must define data and model mappings")
+    required_data = (
+        "samples_jsonl",
+        "target_format",
+        "target_horizon_frames",
+        "target_future_step",
+        "source_body_count",
+        "action_dim",
+    )
+    required_model = ("family", "output")
+    missing = [f"data.{key}" for key in required_data if key not in data]
+    missing.extend(f"model.{key}" for key in required_model if key not in model)
+    family = str(model.get("family", "")).lower().replace("-", "_")
+    if family in {"temporal_diffusion_policy", "dp_temporal", "temporal_dp", "temporal_diffusion"}:
+        route_b_required = (
+            "source_body_token_dim",
+            "source_rotation",
+        )
+        route_b_model_required = (
+            "action_dim",
+            "source_body_token_dim",
+            "source_skeleton_dim",
+            "morphology_dim",
+            "robot_state_dim",
+            "source_body_count",
+            "d_model",
+            "nhead",
+            "num_layers",
+            "dim_feedforward",
+        )
+        missing.extend(f"data.{key}" for key in route_b_required if key not in data)
+        missing.extend(f"model.{key}" for key in route_b_model_required if key not in model)
+    else:
+        if "hidden_dims" not in model and "d_model" not in model:
+            missing.append("model.hidden_dims or model.d_model")
+    if missing:
+        raise ValueError(f"config preset {name!r} missing controlled keys: {', '.join(missing)}")
+
+
+def _validate_resolved_config_preset(name: str, config: dict[str, Any]) -> None:
+    data = config.get("data", {}) if isinstance(config.get("data", {}), dict) else {}
+    model = config.get("model", {}) if isinstance(config.get("model", {}), dict) else {}
+    family = _configured_model_family(config)
+    errors = []
+    if not data.get("samples_jsonl"):
+        errors.append("data.samples_jsonl")
+    if not data.get("target_format"):
+        errors.append("data.target_format")
+    if not model.get("family"):
+        errors.append("model.family")
+    if not model.get("output"):
+        errors.append("model.output")
+    if family == "temporal_diffusion_policy":
+        if data.get("target_format") != "bones_sonic_joint_pos_future_window":
+            errors.append("data.target_format must be bones_sonic_joint_pos_future_window")
+        if model.get("output") != "g1_joint_position_future_window":
+            errors.append("model.output must be g1_joint_position_future_window")
+        for key in (
+            "target_horizon_frames",
+            "target_future_step",
+            "source_body_count",
+            "source_body_token_dim",
+            "action_dim",
+        ):
+            if key not in data:
+                errors.append(f"data.{key}")
+        for key in (
+            "action_dim",
+            "source_body_token_dim",
+            "source_skeleton_dim",
+            "morphology_dim",
+            "robot_state_dim",
+            "source_body_count",
+            "d_model",
+            "nhead",
+            "num_layers",
+            "dim_feedforward",
+        ):
+            if key not in model:
+                errors.append(f"model.{key}")
+        if data.get("action_dim") is not None and model.get("action_dim") is not None:
+            if int(data["action_dim"]) != int(model["action_dim"]):
+                errors.append("data.action_dim must match model.action_dim")
+    elif "route_b" in str(name).lower() or "temporal_diffusion" in str(name).lower():
+        errors.append("route-b preset must resolve model.family=temporal_diffusion_policy")
+    else:
+        if family == "temporal_diffusion_policy":
+            errors.append("flat preset must not resolve temporal_diffusion_policy")
+    if errors:
+        raise ValueError(f"config preset {name!r} is inconsistent: {', '.join(errors)}")
 
 
 def _nested_get(mapping: dict[str, Any], path: tuple[str, ...], default: Any) -> Any:
@@ -207,6 +365,49 @@ def _nested_get(mapping: dict[str, Any], path: tuple[str, ...], default: Any) ->
             return default
         current = current[key]
     return current
+
+
+def _configured_model_family(config: dict[str, Any]) -> str:
+    model_cfg = config.get("model", {}) if isinstance(config.get("model", {}), dict) else {}
+    key = str(model_cfg.get("family", "temporal_mlp")).lower().replace("-", "_")
+    aliases = {
+        "mlp": "temporal_mlp",
+        "temporal_mlp": "temporal_mlp",
+        "tf": "temporal_transformer",
+        "transformer": "temporal_transformer",
+        "temporal_transformer": "temporal_transformer",
+        "token_tf": "token_transformer",
+        "token_transformer": "token_transformer",
+        "tokenized_transformer": "token_transformer",
+        "cross_attention_transformer": "token_transformer",
+        "fm": "flow_matching",
+        "flow": "flow_matching",
+        "flow_matching": "flow_matching",
+        "dp": "diffusion_policy",
+        "diffusion": "diffusion_policy",
+        "diffusion_policy": "diffusion_policy",
+        "dp_temporal": "temporal_diffusion_policy",
+        "temporal_dp": "temporal_diffusion_policy",
+        "temporal_diffusion": "temporal_diffusion_policy",
+        "temporal_diffusion_policy": "temporal_diffusion_policy",
+    }
+    return aliases.get(key, key)
+
+
+def _reported_output_dim(
+    config: dict[str, Any],
+    *,
+    output_spec: OutputSpec,
+    sample_manifest: dict[str, Any],
+) -> int:
+    manifest_output_dim = sample_manifest.get("output_dim")
+    if isinstance(manifest_output_dim, int) and manifest_output_dim > 0:
+        return manifest_output_dim
+    try:
+        horizon = int(_nested_get(config, ("data", "target_horizon_frames"), 1))
+    except (TypeError, ValueError):
+        horizon = 1
+    return output_spec.output_dim() * max(1, horizon)
 
 
 def _apply_wandb_mode_override(config: dict[str, Any], wandb_mode: str | None) -> dict[str, Any]:
@@ -364,6 +565,44 @@ def _load_sample_manifest(samples_jsonl: Path | None) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _validate_sample_manifest_contract(
+    config: dict[str, Any],
+    manifest: dict[str, Any],
+    samples_jsonl: Path | None,
+) -> None:
+    expected = _nested_get(config, ("data", "target_future_step"), None)
+    if expected is None or samples_jsonl is None:
+        return
+    try:
+        expected_step = int(expected)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"data.target_future_step must be an integer: {expected}") from exc
+    manifest_config = manifest.get("config", {}) if isinstance(manifest.get("config"), dict) else {}
+    actual = manifest.get("target_future_step", manifest_config.get("target_future_step"))
+    manifest_path = samples_jsonl.parent / "manifest.json"
+    if actual is None:
+        if expected_step == 1:
+            return
+        raise SystemExit(
+            "Sample manifest lacks target_future_step for configured "
+            f"data.target_future_step={expected_step}: {manifest_path}. "
+            "Rebuild samples with the matching --target-future-step."
+        )
+    try:
+        actual_step = int(actual)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(
+            f"Sample manifest target_future_step must be an integer: {manifest_path}"
+        ) from exc
+    if actual_step != expected_step:
+        raise SystemExit(
+            "Sample manifest target_future_step mismatch: "
+            f"config data.target_future_step={expected_step}, "
+            f"manifest target_future_step={actual_step}, manifest={manifest_path}. "
+            "Rebuild samples or point data.samples_jsonl at the matching artifact."
+        )
+
+
 def _load_policy_audit(audit_path: Path | None) -> dict[str, Any]:
     if audit_path is None or not audit_path.exists():
         return {}
@@ -504,8 +743,25 @@ def _train_jsonl(
     samples = _load_supervised_samples(samples_jsonl)
     if not samples:
         raise SystemExit(f"no supervised samples found in {samples_jsonl}")
+    if _configured_model_family(config) == "temporal_diffusion_policy":
+        _train_temporal_diffusion_jsonl(
+            torch=torch,
+            config=config,
+            samples=samples,
+            samples_jsonl=samples_jsonl,
+            output_dir=output_dir,
+            resume_checkpoint=resume_checkpoint,
+            max_steps=max_steps,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            quality_gate=quality_gate,
+            rank=rank,
+            world_size=world_size,
+            runtime=runtime,
+        )
+        return
     input_dim = len(samples[0]["observation"])
-    output_dim = len(samples[0]["target_joints"])
+    output_dim = len(_target_vector(samples[0]))
     observation_spec = _observation_spec_from_config_and_manifest(
         config,
         _load_sample_manifest(samples_jsonl),
@@ -513,9 +769,9 @@ def _train_jsonl(
     )
     device = runtime["device"]
     x = torch.tensor([sample["observation"] for sample in samples], dtype=torch.float32)
-    y = torch.tensor([sample["target_joints"] for sample in samples], dtype=torch.float32)
+    y = torch.tensor([_target_vector(sample) for sample in samples], dtype=torch.float32)
     prev_y = torch.tensor(
-        [_previous_target_joints(sample, output_dim) for sample in samples],
+        [_previous_target_vector(sample, output_dim) for sample in samples],
         dtype=torch.float32,
     )
     samples, x, y, prev_y, sample_filter = _filter_finite_supervised_tensors(
@@ -689,6 +945,218 @@ def _train_jsonl(
     print(json.dumps(report, indent=2, sort_keys=True))
 
 
+def _train_temporal_diffusion_jsonl(
+    *,
+    torch,
+    config: dict[str, Any],
+    samples: list[dict[str, Any]],
+    samples_jsonl: Path,
+    output_dir: Path,
+    resume_checkpoint: Path | None,
+    max_steps: int,
+    batch_size: int,
+    learning_rate: float,
+    quality_gate: dict[str, Any],
+    rank: int,
+    world_size: int,
+    runtime: dict[str, Any],
+) -> None:
+    from online_retarget.models.registry import build_model
+
+    input_dim = len(samples[0]["observation"])
+    target_shape = _target_action_shape(samples[0])
+    action_horizon, action_dim = target_shape
+    observation_spec = _observation_spec_from_config_and_manifest(
+        config,
+        _load_sample_manifest(samples_jsonl),
+        input_dim=input_dim,
+    )
+    tensors = _temporal_condition_tensors(torch, samples)
+    samples, tensors, sample_filter = _filter_finite_temporal_tensors(
+        torch,
+        samples=samples,
+        tensors=tensors,
+    )
+    if not samples:
+        raise SystemExit(f"all temporal samples contain non-finite values: {samples_jsonl}")
+    if rank == 0:
+        print(f"sample_filter={json.dumps(sample_filter, sort_keys=True)}")
+
+    seed = int(_nested_get(config, ("experiment", "seed"), 17))
+    torch.manual_seed(seed)
+    model_build = build_model(
+        config,
+        input_dim=input_dim,
+        output_dim=action_dim,
+        observation_spec=observation_spec,
+    )
+    model = model_build.model.to(runtime["device"])
+    if resume_checkpoint is not None:
+        payload = torch.load(resume_checkpoint, map_location=runtime["device"])
+        state_dict = payload.get("model_state_dict") if isinstance(payload, dict) else None
+        if state_dict is None:
+            raise SystemExit(f"checkpoint lacks model_state_dict: {resume_checkpoint}")
+        model.load_state_dict(state_dict)
+    if runtime["distributed"]:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[runtime["local_rank"]] if runtime["device_type"] == "cuda" else None,
+        )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    wandb_run = _init_wandb(
+        config=config,
+        quality_gate=quality_gate,
+        output_dir=output_dir,
+        enabled=rank == 0,
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_every = max(1, int(_nested_get(config, ("train", "log_every"), 100)))
+    steps = min(max_steps, max_steps if max_steps > 0 else 1)
+    dataset = torch.utils.data.TensorDataset(
+        tensors["source_body_tokens"],
+        tensors["source_skeleton"],
+        tensors["morphology"],
+        tensors["robot_state"],
+        tensors["prev_action"],
+        tensors["target_action"],
+    )
+    sampler = None
+    if runtime["distributed"]:
+        sampler = torch.utils.data.distributed.DistributedSampler(
+            dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True,
+            seed=seed,
+            drop_last=False,
+        )
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=min(batch_size, len(dataset)),
+        sampler=sampler,
+        shuffle=sampler is None,
+        pin_memory=runtime["device_type"] == "cuda",
+    )
+    step = 0
+    epoch = 0
+    while step < steps:
+        if sampler is not None:
+            sampler.set_epoch(epoch)
+        for batch in loader:
+            step += 1
+            condition = _temporal_batch_to_device(batch, runtime["device"])
+            batch_y = condition.pop("target_action")
+            loss = _training_loss(
+                torch,
+                model,
+                model_build.family,
+                condition,
+                batch_y,
+                config,
+                prev_target=condition.get("prev_action"),
+            )
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            if rank == 0 and (step == 1 or step == steps or step % log_every == 0):
+                step_log = {"step": step, "loss": float(loss.detach().cpu())}
+                print(json.dumps(step_log, sort_keys=True))
+                _wandb_log(wandb_run, step_log, step=step)
+            if step >= steps:
+                break
+        epoch += 1
+
+    if runtime["distributed"]:
+        torch.distributed.barrier()
+    if rank != 0:
+        _wandb_finish(wandb_run)
+        return
+
+    with torch.no_grad():
+        full_pred = _predict_tensor(
+            torch,
+            model,
+            tensors,
+            family=model_build.family,
+            config=config,
+            batch_size=batch_size,
+            device=runtime["device"],
+        )
+        final_loss = float(
+            torch.nn.functional.mse_loss(
+                full_pred,
+                tensors["target_action"].to(runtime["device"]),
+            )
+            .detach()
+            .cpu()
+        )
+    checkpoint = output_dir / "checkpoint.pt"
+    predictions_jsonl = output_dir / "train_predictions.jsonl"
+    _write_prediction_jsonl(
+        predictions_jsonl,
+        samples=samples,
+        predictions=full_pred.detach().cpu().tolist(),
+    )
+    eval_result = None
+    if bool(_nested_get(config, ("tracking", "auto_offline_eval"), True)):
+        eval_result = evaluate_jsonl(
+            input_jsonl=predictions_jsonl,
+            output_root=output_dir,
+            config=_evaluation_config(config, run_name="train_offline_eval"),
+        )
+    report = _build_train_report(
+        samples_jsonl=samples_jsonl,
+        output_dir=output_dir,
+        checkpoint=checkpoint,
+        predictions_jsonl=predictions_jsonl,
+        offline_eval=eval_result.to_dict() if eval_result is not None else {},
+        sample_count=len(samples),
+        input_dim=input_dim,
+        output_dim=action_dim,
+        max_steps=steps,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        hidden_dims=(),
+        dropout=float(model_build.config.get("dropout", 0.0)),
+        quality_gate=quality_gate,
+        device=str(runtime["device"]),
+        world_size=world_size,
+        rank=rank,
+        final_train_mse=final_loss,
+        wandb_summary=_wandb_summary(wandb_run),
+        model_family=model_build.family,
+        model_config={
+            **model_build.config,
+            "action_horizon": action_horizon,
+            "action_dim": action_dim,
+        },
+        loss_config=_loss_config(config),
+        evaluation_config=_evaluation_config(config, run_name="train_offline_eval").to_dict(),
+        distributed_runtime=_runtime_report(runtime),
+        resume_checkpoint=str(resume_checkpoint) if resume_checkpoint is not None else "",
+        sample_filter=sample_filter,
+    )
+    torch.save(
+        {
+            "model_state_dict": _unwrap_model(model).state_dict(),
+            "report": report,
+        },
+        checkpoint,
+    )
+    (output_dir / "train_report.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _wandb_log(wandb_run, {"final_train_mse": final_loss})
+    _wandb_save(wandb_run, checkpoint)
+    _wandb_save(wandb_run, output_dir / "train_report.json")
+    if eval_result is not None:
+        _wandb_save(wandb_run, eval_result.summary_json)
+    _wandb_finish(wandb_run)
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
 def _training_loss(
     torch,
     model,
@@ -706,6 +1174,19 @@ def _training_loss(
         target_velocity = target - noise
         pred_velocity = model(observation, state, time)
         return torch.nn.functional.mse_loss(pred_velocity, target_velocity)
+    if family == "diffusion_policy":
+        weight = float(_loss_config(config).get("diffusion_policy", 1.0))
+        return weight * _unwrap_model(model).diffusion_loss(observation, target)
+    if family == "temporal_diffusion_policy":
+        weight = float(_loss_config(config).get("temporal_diffusion_policy", 1.0))
+        return weight * _unwrap_model(model).diffusion_loss(
+            observation["source_body_tokens"],
+            target,
+            source_skeleton=observation.get("source_skeleton"),
+            morphology=observation.get("morphology"),
+            robot_state=observation.get("robot_state"),
+            prev_action=observation.get("prev_action"),
+        )
     if family == "token_transformer":
         unwrapped = _unwrap_model(model)
         if prev_target is None:
@@ -789,6 +1270,31 @@ def _predict_tensor(
 ):
     model.eval()
     predictions = []
+    if family == "temporal_diffusion_policy":
+        count = x["source_body_tokens"].shape[0]
+        diffusion_cfg = config.get("model", {}) if isinstance(config.get("model", {}), dict) else {}
+        for start in range(0, count, max(1, batch_size)):
+            batch = {
+                key: value[start : start + batch_size].to(device, non_blocking=True)
+                for key, value in x.items()
+                if key != "target_action"
+            }
+            pred = _unwrap_model(model).sample(
+                batch["source_body_tokens"],
+                source_skeleton=batch.get("source_skeleton"),
+                morphology=batch.get("morphology"),
+                robot_state=batch.get("robot_state"),
+                prev_action=batch.get("prev_action"),
+                steps=int(
+                    diffusion_cfg.get(
+                        "inference_steps",
+                        diffusion_cfg.get("diffusion_steps", 32),
+                    )
+                ),
+                start=str(diffusion_cfg.get("inference_start", "zeros")),
+            )
+            predictions.append(pred.detach())
+        return torch.cat(predictions, dim=0)
     for start in range(0, x.shape[0], max(1, batch_size)):
         batch = x[start : start + batch_size].to(device, non_blocking=True)
         if family == "flow_matching":
@@ -797,6 +1303,20 @@ def _predict_tensor(
                 batch,
                 steps=int(flow_cfg.get("inference_steps", 8)),
                 start=str(flow_cfg.get("inference_start", "zeros")),
+            )
+        elif family == "diffusion_policy":
+            diffusion_cfg = (
+                config.get("model", {}) if isinstance(config.get("model", {}), dict) else {}
+            )
+            pred = _unwrap_model(model).sample(
+                batch,
+                steps=int(
+                    diffusion_cfg.get(
+                        "inference_steps",
+                        diffusion_cfg.get("diffusion_steps", 32),
+                    )
+                ),
+                start=str(diffusion_cfg.get("inference_start", "zeros")),
             )
         elif family == "token_transformer":
             if prev_y is None:
@@ -819,12 +1339,212 @@ def _unwrap_model(model):
     return model.module if hasattr(model, "module") else model
 
 
-def _previous_target_joints(sample: dict[str, Any], output_dim: int) -> list[float]:
+def _target_vector(sample: dict[str, Any]) -> list[float]:
+    future = sample.get("future_target_joints")
+    if isinstance(future, list) and future and all(isinstance(row, list) for row in future):
+        return [float(value) for row in future for value in row]
+    target = sample.get("target_joints")
+    if isinstance(target, list):
+        return [float(value) for value in target]
+    raise ValueError("sample lacks target_joints or future_target_joints")
+
+
+def _previous_target_vector(sample: dict[str, Any], output_dim: int) -> list[float]:
     for key in ("prev_target_joints", "previous_target_joints", "prev_g1_joints"):
         value = sample.get(key)
         if isinstance(value, list) and len(value) == output_dim:
             return [float(item) for item in value]
+        if isinstance(value, list) and value and output_dim % len(value) == 0:
+            repeats = output_dim // len(value)
+            return [float(item) for _ in range(repeats) for item in value]
     return [0.0] * output_dim
+
+
+def _previous_target_joints(sample: dict[str, Any], output_dim: int) -> list[float]:
+    return _previous_target_vector(sample, output_dim)
+
+
+def _target_action_sequence(sample: dict[str, Any]) -> list[list[float]]:
+    future = sample.get("future_target_joints")
+    if isinstance(future, list) and future and all(isinstance(row, list) for row in future):
+        return [[float(value) for value in row] for row in future]
+    target = sample.get("target_joints")
+    if isinstance(target, list):
+        return [[float(value) for value in target]]
+    raise ValueError("sample lacks target_joints or future_target_joints")
+
+
+def _target_action_shape(sample: dict[str, Any]) -> tuple[int, int]:
+    sequence = _target_action_sequence(sample)
+    if not sequence or not sequence[0]:
+        raise ValueError("target action sequence must be non-empty")
+    return len(sequence), len(sequence[0])
+
+
+def _temporal_condition_tensors(torch, samples: list[dict[str, Any]]) -> dict[str, Any]:
+    if not samples:
+        raise ValueError("samples must be non-empty")
+    first_target_shape = _target_action_shape(samples[0])
+    source_body_tokens = _source_body_token_sequence(samples[0])
+    source_skeleton_dim = len(_source_skeleton_vector(samples[0], source_body_tokens))
+    morphology_dim = len(_morphology_condition_vector(samples[0]))
+    robot_state_dim = len(_robot_state_vector(samples[0]))
+    action_dim = first_target_shape[1]
+    rows = {
+        "source_body_tokens": [],
+        "source_skeleton": [],
+        "morphology": [],
+        "robot_state": [],
+        "prev_action": [],
+        "target_action": [],
+    }
+    for index, sample in enumerate(samples):
+        target_action = _target_action_sequence(sample)
+        shape = (len(target_action), len(target_action[0]) if target_action else 0)
+        if shape != first_target_shape:
+            raise ValueError(
+                "temporal samples must share target shape "
+                f"{first_target_shape}; sample {index} has {shape}"
+            )
+        source_tokens = _source_body_token_sequence(sample)
+        if len(source_tokens) != first_target_shape[0]:
+            raise ValueError(
+                "source_body_tokens horizon must match future_target_joints; "
+                f"sample {index} has {len(source_tokens)} vs {first_target_shape[0]}"
+            )
+        rows["source_body_tokens"].append(source_tokens)
+        rows["source_skeleton"].append(
+            _pad_or_trim(_source_skeleton_vector(sample, source_tokens), source_skeleton_dim)
+        )
+        rows["morphology"].append(_pad_or_trim(_morphology_condition_vector(sample), morphology_dim))
+        rows["robot_state"].append(_pad_or_trim(_robot_state_vector(sample), robot_state_dim))
+        rows["prev_action"].append(_pad_or_trim(_prev_action_vector(sample), action_dim))
+        rows["target_action"].append(target_action)
+    return {
+        key: torch.tensor(value, dtype=torch.float32)
+        for key, value in rows.items()
+    }
+
+
+def _source_body_token_sequence(sample: dict[str, Any]) -> list[list[list[float]]]:
+    tokens = sample.get("source_body_tokens")
+    if (
+        isinstance(tokens, list)
+        and tokens
+        and all(isinstance(step, list) and step for step in tokens)
+        and all(isinstance(body, list) for step in tokens for body in step)
+    ):
+        return [
+            [[float(value) for value in body] for body in step]
+            for step in tokens
+        ]
+    raise ValueError("temporal_diffusion_policy samples require source_body_tokens [T,N,D]")
+
+
+def _source_skeleton_vector(
+    sample: dict[str, Any],
+    source_body_tokens: list[list[list[float]]] | None = None,
+) -> list[float]:
+    value = sample.get("source_skeleton")
+    if isinstance(value, list):
+        return [float(item) for item in value]
+    body_count = len(source_body_tokens[0]) if source_body_tokens else 0
+    return [0.0] * body_count * 4
+
+
+def _morphology_condition_vector(sample: dict[str, Any]) -> list[float]:
+    value = sample.get("morphology")
+    if isinstance(value, list):
+        return [float(item) for item in value]
+    return [0.0] * 13
+
+
+def _robot_state_vector(sample: dict[str, Any]) -> list[float]:
+    value = sample.get("robot_state")
+    if isinstance(value, list):
+        return [float(item) for item in value]
+    return [0.0] * 94
+
+
+def _prev_action_vector(sample: dict[str, Any]) -> list[float]:
+    for key in ("prev_target_joints", "previous_target_joints", "prev_g1_joints"):
+        value = sample.get(key)
+        if isinstance(value, list):
+            return [float(item) for item in value]
+    return []
+
+
+def _pad_or_trim(values: list[float], width: int) -> list[float]:
+    if len(values) >= width:
+        return values[:width]
+    return values + [0.0] * (width - len(values))
+
+
+def _filter_finite_temporal_tensors(
+    torch,
+    *,
+    samples: list[dict[str, Any]],
+    tensors: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    """Drop JSONL rows with NaN/Inf values in any temporal tensor."""
+
+    keep_mask = None
+    finite_by_key = {}
+    for key, tensor in tensors.items():
+        finite = torch.isfinite(tensor).reshape(tensor.shape[0], -1).all(dim=1)
+        finite_by_key[key] = finite
+        keep_mask = finite if keep_mask is None else keep_mask & finite
+    if keep_mask is None:
+        raise ValueError("no tensors to filter")
+    dropped_indices = (~keep_mask).nonzero(as_tuple=False).flatten().tolist()
+    report = {
+        "input_count": len(samples),
+        "filtered_count": int(keep_mask.sum().item()),
+        "dropped_count": len(dropped_indices),
+        "dropped_examples": [],
+    }
+    if not dropped_indices:
+        return samples, tensors, report
+
+    for index in dropped_indices[:20]:
+        reasons = [
+            f"{key}_nonfinite"
+            for key, finite in finite_by_key.items()
+            if not bool(finite[index])
+        ]
+        sample = samples[index]
+        report["dropped_examples"].append(
+            {
+                "index": int(index),
+                "sample_id": str(sample.get("sample_id", "")),
+                "source_motion_path": str(sample.get("source_motion_path", "")),
+                "target_g1_path": str(sample.get("target_g1_path", "")),
+                "reasons": reasons,
+            }
+        )
+
+    keep_indices = keep_mask.nonzero(as_tuple=False).flatten()
+    filtered_samples = [samples[int(index)] for index in keep_indices.tolist()]
+    filtered_tensors = {
+        key: tensor.index_select(0, keep_indices)
+        for key, tensor in tensors.items()
+    }
+    return filtered_samples, filtered_tensors, report
+
+
+def _temporal_batch_to_device(batch, device) -> dict[str, Any]:
+    keys = (
+        "source_body_tokens",
+        "source_skeleton",
+        "morphology",
+        "robot_state",
+        "prev_action",
+        "target_action",
+    )
+    return {
+        key: value.to(device, non_blocking=True)
+        for key, value in zip(keys, batch)
+    }
 
 
 def _filter_finite_supervised_tensors(
@@ -918,8 +1638,14 @@ def _load_supervised_samples(samples_jsonl: Path) -> list[dict[str, Any]]:
             if not stripped:
                 continue
             sample = json.loads(stripped)
-            if "observation" not in sample or "target_joints" not in sample:
-                raise ValueError(f"sample on line {line_number} lacks observation/target_joints")
+            if "observation" not in sample:
+                raise ValueError(f"sample on line {line_number} lacks observation")
+            try:
+                _target_vector(sample)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"sample on line {line_number} lacks target_joints/future_target_joints"
+                ) from exc
             samples.append(sample)
     return samples
 
@@ -943,8 +1669,22 @@ def _predict_jsonl(
     samples = _load_supervised_samples(samples_jsonl)
     if not samples:
         raise SystemExit(f"no supervised samples found in {samples_jsonl}")
+    if _configured_model_family(config) == "temporal_diffusion_policy":
+        _predict_temporal_diffusion_jsonl(
+            torch=torch,
+            config=config,
+            samples=samples,
+            samples_jsonl=samples_jsonl,
+            checkpoint=checkpoint,
+            output_dir=output_dir,
+            quality_gate=quality_gate,
+            rank=rank,
+            world_size=world_size,
+            runtime=runtime,
+        )
+        return
     input_dim = len(samples[0]["observation"])
-    output_dim = len(samples[0]["target_joints"])
+    output_dim = len(_target_vector(samples[0]))
     observation_spec = _observation_spec_from_config_and_manifest(
         config,
         _load_sample_manifest(samples_jsonl),
@@ -965,9 +1705,9 @@ def _predict_jsonl(
     model.load_state_dict(state_dict)
     model.eval()
     x = torch.tensor([sample["observation"] for sample in samples], dtype=torch.float32)
-    y = torch.tensor([sample["target_joints"] for sample in samples], dtype=torch.float32)
+    y = torch.tensor([_target_vector(sample) for sample in samples], dtype=torch.float32)
     prev_y = torch.tensor(
-        [_previous_target_joints(sample, output_dim) for sample in samples],
+        [_previous_target_vector(sample, output_dim) for sample in samples],
         dtype=torch.float32,
     )
     samples, x, y, prev_y, sample_filter = _filter_finite_supervised_tensors(
@@ -1032,11 +1772,120 @@ def _predict_jsonl(
     print(json.dumps(report, indent=2, sort_keys=True))
 
 
+def _predict_temporal_diffusion_jsonl(
+    *,
+    torch,
+    config: dict[str, Any],
+    samples: list[dict[str, Any]],
+    samples_jsonl: Path,
+    checkpoint: Path,
+    output_dir: Path,
+    quality_gate: dict[str, Any],
+    rank: int,
+    world_size: int,
+    runtime: dict[str, Any],
+) -> None:
+    from online_retarget.models.registry import build_model
+
+    if rank != 0:
+        return
+    input_dim = len(samples[0]["observation"])
+    action_horizon, action_dim = _target_action_shape(samples[0])
+    observation_spec = _observation_spec_from_config_and_manifest(
+        config,
+        _load_sample_manifest(samples_jsonl),
+        input_dim=input_dim,
+    )
+    device = runtime["device"]
+    model_build = build_model(
+        config,
+        input_dim=input_dim,
+        output_dim=action_dim,
+        observation_spec=observation_spec,
+    )
+    model = model_build.model.to(device)
+    payload = torch.load(checkpoint, map_location=device)
+    state_dict = payload.get("model_state_dict") if isinstance(payload, dict) else None
+    if state_dict is None:
+        raise SystemExit(f"checkpoint lacks model_state_dict: {checkpoint}")
+    model.load_state_dict(state_dict)
+    model.eval()
+    tensors = _temporal_condition_tensors(torch, samples)
+    samples, tensors, sample_filter = _filter_finite_temporal_tensors(
+        torch,
+        samples=samples,
+        tensors=tensors,
+    )
+    if not samples:
+        raise SystemExit(f"all temporal samples contain non-finite values: {samples_jsonl}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with torch.no_grad():
+        pred = _predict_tensor(
+            torch,
+            model,
+            tensors,
+            family=model_build.family,
+            config=config,
+            batch_size=int(_nested_get(config, ("train", "batch_size"), 64)),
+            device=device,
+        )
+        predictions = pred.detach().cpu().tolist()
+        final_mse = float(
+            torch.nn.functional.mse_loss(
+                pred,
+                tensors["target_action"].to(device),
+            )
+            .detach()
+            .cpu()
+        )
+    predictions_jsonl = output_dir / "predictions.jsonl"
+    _write_prediction_jsonl(predictions_jsonl, samples=samples, predictions=predictions)
+    eval_result = None
+    if bool(_nested_get(config, ("tracking", "auto_offline_eval"), True)):
+        eval_result = evaluate_jsonl(
+            input_jsonl=predictions_jsonl,
+            output_root=output_dir,
+            config=_evaluation_config(config, run_name="offline_eval"),
+        )
+    report = {
+        "mode": "predict_only",
+        "samples_jsonl": str(samples_jsonl),
+        "checkpoint": str(checkpoint),
+        "output_dir": str(output_dir),
+        "predictions_jsonl": str(predictions_jsonl),
+        "offline_eval": eval_result.to_dict() if eval_result is not None else {},
+        "sample_count": len(samples),
+        "input_dim": input_dim,
+        "output_dim": action_dim,
+        "model_family": model_build.family,
+        "model_config": {
+            **model_build.config,
+            "action_horizon": action_horizon,
+            "action_dim": action_dim,
+        },
+        "loss_config": _loss_config(config),
+        "evaluation_config": _evaluation_config(config, run_name="offline_eval").to_dict(),
+        "sample_filter": sample_filter,
+        "quality_gate": quality_gate,
+        "device": str(device),
+        "world_size": world_size,
+        "rank": rank,
+        "mse": final_mse,
+        "git_sha": _git_sha(),
+        "git_dirty": _git_dirty(),
+    }
+    (output_dir / "predict_report.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
 def _write_prediction_jsonl(
     path: Path,
     *,
     samples: list[dict[str, Any]],
-    predictions: list[list[float]],
+    predictions: list[Any],
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
@@ -1047,12 +1896,14 @@ def _write_prediction_jsonl(
                 "category": sample.get("category", ""),
                 "package": sample.get("package", ""),
                 "quality_flags": sample.get("quality_flags", []),
-                "predicted_joints": [prediction],
-                "target_joints": [sample["target_joints"]],
+                "predicted_joints": _prediction_sequence(sample, prediction),
+                "target_joints": _target_sequence(sample),
             }
             for key in (
                 "fps",
                 "target_frame",
+                "target_frame_indices",
+                "target_horizon_frames",
                 "source_motion_path",
                 "target_g1_path",
                 "sonic_relative_path",
@@ -1068,6 +1919,31 @@ def _write_prediction_jsonl(
             )
             f.write(json.dumps(payload, sort_keys=True))
             f.write("\n")
+
+
+def _target_sequence(sample: dict[str, Any]) -> list[list[float]]:
+    future = sample.get("future_target_joints")
+    if isinstance(future, list) and future and all(isinstance(row, list) for row in future):
+        return [[float(value) for value in row] for row in future]
+    return [[float(value) for value in sample["target_joints"]]]
+
+
+def _prediction_sequence(sample: dict[str, Any], prediction: Any) -> list[list[float]]:
+    if (
+        isinstance(prediction, list)
+        and prediction
+        and all(isinstance(row, list) for row in prediction)
+    ):
+        return [[float(value) for value in row] for row in prediction]
+    target = _target_sequence(sample)
+    horizon = len(target)
+    joint_dim = len(target[0]) if target else len(prediction)
+    if horizon > 0 and joint_dim > 0 and len(prediction) == horizon * joint_dim:
+        return [
+            [float(value) for value in prediction[index * joint_dim : (index + 1) * joint_dim]]
+            for index in range(horizon)
+        ]
+    return [[float(value) for value in prediction]]
 
 
 def _build_train_report(

@@ -1,6 +1,9 @@
+import contextlib
+import io
 import json
 import math
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -79,6 +82,95 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(updated["tracking"]["wandb_mode"], "offline")
         self.assertEqual(config["tracking"]["wandb_mode"], "disabled")
 
+    def test_config_preset_switches_flat_and_route_b_settings(self):
+        config = _preset_switch_config("flat_diffusion_policy")
+
+        flat = train_entry._apply_config_preset(config)
+        route_b = train_entry._apply_config_preset(
+            {**config, "policy_preset": "route_b_temporal_diffusion"}
+        )
+
+        self.assertEqual(flat["data"]["samples_jsonl"], "runs/supervised/flat/samples.jsonl")
+        self.assertEqual(flat["data"]["target_horizon_frames"], 10)
+        self.assertEqual(flat["data"]["target_future_step"], 1)
+        self.assertEqual(flat["data"]["action_dim"], 29)
+        self.assertEqual(flat["model"]["family"], "diffusion_policy")
+        self.assertEqual(flat["model"]["hidden_dims"], [512, 512, 256])
+        self.assertEqual(flat["model"]["output"], "g1_joint_position_future_window")
+        self.assertEqual(flat["loss"], {"diffusion_policy": 1.0})
+
+        self.assertEqual(route_b["data"]["samples_jsonl"], "runs/supervised/route_b/samples.jsonl")
+        self.assertEqual(route_b["data"]["target_horizon_frames"], 10)
+        self.assertEqual(route_b["data"]["target_future_step"], 5)
+        self.assertEqual(route_b["data"]["source_body_token_dim"], 15)
+        self.assertEqual(route_b["data"]["action_dim"], 29)
+        self.assertEqual(route_b["model"]["family"], "temporal_diffusion_policy")
+        self.assertEqual(route_b["model"]["action_dim"], 29)
+        self.assertEqual(route_b["model"]["d_model"], 128)
+        self.assertEqual(route_b["model"]["nhead"], 4)
+        self.assertEqual(route_b["model"]["num_layers"], 2)
+        self.assertEqual(route_b["model"]["dim_feedforward"], 256)
+        self.assertEqual(route_b["model"]["output"], "g1_joint_position_future_window")
+        self.assertEqual(route_b["loss"], {"temporal_diffusion_policy": 1.0})
+
+    def test_config_preset_preserves_old_config_without_preset(self):
+        config = {
+            "data": {"samples_jsonl": "runs/supervised/flat/samples.jsonl"},
+            "model": {"family": "diffusion_policy", "hidden_dims": [8]},
+        }
+
+        self.assertIs(train_entry._apply_config_preset(config), config)
+
+    def test_config_preset_rejects_incomplete_route_b_group(self):
+        with self.assertRaises(ValueError) as raised:
+            train_entry._apply_config_preset(
+                {
+                    "policy_preset": "route_b_temporal_diffusion",
+                    "policy_presets": {
+                        "route_b_temporal_diffusion": {
+                            "data": {"samples_jsonl": "runs/samples.jsonl"},
+                            "model": {"family": "temporal_diffusion_policy"},
+                        }
+                    },
+                }
+            )
+
+        self.assertIn("missing controlled keys", str(raised.exception))
+
+    def test_load_config_fails_fast_without_pyyaml(self):
+        with mock.patch.object(train_entry, "yaml", None):
+            with self.assertRaises(SystemExit) as raised:
+                train_entry._load_config(Path("configs/bones_sonic_diffusion_policy_debug.yaml"))
+
+        self.assertIn("PyYAML is required to read --config", str(raised.exception))
+
+    def test_dry_run_reports_future_horizon_output_dim_from_config(self):
+        config = {
+            "data": {
+                "target_horizon_frames": 10,
+                "allow_debug_data": True,
+            },
+            "model": {
+                "output": "g1_joint_position_future_window",
+            },
+        }
+        fake_yaml = mock.Mock()
+        fake_yaml.safe_load.return_value = config
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text("ignored: true\n", encoding="utf-8")
+            with mock.patch.object(train_entry, "yaml", fake_yaml):
+                with mock.patch.object(
+                    sys,
+                    "argv",
+                    ["train.py", "--config", str(config_path), "--dry-run"],
+                ):
+                    stdout = io.StringIO()
+                    with contextlib.redirect_stdout(stdout):
+                        train_entry.main()
+
+        self.assertIn("output_dim=290", stdout.getvalue())
+
     def test_build_train_report_records_trace_artifacts(self):
         report = train_entry._build_train_report(
             samples_jsonl=Path("runs/samples.jsonl"),
@@ -133,6 +225,46 @@ class TrainEntryTests(unittest.TestCase):
         )
 
         train_entry._validate_quality_gate(context)
+
+    def test_sample_manifest_contract_blocks_target_future_step_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            samples = Path(tmp) / "samples.jsonl"
+
+            with self.assertRaises(SystemExit) as raised:
+                train_entry._validate_sample_manifest_contract(
+                    {"data": {"target_future_step": 5}},
+                    {"target_future_step": 1},
+                    samples,
+                )
+
+        self.assertIn("target_future_step mismatch", str(raised.exception))
+
+    def test_sample_manifest_contract_requires_declared_target_future_step(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            samples = Path(tmp) / "samples.jsonl"
+
+            with self.assertRaises(SystemExit) as raised:
+                train_entry._validate_sample_manifest_contract(
+                    {"data": {"target_future_step": 5}},
+                    {},
+                    samples,
+                )
+
+        self.assertIn("lacks target_future_step", str(raised.exception))
+
+    def test_sample_manifest_contract_allows_legacy_default_future_step(self):
+        train_entry._validate_sample_manifest_contract(
+            {"data": {"target_future_step": 1}},
+            {},
+            Path("runs/samples.jsonl"),
+        )
+
+    def test_sample_manifest_contract_preserves_old_config_without_future_step(self):
+        train_entry._validate_sample_manifest_contract(
+            {"data": {}},
+            {},
+            Path("runs/samples.jsonl"),
+        )
 
     def test_quality_gate_reads_supervised_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -343,6 +475,72 @@ class TrainEntryTests(unittest.TestCase):
 
         self.assertEqual(train_entry._previous_target_joints(sample, 3), [1.0, 2.0, 3.0])
 
+    def test_target_vector_flattens_future_targets(self):
+        sample = {"future_target_joints": [[1, 2], [3, 4]], "target_joints": [1, 2]}
+
+        self.assertEqual(train_entry._target_vector(sample), [1.0, 2.0, 3.0, 4.0])
+
+    def test_temporal_diffusion_policy_keeps_future_targets_nonflat(self):
+        sample = {"future_target_joints": [[1, 2], [3, 4]], "target_joints": [1, 2]}
+
+        self.assertEqual(train_entry._configured_model_family({"model": {"family": "dp-temporal"}}), "temporal_diffusion_policy")
+        self.assertEqual(train_entry._target_action_shape(sample), (2, 2))
+        self.assertEqual(
+            train_entry._target_action_sequence(sample),
+            [[1.0, 2.0], [3.0, 4.0]],
+        )
+
+    def test_previous_target_vector_repeats_single_frame_for_horizon(self):
+        sample = {"prev_target_joints": [1, 2]}
+
+        self.assertEqual(train_entry._previous_target_vector(sample, 4), [1.0, 2.0, 1.0, 2.0])
+
+    def test_write_prediction_jsonl_reshapes_future_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "predictions.jsonl"
+
+            train_entry._write_prediction_jsonl(
+                output,
+                samples=[
+                    {
+                        "sample_id": "s1",
+                        "target_joints": [0.0, 1.0],
+                        "future_target_joints": [[0.0, 1.0], [2.0, 3.0]],
+                        "target_frame_indices": [10, 11],
+                    }
+                ],
+                predictions=[[0.5, 1.5, 2.5, 3.5]],
+            )
+
+            payload = json.loads(output.read_text(encoding="utf-8").strip())
+
+        self.assertEqual(payload["predicted_joints"], [[0.5, 1.5], [2.5, 3.5]])
+        self.assertEqual(payload["target_joints"], [[0.0, 1.0], [2.0, 3.0]])
+        self.assertEqual(payload["target_frame_indices"], [10, 11])
+
+    def test_write_prediction_jsonl_preserves_nested_temporal_predictions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "predictions.jsonl"
+
+            train_entry._write_prediction_jsonl(
+                output,
+                samples=[
+                    {
+                        "sample_id": "s1",
+                        "target_joints": [0.0, 1.0],
+                        "future_target_joints": [[0.0, 1.0], [2.0, 3.0]],
+                        "target_frame_indices": [10, 15],
+                    }
+                ],
+                predictions=[[[0.5, 1.5], [2.5, 3.5]]],
+            )
+
+            payload = json.loads(output.read_text(encoding="utf-8").strip())
+
+        self.assertEqual(payload["predicted_joints"], [[0.5, 1.5], [2.5, 3.5]])
+        self.assertEqual(payload["target_joints"], [[0.0, 1.0], [2.0, 3.0]])
+        self.assertEqual(payload["target_frame_indices"], [10, 15])
+
     def test_previous_target_joints_falls_back_to_zeros(self):
         self.assertEqual(train_entry._previous_target_joints({}, 2), [0.0, 0.0])
 
@@ -400,6 +598,66 @@ def _write_policy_audit(
         + "\n",
         encoding="utf-8",
     )
+
+
+def _preset_switch_config(policy_preset: str) -> dict:
+    return {
+        "policy_preset": policy_preset,
+        "data": {"root": "/data", "index_csv": "runs/index.csv"},
+        "policy_presets": {
+            "flat_diffusion_policy": {
+                "data": {
+                    "samples_jsonl": "runs/supervised/flat/samples.jsonl",
+                    "target_format": "bones_sonic_joint_pos_future_window",
+                    "target_horizon_frames": 10,
+                    "target_future_step": 1,
+                    "source_body_count": 30,
+                    "action_dim": 29,
+                },
+                "model": {
+                    "family": "diffusion_policy",
+                    "hidden_dims": [512, 512, 256],
+                    "dropout": 0.0,
+                    "time_embed_dim": 32,
+                    "diffusion_steps": 32,
+                    "inference_steps": 8,
+                    "output": "g1_joint_position_future_window",
+                },
+                "loss": {"diffusion_policy": 1.0},
+            },
+            "route_b_temporal_diffusion": {
+                "data": {
+                    "samples_jsonl": "runs/supervised/route_b/samples.jsonl",
+                    "target_format": "bones_sonic_joint_pos_future_window",
+                    "target_horizon_frames": 10,
+                    "target_future_step": 5,
+                    "source_body_count": 30,
+                    "source_body_token_dim": 15,
+                    "source_rotation": "rot6d",
+                    "action_dim": 29,
+                },
+                "model": {
+                    "family": "temporal_diffusion_policy",
+                    "d_model": 128,
+                    "nhead": 4,
+                    "num_layers": 2,
+                    "dim_feedforward": 256,
+                    "dropout": 0.0,
+                    "time_embed_dim": 32,
+                    "diffusion_steps": 32,
+                    "inference_steps": 8,
+                    "action_dim": 29,
+                    "source_body_count": 30,
+                    "source_body_token_dim": 15,
+                    "source_skeleton_dim": 120,
+                    "morphology_dim": 13,
+                    "robot_state_dim": 94,
+                    "output": "g1_joint_position_future_window",
+                },
+                "loss": {"temporal_diffusion_policy": 1.0},
+            },
+        },
+    }
 
 
 class _FakeTensor:
