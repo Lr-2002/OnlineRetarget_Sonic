@@ -7,7 +7,7 @@ experiment:
 data:
   root: /home/user/data/motion_data
   index_csv: runs/indices/bones_sonic_index_full_v0/sonic_index.csv
-  samples_jsonl: runs/supervised/somabvh_walk_train_h8_fh10_stride10_limit128/samples.jsonl
+  samples_jsonl: runs/supervised/somabvh_walk_train_h8_fh10_fs5_stride10_limit128/samples.jsonl
   allow_debug_data: true
   source_format: soma_proportional_bvh_fk
   target_format: bones_sonic_joint_pos_future_window

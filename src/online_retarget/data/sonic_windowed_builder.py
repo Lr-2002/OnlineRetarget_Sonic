@@ -423,16 +423,29 @@ def _source_features_from_sonic(
     np: Any,
 ) -> SourceMotionFeatures:
     selected = _selected_sonic_body_indices(config.source_body_names)
-    pelvis = body_pos[:, :1, :]
-    relative = (body_pos - pelvis) * config.position_scale
-    positions = relative[:, selected, :].reshape((body_pos.shape[0], len(selected) * 3)).tolist()
-    linear_velocities = _body_linear_velocities(
-        [
-            [[float(value) for value in relative[frame, body, :]] for body in selected]
-            for frame in range(body_pos.shape[0])
-        ]
-    )
     root_rot = [_quat_to_matrix(body_quat[frame, 0, :]) for frame in range(body_quat.shape[0])]
+    local_body_positions: list[list[list[float]]] = []
+    for frame in range(body_pos.shape[0]):
+        root_inv = _transpose(root_rot[frame])
+        root_pos = body_pos[frame, 0, :]
+        local_body_positions.append(
+            [
+                _mat_vec(
+                    root_inv,
+                    [
+                        (float(body_pos[frame, body, axis]) - float(root_pos[axis]))
+                        * config.position_scale
+                        for axis in range(3)
+                    ],
+                )
+                for body in selected
+            ]
+        )
+    positions = [
+        [value for body_position in frame for value in body_position]
+        for frame in local_body_positions
+    ]
+    linear_velocities = _body_linear_velocities(local_body_positions)
     rot6d_frames = []
     for frame in range(body_quat.shape[0]):
         root_inv = _transpose(root_rot[frame])
@@ -489,9 +502,14 @@ def _source_features_from_bvh(
                 flattened_positions.extend((0.0, 0.0, 0.0))
             else:
                 position = global_positions[index]
-                flattened_positions.extend(
-                    (position[axis] - root[axis]) * config.position_scale for axis in range(3)
+                local_position = _mat_vec(
+                    root_inv,
+                    [
+                        (position[axis] - root[axis]) * config.position_scale
+                        for axis in range(3)
+                    ],
                 )
+                flattened_positions.extend(local_position)
                 relative_rotation = _mat_mul(root_inv, global_rotations[index])
             frame_rotations.append(relative_rotation)
             frame_rot6d.append(_rot6d(relative_rotation))
@@ -640,10 +658,10 @@ def _mat_vec(matrix: Sequence[Sequence[float]], vector: Sequence[float]) -> list
 def _rot6d(matrix: Sequence[Sequence[float]]) -> list[float]:
     return [
         float(matrix[0][0]),
-        float(matrix[1][0]),
-        float(matrix[2][0]),
         float(matrix[0][1]),
+        float(matrix[1][0]),
         float(matrix[1][1]),
+        float(matrix[2][0]),
         float(matrix[2][1]),
     ]
 
@@ -754,6 +772,7 @@ def _run_name(config: SonicWindowedBuildConfig) -> str:
     return (
         f"{source}_{task}_{config.split}_h{config.history_frames}"
         f"{f'_fh{config.target_horizon_frames}' if config.target_horizon_frames > 1 else ''}"
+        f"{f'_fs{config.target_future_step}' if config.target_future_step != 1 else ''}"
         f"_stride{config.window_stride}_limit{config.limit}"
     )
 

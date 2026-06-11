@@ -171,6 +171,39 @@ class TrainEntryTests(unittest.TestCase):
 
         train_entry._validate_quality_gate(context)
 
+    def test_sample_manifest_contract_blocks_target_future_step_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            samples = Path(tmp) / "samples.jsonl"
+
+            with self.assertRaises(SystemExit) as raised:
+                train_entry._validate_sample_manifest_contract(
+                    {"data": {"target_future_step": 5}},
+                    {"target_future_step": 1},
+                    samples,
+                )
+
+        self.assertIn("target_future_step mismatch", str(raised.exception))
+
+    def test_sample_manifest_contract_requires_declared_target_future_step(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            samples = Path(tmp) / "samples.jsonl"
+
+            with self.assertRaises(SystemExit) as raised:
+                train_entry._validate_sample_manifest_contract(
+                    {"data": {"target_future_step": 5}},
+                    {},
+                    samples,
+                )
+
+        self.assertIn("lacks target_future_step", str(raised.exception))
+
+    def test_sample_manifest_contract_preserves_old_config_without_future_step(self):
+        train_entry._validate_sample_manifest_contract(
+            {"data": {}},
+            {},
+            Path("runs/samples.jsonl"),
+        )
+
     def test_quality_gate_reads_supervised_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -119,6 +119,11 @@ def main() -> None:
         return
 
     _validate_quality_gate(quality_gate)
+    _validate_sample_manifest_contract(
+        config,
+        sample_manifest,
+        Path(samples_jsonl) if samples_jsonl else None,
+    )
 
     try:
         import torch
@@ -413,6 +418,42 @@ def _load_sample_manifest(samples_jsonl: Path | None) -> dict[str, Any]:
     with manifest_path.open(encoding="utf-8") as f:
         payload = json.load(f)
     return payload if isinstance(payload, dict) else {}
+
+
+def _validate_sample_manifest_contract(
+    config: dict[str, Any],
+    manifest: dict[str, Any],
+    samples_jsonl: Path | None,
+) -> None:
+    expected = _nested_get(config, ("data", "target_future_step"), None)
+    if expected is None or samples_jsonl is None:
+        return
+    try:
+        expected_step = int(expected)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"data.target_future_step must be an integer: {expected}") from exc
+    manifest_config = manifest.get("config", {}) if isinstance(manifest.get("config"), dict) else {}
+    actual = manifest.get("target_future_step", manifest_config.get("target_future_step"))
+    manifest_path = samples_jsonl.parent / "manifest.json"
+    if actual is None:
+        raise SystemExit(
+            "Sample manifest lacks target_future_step for configured "
+            f"data.target_future_step={expected_step}: {manifest_path}. "
+            "Rebuild samples with the matching --target-future-step."
+        )
+    try:
+        actual_step = int(actual)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(
+            f"Sample manifest target_future_step must be an integer: {manifest_path}"
+        ) from exc
+    if actual_step != expected_step:
+        raise SystemExit(
+            "Sample manifest target_future_step mismatch: "
+            f"config data.target_future_step={expected_step}, "
+            f"manifest target_future_step={actual_step}, manifest={manifest_path}. "
+            "Rebuild samples or point data.samples_jsonl at the matching artifact."
+        )
 
 
 def _load_policy_audit(audit_path: Path | None) -> dict[str, Any]:

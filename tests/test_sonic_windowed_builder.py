@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 from pathlib import Path
 import tarfile
 import tempfile
@@ -17,8 +18,57 @@ from online_retarget.data.bones_sonic import SONIC_JOINT_NAMES
 from online_retarget.data.schema import ObservationSpec
 from online_retarget.data.sonic_windowed_builder import (
     SonicWindowedBuildConfig,
+    _flat_positions_to_body_positions,
+    _rot6d,
+    _run_name,
+    _source_features_from_bvh,
+    _source_features_from_sonic,
     build_sonic_windowed_jsonl,
 )
+from online_retarget.data.windowed_builder import parse_bvh_motion
+
+
+class SonicWindowedBuilderValueTests(unittest.TestCase):
+    def test_rot6d_matches_lr290_identity_and_nontrivial_rotation(self) -> None:
+        identity = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        z90 = ((0.0, -1.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0))
+
+        self.assertEqual(_rot6d(identity), [1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+        self.assertEqual(_rot6d(z90), [0.0, -1.0, 1.0, 0.0, 0.0, 0.0])
+
+    def test_soma_bvh_source_positions_are_root_orientation_local(self) -> None:
+        motion = parse_bvh_motion(_bvh_text(frames=1, hips_z_rotation=90.0))
+        source = _source_features_from_bvh(
+            motion,
+            config=SonicWindowedBuildConfig(
+                source_body_names=("Hips", "LeftFoot"),
+                root_body="Hips",
+                position_scale=1.0,
+            ),
+        )
+
+        positions = _flat_positions_to_body_positions(source.positions[0], 2)
+
+        self.assertEqual(positions[0], [0.0, 0.0, 0.0])
+        self.assertAlmostEqual(positions[1][0], 0.0, places=6)
+        self.assertAlmostEqual(positions[1][1], -1.0, places=6)
+        self.assertAlmostEqual(positions[1][2], 0.0, places=6)
+        self.assertEqual(source.rot6d[0][0], [1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+        self.assertAlmostEqual(source.skeleton[3], 0.0, places=6)
+        self.assertAlmostEqual(source.skeleton[4], -1.0, places=6)
+        self.assertAlmostEqual(source.skeleton[5], 0.0, places=6)
+
+    def test_run_name_encodes_nondefault_target_future_step(self) -> None:
+        run_name = _run_name(
+            SonicWindowedBuildConfig(
+                task_query="walk",
+                target_horizon_frames=10,
+                target_future_step=5,
+                limit=128,
+            )
+        )
+
+        self.assertIn("_fh10_fs5_", run_name)
 
 
 @unittest.skipUnless(np is not None, "numpy required for SONIC windowed builder tests")
@@ -145,6 +195,49 @@ class SonicWindowedBuilderTests(unittest.TestCase):
         self.assertEqual(manifest["source_skeleton_dim"], 120)
         self.assertEqual(manifest["source_rotation_representation"], "rot6d")
         self.assertEqual(manifest["target_future_step"], 5)
+        self.assertIn("_fs5_", str(result.samples_jsonl))
+
+    def test_sonic_body_pos_source_positions_are_root_orientation_local(self) -> None:
+        assert np is not None
+        body_pos = np.zeros((2, 30, 3), dtype=np.float32)
+        body_pos[0, 1, :] = [1.0, 0.0, 0.0]
+        body_pos[1, 1, :] = [2.0, 0.0, 0.0]
+        body_quat = np.zeros((2, 30, 4), dtype=np.float32)
+        body_quat[:, :, 0] = 1.0
+        z90 = [math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5)]
+        body_quat[:, 0, :] = z90
+        body_quat[:, 1, :] = z90
+        body_ang_vel = np.zeros((2, 30, 3), dtype=np.float32)
+        body_ang_vel[:, 1, :] = [0.0, 1.0, 0.0]
+
+        source = _source_features_from_sonic(
+            body_pos,
+            body_quat,
+            body_ang_vel,
+            config=SonicWindowedBuildConfig(
+                source_body_names=("Hips", "Spine1"),
+                position_scale=1.0,
+            ),
+            np=np,
+        )
+
+        frame0 = _flat_positions_to_body_positions(source.positions[0], 2)
+        frame1 = _flat_positions_to_body_positions(source.positions[1], 2)
+
+        self.assertEqual(frame0[0], [0.0, 0.0, 0.0])
+        self.assertAlmostEqual(frame0[1][0], 0.0, places=6)
+        self.assertAlmostEqual(frame0[1][1], -1.0, places=6)
+        self.assertAlmostEqual(frame1[1][0], 0.0, places=6)
+        self.assertAlmostEqual(frame1[1][1], -2.0, places=6)
+        self.assertAlmostEqual(source.linear_velocities[1][1][0], 0.0, places=6)
+        self.assertAlmostEqual(source.linear_velocities[1][1][1], -1.0, places=6)
+        for actual, expected in zip(
+            source.rot6d[0][1],
+            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        ):
+            self.assertAlmostEqual(actual, expected, places=6)
+        self.assertAlmostEqual(source.angular_velocities[0][1][0], 1.0, places=6)
+        self.assertAlmostEqual(source.angular_velocities[0][1][1], 0.0, places=6)
 
     def test_soma_bvh_reads_only_needed_prefix_frames(self) -> None:
         assert np is not None
@@ -250,11 +343,11 @@ def _add_member(tar: tarfile.TarFile, name: str, text: str) -> None:
     tar.addfile(info, io.BytesIO(data))
 
 
-def _bvh_text(frames: int = 5) -> str:
+def _bvh_text(frames: int = 5, hips_z_rotation: float = 0.0) -> str:
     frame_rows = "\n".join(
         (
             f"{frame}.000000 0.000000 0.000000 0.000000 0.000000 0.000000 "
-            f"{frame}.000000 1.000000 0.000000 0.000000 0.000000 0.000000 "
+            f"{frame}.000000 1.000000 0.000000 {hips_z_rotation:.6f} 0.000000 0.000000 "
             "0.000000 0.000000 0.000000"
         )
         for frame in range(frames)
