@@ -505,7 +505,7 @@ def _train_jsonl(
     if not samples:
         raise SystemExit(f"no supervised samples found in {samples_jsonl}")
     input_dim = len(samples[0]["observation"])
-    output_dim = len(samples[0]["target_joints"])
+    output_dim = len(_target_vector(samples[0]))
     observation_spec = _observation_spec_from_config_and_manifest(
         config,
         _load_sample_manifest(samples_jsonl),
@@ -513,9 +513,9 @@ def _train_jsonl(
     )
     device = runtime["device"]
     x = torch.tensor([sample["observation"] for sample in samples], dtype=torch.float32)
-    y = torch.tensor([sample["target_joints"] for sample in samples], dtype=torch.float32)
+    y = torch.tensor([_target_vector(sample) for sample in samples], dtype=torch.float32)
     prev_y = torch.tensor(
-        [_previous_target_joints(sample, output_dim) for sample in samples],
+        [_previous_target_vector(sample, output_dim) for sample in samples],
         dtype=torch.float32,
     )
     samples, x, y, prev_y, sample_filter = _filter_finite_supervised_tensors(
@@ -706,6 +706,9 @@ def _training_loss(
         target_velocity = target - noise
         pred_velocity = model(observation, state, time)
         return torch.nn.functional.mse_loss(pred_velocity, target_velocity)
+    if family == "diffusion_policy":
+        weight = float(_loss_config(config).get("diffusion_policy", 1.0))
+        return weight * _unwrap_model(model).diffusion_loss(observation, target)
     if family == "token_transformer":
         unwrapped = _unwrap_model(model)
         if prev_target is None:
@@ -798,6 +801,20 @@ def _predict_tensor(
                 steps=int(flow_cfg.get("inference_steps", 8)),
                 start=str(flow_cfg.get("inference_start", "zeros")),
             )
+        elif family == "diffusion_policy":
+            diffusion_cfg = (
+                config.get("model", {}) if isinstance(config.get("model", {}), dict) else {}
+            )
+            pred = _unwrap_model(model).sample(
+                batch,
+                steps=int(
+                    diffusion_cfg.get(
+                        "inference_steps",
+                        diffusion_cfg.get("diffusion_steps", 32),
+                    )
+                ),
+                start=str(diffusion_cfg.get("inference_start", "zeros")),
+            )
         elif family == "token_transformer":
             if prev_y is None:
                 prev_batch = torch.zeros(
@@ -819,12 +836,29 @@ def _unwrap_model(model):
     return model.module if hasattr(model, "module") else model
 
 
-def _previous_target_joints(sample: dict[str, Any], output_dim: int) -> list[float]:
+def _target_vector(sample: dict[str, Any]) -> list[float]:
+    future = sample.get("future_target_joints")
+    if isinstance(future, list) and future and all(isinstance(row, list) for row in future):
+        return [float(value) for row in future for value in row]
+    target = sample.get("target_joints")
+    if isinstance(target, list):
+        return [float(value) for value in target]
+    raise ValueError("sample lacks target_joints or future_target_joints")
+
+
+def _previous_target_vector(sample: dict[str, Any], output_dim: int) -> list[float]:
     for key in ("prev_target_joints", "previous_target_joints", "prev_g1_joints"):
         value = sample.get(key)
         if isinstance(value, list) and len(value) == output_dim:
             return [float(item) for item in value]
+        if isinstance(value, list) and value and output_dim % len(value) == 0:
+            repeats = output_dim // len(value)
+            return [float(item) for _ in range(repeats) for item in value]
     return [0.0] * output_dim
+
+
+def _previous_target_joints(sample: dict[str, Any], output_dim: int) -> list[float]:
+    return _previous_target_vector(sample, output_dim)
 
 
 def _filter_finite_supervised_tensors(
@@ -918,8 +952,14 @@ def _load_supervised_samples(samples_jsonl: Path) -> list[dict[str, Any]]:
             if not stripped:
                 continue
             sample = json.loads(stripped)
-            if "observation" not in sample or "target_joints" not in sample:
-                raise ValueError(f"sample on line {line_number} lacks observation/target_joints")
+            if "observation" not in sample:
+                raise ValueError(f"sample on line {line_number} lacks observation")
+            try:
+                _target_vector(sample)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"sample on line {line_number} lacks target_joints/future_target_joints"
+                ) from exc
             samples.append(sample)
     return samples
 
@@ -944,7 +984,7 @@ def _predict_jsonl(
     if not samples:
         raise SystemExit(f"no supervised samples found in {samples_jsonl}")
     input_dim = len(samples[0]["observation"])
-    output_dim = len(samples[0]["target_joints"])
+    output_dim = len(_target_vector(samples[0]))
     observation_spec = _observation_spec_from_config_and_manifest(
         config,
         _load_sample_manifest(samples_jsonl),
@@ -965,9 +1005,9 @@ def _predict_jsonl(
     model.load_state_dict(state_dict)
     model.eval()
     x = torch.tensor([sample["observation"] for sample in samples], dtype=torch.float32)
-    y = torch.tensor([sample["target_joints"] for sample in samples], dtype=torch.float32)
+    y = torch.tensor([_target_vector(sample) for sample in samples], dtype=torch.float32)
     prev_y = torch.tensor(
-        [_previous_target_joints(sample, output_dim) for sample in samples],
+        [_previous_target_vector(sample, output_dim) for sample in samples],
         dtype=torch.float32,
     )
     samples, x, y, prev_y, sample_filter = _filter_finite_supervised_tensors(
@@ -1047,12 +1087,14 @@ def _write_prediction_jsonl(
                 "category": sample.get("category", ""),
                 "package": sample.get("package", ""),
                 "quality_flags": sample.get("quality_flags", []),
-                "predicted_joints": [prediction],
-                "target_joints": [sample["target_joints"]],
+                "predicted_joints": _prediction_sequence(sample, prediction),
+                "target_joints": _target_sequence(sample),
             }
             for key in (
                 "fps",
                 "target_frame",
+                "target_frame_indices",
+                "target_horizon_frames",
                 "source_motion_path",
                 "target_g1_path",
                 "sonic_relative_path",
@@ -1068,6 +1110,25 @@ def _write_prediction_jsonl(
             )
             f.write(json.dumps(payload, sort_keys=True))
             f.write("\n")
+
+
+def _target_sequence(sample: dict[str, Any]) -> list[list[float]]:
+    future = sample.get("future_target_joints")
+    if isinstance(future, list) and future and all(isinstance(row, list) for row in future):
+        return [[float(value) for value in row] for row in future]
+    return [[float(value) for value in sample["target_joints"]]]
+
+
+def _prediction_sequence(sample: dict[str, Any], prediction: list[float]) -> list[list[float]]:
+    target = _target_sequence(sample)
+    horizon = len(target)
+    joint_dim = len(target[0]) if target else len(prediction)
+    if horizon > 0 and joint_dim > 0 and len(prediction) == horizon * joint_dim:
+        return [
+            [float(value) for value in prediction[index * joint_dim : (index + 1) * joint_dim]]
+            for index in range(horizon)
+        ]
+    return [[float(value) for value in prediction]]
 
 
 def _build_train_report(

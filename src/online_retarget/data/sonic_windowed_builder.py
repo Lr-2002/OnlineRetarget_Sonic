@@ -40,6 +40,7 @@ class SonicWindowedBuildConfig:
     clip_limit: int | None = None
     history_frames: int = 8
     target_frame_offset: int = 0
+    target_horizon_frames: int = 1
     window_stride: int = 10
     max_windows_per_clip: int = 8
     split_seed: int = 17
@@ -110,7 +111,7 @@ def build_sonic_windowed_jsonl(
     sample_count = 0
     selected_clip_count = 0
     skipped_clip_count = 0
-    output_dim = len(SONIC_JOINT_NAMES)
+    output_dim = len(SONIC_JOINT_NAMES) * config.target_horizon_frames
     input_dim = spec.flattened_dim()
     source_tar = None
     try:
@@ -159,6 +160,8 @@ def build_sonic_windowed_jsonl(
         "sample_count": sample_count,
         "input_dim": input_dim,
         "output_dim": output_dim,
+        "target_joint_dim": len(SONIC_JOINT_NAMES),
+        "target_horizon_frames": config.target_horizon_frames,
         "split_policy": {
             "group_by": "actor_uid",
             "seed": config.split_seed,
@@ -200,16 +203,27 @@ def _samples_for_row(
     if config.source_mode == "soma_bvh":
         if source_tar is None:
             return []
-        source_positions = _read_source_positions(source_tar, row, config, max_frames=_needed_source_frames(config))
+        source_positions = _read_source_positions(
+            source_tar,
+            row,
+            config,
+            max_frames=_needed_source_frames(config),
+        )
         source_path = row.get("source_soma_proportional_path", "")
     else:
         source_positions = body_positions
         source_path = row.get("sonic_path", "")
     if source_positions is None:
         return []
-    usable_frames = min(len(source_positions), len(target_joints))
-    last_target = usable_frames - 1 - config.target_frame_offset
-    max_start = last_target - config.history_frames + 1
+    max_start_by_source = len(source_positions) - config.history_frames
+    max_start_by_target = (
+        len(target_joints)
+        - config.target_horizon_frames
+        - config.target_frame_offset
+        - config.history_frames
+        + 1
+    )
+    max_start = min(max_start_by_source, max_start_by_target)
     if max_start < 0:
         return []
 
@@ -217,6 +231,7 @@ def _samples_for_row(
     windows_for_clip = 0
     for start in range(0, max_start + 1, config.window_stride):
         target_index = start + config.history_frames - 1 + config.target_frame_offset
+        future_targets = target_joints[target_index : target_index + config.target_horizon_frames]
         history = source_positions[start : start + config.history_frames]
         observation = _observation_from_history(history, row, spec)
         sample = {
@@ -234,6 +249,10 @@ def _samples_for_row(
             "source_body_names": list(config.source_body_names),
             "target_joint_names": list(SONIC_JOINT_NAMES),
             "target_frame": target_index,
+            "target_frame_indices": list(
+                range(target_index, target_index + config.target_horizon_frames)
+            ),
+            "target_horizon_frames": config.target_horizon_frames,
             "prev_target_frame": max(0, target_index - 1),
             "fps": fps,
             "observation": observation,
@@ -241,6 +260,9 @@ def _samples_for_row(
                 float(value) for value in target_joints[max(0, target_index - 1)]
             ],
             "target_joints": [float(value) for value in target_joints[target_index]],
+            "future_target_joints": [
+                [float(value) for value in frame] for frame in future_targets
+            ],
         }
         samples.append(sample)
         windows_for_clip += 1
@@ -286,7 +308,7 @@ def _needed_source_frames(config: SonicWindowedBuildConfig) -> int | None:
     if config.max_windows_per_clip <= 0:
         return None
     last_start = (config.max_windows_per_clip - 1) * config.window_stride
-    return last_start + config.history_frames + max(0, config.target_frame_offset)
+    return last_start + config.history_frames
 
 
 def _read_sonic_motion(
@@ -418,6 +440,7 @@ def _run_name(config: SonicWindowedBuildConfig) -> str:
     source = "sonicbody" if config.source_mode == "sonic_body_pos" else "somabvh"
     return (
         f"{source}_{task}_{config.split}_h{config.history_frames}"
+        f"{f'_fh{config.target_horizon_frames}' if config.target_horizon_frames > 1 else ''}"
         f"_stride{config.window_stride}_limit{config.limit}"
     )
 
@@ -429,6 +452,8 @@ def _validate_config(config: SonicWindowedBuildConfig) -> None:
         raise ValueError("source_mode must be sonic_body_pos or soma_bvh")
     if config.history_frames <= 0:
         raise ValueError("history_frames must be positive")
+    if config.target_horizon_frames <= 0:
+        raise ValueError("target_horizon_frames must be positive")
     if config.window_stride <= 0:
         raise ValueError("window_stride must be positive")
     if config.max_windows_per_clip <= 0:

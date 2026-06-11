@@ -326,6 +326,131 @@ class FlowMatchingRetargeter(nn.Module):
         return state
 
 
+class DiffusionPolicyRetargeter(nn.Module):
+    """Conditional DDPM-style denoiser for flattened future G1 action windows."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        *,
+        hidden_dims: tuple[int, ...] = (512, 512, 256),
+        activation: str = "silu",
+        dropout: float = 0.0,
+        time_embed_dim: int = 32,
+        diffusion_steps: int = 32,
+        inference_steps: int | None = None,
+        beta_start: float = 1.0e-4,
+        beta_end: float = 2.0e-2,
+    ) -> None:
+        super().__init__()
+        if diffusion_steps <= 0:
+            raise ValueError("diffusion_steps must be positive")
+        if beta_start <= 0.0 or beta_end <= 0.0 or beta_end <= beta_start:
+            raise ValueError("expected 0 < beta_start < beta_end")
+        self.output_dim = output_dim
+        self.time_embed_dim = time_embed_dim
+        self.diffusion_steps = diffusion_steps
+        self.inference_steps = inference_steps or diffusion_steps
+        self.denoiser = OnlineRetargetMLP(
+            input_dim=input_dim + output_dim + time_embed_dim,
+            output_dim=output_dim,
+            hidden_dims=hidden_dims,
+            activation=activation,
+            dropout=dropout,
+        )
+        betas = torch.linspace(beta_start, beta_end, diffusion_steps, dtype=torch.float32)
+        alphas = 1.0 - betas
+        alpha_bars = torch.cumprod(alphas, dim=0)
+        self.register_buffer("betas", betas)
+        self.register_buffer("alphas", alphas)
+        self.register_buffer("alpha_bars", alpha_bars)
+
+    def forward(
+        self,
+        observation: torch.Tensor,
+        noisy_action: torch.Tensor,
+        timesteps: torch.Tensor,
+    ) -> torch.Tensor:
+        if timesteps.ndim == 2 and timesteps.shape[-1] == 1:
+            timesteps = timesteps.squeeze(-1)
+        time = timesteps.to(device=observation.device, dtype=observation.dtype).unsqueeze(-1)
+        time = time / max(1, self.diffusion_steps - 1)
+        conditioning = torch.cat(
+            [observation, noisy_action, _time_embedding(time, self.time_embed_dim)],
+            dim=-1,
+        )
+        return self.denoiser(conditioning)
+
+    def diffusion_loss(
+        self,
+        observation: torch.Tensor,
+        target_action: torch.Tensor,
+        *,
+        noise: torch.Tensor | None = None,
+        timesteps: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if noise is None:
+            noise = torch.randn_like(target_action)
+        if timesteps is None:
+            timesteps = torch.randint(
+                0,
+                self.diffusion_steps,
+                (target_action.shape[0],),
+                device=target_action.device,
+            )
+        alpha_bar = self.alpha_bars[timesteps].to(target_action.dtype).unsqueeze(-1)
+        noisy_action = alpha_bar.sqrt() * target_action + (1.0 - alpha_bar).sqrt() * noise
+        pred_noise = self.forward(observation, noisy_action, timesteps)
+        return torch.nn.functional.mse_loss(pred_noise, noise)
+
+    @torch.no_grad()
+    def sample(
+        self,
+        observation: torch.Tensor,
+        *,
+        steps: int | None = None,
+        start: str = "noise",
+    ) -> torch.Tensor:
+        solve_steps = max(1, min(self.diffusion_steps, int(steps or self.inference_steps)))
+        if start == "noise":
+            state = torch.randn(
+                observation.shape[0],
+                self.output_dim,
+                device=observation.device,
+                dtype=observation.dtype,
+            )
+        elif start == "zeros":
+            state = torch.zeros(
+                observation.shape[0],
+                self.output_dim,
+                device=observation.device,
+                dtype=observation.dtype,
+            )
+        else:
+            raise ValueError(f"unsupported diffusion start: {start}")
+
+        indices = torch.linspace(
+            self.diffusion_steps - 1,
+            0,
+            solve_steps,
+            device=observation.device,
+        ).round().to(torch.long)
+        for index in indices:
+            timestep = torch.full(
+                (observation.shape[0],),
+                int(index.item()),
+                device=observation.device,
+                dtype=torch.long,
+            )
+            beta = self.betas[index].to(dtype=observation.dtype)
+            alpha = self.alphas[index].to(dtype=observation.dtype)
+            alpha_bar = self.alpha_bars[index].to(dtype=observation.dtype)
+            pred_noise = self.forward(observation, state, timestep)
+            state = (state - beta * pred_noise / (1.0 - alpha_bar).sqrt()) / alpha.sqrt()
+        return state
+
+
 def _time_embedding(time: torch.Tensor, dim: int) -> torch.Tensor:
     if dim <= 0:
         return time.new_zeros((time.shape[0], 0))

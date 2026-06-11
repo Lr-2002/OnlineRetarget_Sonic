@@ -2,7 +2,6 @@ import unittest
 
 from online_retarget.data.schema import ObservationSpec
 from online_retarget.models.registry import build_model
-from online_retarget.models.token_vae import MLPTokenVAE, vae_loss
 
 
 class ModelRegistryTests(unittest.TestCase):
@@ -35,6 +34,15 @@ class ModelRegistryTests(unittest.TestCase):
                     "inference_steps": 2,
                 }
             },
+            {
+                "model": {
+                    "family": "dp",
+                    "hidden_dims": [8],
+                    "time_embed_dim": 4,
+                    "diffusion_steps": 4,
+                    "inference_steps": 2,
+                }
+            },
         ]
         x = torch.zeros(4, input_dim)
         for config in configs:
@@ -46,6 +54,15 @@ class ModelRegistryTests(unittest.TestCase):
             )
             if built.family == "flow_matching":
                 y = built.model.sample(x, steps=1)
+            elif built.family == "diffusion_policy":
+                y = built.model.sample(x, steps=1, start="zeros")
+                loss = built.model.diffusion_loss(
+                    x,
+                    torch.zeros(4, output_dim),
+                    noise=torch.zeros(4, output_dim),
+                    timesteps=torch.zeros(4, dtype=torch.long),
+                )
+                self.assertEqual(tuple(loss.shape), ())
             else:
                 y = built.model(x)
             self.assertEqual(tuple(y.shape), (4, output_dim))
@@ -55,6 +72,8 @@ class ModelRegistryTests(unittest.TestCase):
             import torch
         except ImportError:
             self.skipTest("torch is not installed")
+        from online_retarget.models.token_vae import MLPTokenVAE, vae_loss
+
         model = MLPTokenVAE(input_dim=5, latent_dim=3, hidden_dims=(7,))
         x = torch.zeros(4, 5)
 

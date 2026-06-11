@@ -517,6 +517,7 @@ def main() -> None:
     sonic_windowed.add_argument("--clip-limit", type=int)
     sonic_windowed.add_argument("--history-frames", type=int, default=8)
     sonic_windowed.add_argument("--target-frame-offset", type=int, default=0)
+    sonic_windowed.add_argument("--target-horizon-frames", type=int, default=1)
     sonic_windowed.add_argument("--window-stride", type=int, default=10)
     sonic_windowed.add_argument("--max-windows-per-clip", type=int, default=8)
     sonic_windowed.add_argument("--split-seed", type=int, default=17)
@@ -972,6 +973,7 @@ def _build_sonic_windowed_jsonl(args: argparse.Namespace) -> None:
             clip_limit=args.clip_limit,
             history_frames=args.history_frames,
             target_frame_offset=args.target_frame_offset,
+            target_horizon_frames=args.target_horizon_frames,
             window_stride=args.window_stride,
             max_windows_per_clip=args.max_windows_per_clip,
             split_seed=args.split_seed,

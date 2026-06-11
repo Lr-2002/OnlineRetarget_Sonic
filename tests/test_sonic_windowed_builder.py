@@ -54,6 +54,7 @@ class SonicWindowedBuilderTests(unittest.TestCase):
                     val_ratio=0.0,
                     limit=3,
                     history_frames=2,
+                    target_horizon_frames=2,
                     window_stride=1,
                     max_windows_per_clip=3,
                     source_body_names=("Hips", "LeftFoot"),
@@ -70,14 +71,20 @@ class SonicWindowedBuilderTests(unittest.TestCase):
         self.assertEqual(result.sample_count, 3)
         self.assertEqual(result.selected_clip_count, 1)
         self.assertEqual(result.input_dim, spec.flattened_dim())
+        self.assertEqual(result.output_dim, len(SONIC_JOINT_NAMES) * 2)
         self.assertEqual(len(sample_rows[0]["observation"]), spec.flattened_dim())
         self.assertEqual(len(sample_rows[0]["target_joints"]), len(SONIC_JOINT_NAMES))
+        self.assertEqual(len(sample_rows[0]["future_target_joints"]), 2)
+        self.assertEqual(len(sample_rows[0]["future_target_joints"][0]), len(SONIC_JOINT_NAMES))
         self.assertEqual(len(sample_rows[0]["prev_target_joints"]), len(SONIC_JOINT_NAMES))
+        self.assertEqual(sample_rows[0]["target_horizon_frames"], 2)
+        self.assertEqual(sample_rows[0]["target_frame_indices"], [1, 2])
         self.assertEqual(sample_rows[1]["prev_target_frame"], sample_rows[1]["target_frame"] - 1)
         self.assertIn("walk_forward", sample_rows[0]["sample_id"])
         self.assertEqual(manifest["builder"], "sonic_walk_soma_bvh_to_g1_joint_window_debug")
         self.assertEqual(manifest["source_format"], "soma_bvh")
         self.assertEqual(manifest["candidate_clip_count"], 1)
+        self.assertEqual(manifest["target_horizon_frames"], 2)
 
     def test_soma_bvh_reads_only_needed_prefix_frames(self) -> None:
         assert np is not None

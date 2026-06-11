@@ -343,6 +343,39 @@ class TrainEntryTests(unittest.TestCase):
 
         self.assertEqual(train_entry._previous_target_joints(sample, 3), [1.0, 2.0, 3.0])
 
+    def test_target_vector_flattens_future_targets(self):
+        sample = {"future_target_joints": [[1, 2], [3, 4]], "target_joints": [1, 2]}
+
+        self.assertEqual(train_entry._target_vector(sample), [1.0, 2.0, 3.0, 4.0])
+
+    def test_previous_target_vector_repeats_single_frame_for_horizon(self):
+        sample = {"prev_target_joints": [1, 2]}
+
+        self.assertEqual(train_entry._previous_target_vector(sample, 4), [1.0, 2.0, 1.0, 2.0])
+
+    def test_write_prediction_jsonl_reshapes_future_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "predictions.jsonl"
+
+            train_entry._write_prediction_jsonl(
+                output,
+                samples=[
+                    {
+                        "sample_id": "s1",
+                        "target_joints": [0.0, 1.0],
+                        "future_target_joints": [[0.0, 1.0], [2.0, 3.0]],
+                        "target_frame_indices": [10, 11],
+                    }
+                ],
+                predictions=[[0.5, 1.5, 2.5, 3.5]],
+            )
+
+            payload = json.loads(output.read_text(encoding="utf-8").strip())
+
+        self.assertEqual(payload["predicted_joints"], [[0.5, 1.5], [2.5, 3.5]])
+        self.assertEqual(payload["target_joints"], [[0.0, 1.0], [2.0, 3.0]])
+        self.assertEqual(payload["target_frame_indices"], [10, 11])
+
     def test_previous_target_joints_falls_back_to_zeros(self):
         self.assertEqual(train_entry._previous_target_joints({}, 2), [0.0, 0.0])
 
