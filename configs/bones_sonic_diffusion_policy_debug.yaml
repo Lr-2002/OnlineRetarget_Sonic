@@ -14,7 +14,26 @@ policy_presets:
       target_horizon_frames: 10
       target_future_step: 1
       source_body_count: 30
+      source_body_token_dim: 15
+      source_rotation: rot6d
       action_dim: 29
+      build:
+        split: train
+        source_mode: soma_bvh
+        include_mirrors: false
+        limit: 128
+        clip_limit:
+        history_frames: 8
+        target_frame_offset: 0
+        target_horizon_frames: 10
+        target_future_step: 1
+        source_rotation: rot6d
+        include_source_angular_velocity: true
+        window_stride: 10
+        max_windows_per_clip: 1
+        train_ratio: 1.0
+        val_ratio: 0.0
+        position_scale: 0.01
     model:
       family: diffusion_policy
       hidden_dims: [512, 512, 256]
@@ -38,6 +57,23 @@ policy_presets:
       source_body_token_dim: 15
       source_rotation: rot6d
       action_dim: 29
+      build:
+        split: train
+        source_mode: soma_bvh
+        include_mirrors: false
+        limit: 128
+        clip_limit:
+        history_frames: 8
+        target_frame_offset: 0
+        target_horizon_frames: 10
+        target_future_step: 5
+        source_rotation: rot6d
+        include_source_angular_velocity: true
+        window_stride: 10
+        max_windows_per_clip: 1
+        train_ratio: 1.0
+        val_ratio: 0.0
+        position_scale: 0.01
     model:
       family: temporal_diffusion_policy
       d_model: 128
@@ -69,23 +105,6 @@ data:
   allow_debug_data: true
   source_format: soma_proportional_bvh_fk
   task: walk
-  build:
-    split: train
-    source_mode: soma_bvh
-    include_mirrors: false
-    limit: 128
-    clip_limit:
-    history_frames: 8
-    target_frame_offset: 0
-    target_horizon_frames: 10
-    target_future_step: 5
-    source_rotation: rot6d
-    include_source_angular_velocity: true
-    window_stride: 10
-    max_windows_per_clip: 1
-    train_ratio: 1.0
-    val_ratio: 0.0
-    position_scale: 0.01
 
 train:
   batch_size: 64

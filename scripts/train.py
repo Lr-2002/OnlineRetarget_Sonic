@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 import argparse
-from copy import deepcopy
 import csv
 from dataclasses import replace
+import html
 import json
 import os
 from pathlib import Path
@@ -18,6 +18,10 @@ try:
 except ImportError:  # pragma: no cover - environment blocker path
     yaml = None
 
+from online_retarget.config_presets import (
+    apply_config_preset as _apply_config_preset,
+    configured_model_family as _configured_model_family,
+)
 from online_retarget.data.schema import ObservationSpec, OutputSpec, iter_motion_pair_refs
 from online_retarget.evaluation import EvaluationConfig, evaluate_jsonl
 
@@ -214,150 +218,6 @@ def _load_config(path: Path) -> dict[str, Any]:
     return _apply_config_preset(payload)
 
 
-def _apply_config_preset(config: dict[str, Any]) -> dict[str, Any]:
-    preset_name = _selected_config_preset(config)
-    if not preset_name:
-        return config
-    presets = config.get("policy_presets", config.get("config_presets", {}))
-    if not isinstance(presets, dict):
-        raise ValueError("policy_presets/config_presets must be a mapping")
-    preset = presets.get(preset_name)
-    if not isinstance(preset, dict):
-        available = ", ".join(sorted(str(key) for key in presets)) or "none"
-        raise ValueError(f"unknown config preset {preset_name!r}; available: {available}")
-    _validate_config_preset_payload(preset_name, preset)
-    resolved = _deep_merge_dicts(config, preset)
-    resolved["policy_preset"] = preset_name
-    data = resolved.get("data", {})
-    data = dict(data) if isinstance(data, dict) else {}
-    data["policy_preset"] = preset_name
-    resolved["data"] = data
-    _validate_resolved_config_preset(preset_name, resolved)
-    return resolved
-
-
-def _selected_config_preset(config: dict[str, Any]) -> str:
-    data = config.get("data", {}) if isinstance(config.get("data", {}), dict) else {}
-    names = [
-        config.get("policy_preset"),
-        config.get("config_preset"),
-        data.get("policy_preset"),
-        data.get("config_preset"),
-    ]
-    selected = [str(name) for name in names if name not in (None, "")]
-    if not selected:
-        return ""
-    if len(set(selected)) > 1:
-        raise ValueError(f"conflicting config preset names: {selected}")
-    return selected[0]
-
-
-def _deep_merge_dicts(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
-    merged = deepcopy(base)
-    for key, value in overlay.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _deep_merge_dicts(merged[key], value)
-        else:
-            merged[key] = deepcopy(value)
-    return merged
-
-
-def _validate_config_preset_payload(name: str, preset: dict[str, Any]) -> None:
-    data = preset.get("data", {})
-    model = preset.get("model", {})
-    if not isinstance(data, dict) or not isinstance(model, dict):
-        raise ValueError(f"config preset {name!r} must define data and model mappings")
-    required_data = (
-        "samples_jsonl",
-        "target_format",
-        "target_horizon_frames",
-        "target_future_step",
-        "source_body_count",
-        "action_dim",
-    )
-    required_model = ("family", "output")
-    missing = [f"data.{key}" for key in required_data if key not in data]
-    missing.extend(f"model.{key}" for key in required_model if key not in model)
-    family = str(model.get("family", "")).lower().replace("-", "_")
-    if family in {"temporal_diffusion_policy", "dp_temporal", "temporal_dp", "temporal_diffusion"}:
-        route_b_required = (
-            "source_body_token_dim",
-            "source_rotation",
-        )
-        route_b_model_required = (
-            "action_dim",
-            "source_body_token_dim",
-            "source_skeleton_dim",
-            "morphology_dim",
-            "robot_state_dim",
-            "source_body_count",
-            "d_model",
-            "nhead",
-            "num_layers",
-            "dim_feedforward",
-        )
-        missing.extend(f"data.{key}" for key in route_b_required if key not in data)
-        missing.extend(f"model.{key}" for key in route_b_model_required if key not in model)
-    else:
-        if "hidden_dims" not in model and "d_model" not in model:
-            missing.append("model.hidden_dims or model.d_model")
-    if missing:
-        raise ValueError(f"config preset {name!r} missing controlled keys: {', '.join(missing)}")
-
-
-def _validate_resolved_config_preset(name: str, config: dict[str, Any]) -> None:
-    data = config.get("data", {}) if isinstance(config.get("data", {}), dict) else {}
-    model = config.get("model", {}) if isinstance(config.get("model", {}), dict) else {}
-    family = _configured_model_family(config)
-    errors = []
-    if not data.get("samples_jsonl"):
-        errors.append("data.samples_jsonl")
-    if not data.get("target_format"):
-        errors.append("data.target_format")
-    if not model.get("family"):
-        errors.append("model.family")
-    if not model.get("output"):
-        errors.append("model.output")
-    if family == "temporal_diffusion_policy":
-        if data.get("target_format") != "bones_sonic_joint_pos_future_window":
-            errors.append("data.target_format must be bones_sonic_joint_pos_future_window")
-        if model.get("output") != "g1_joint_position_future_window":
-            errors.append("model.output must be g1_joint_position_future_window")
-        for key in (
-            "target_horizon_frames",
-            "target_future_step",
-            "source_body_count",
-            "source_body_token_dim",
-            "action_dim",
-        ):
-            if key not in data:
-                errors.append(f"data.{key}")
-        for key in (
-            "action_dim",
-            "source_body_token_dim",
-            "source_skeleton_dim",
-            "morphology_dim",
-            "robot_state_dim",
-            "source_body_count",
-            "d_model",
-            "nhead",
-            "num_layers",
-            "dim_feedforward",
-        ):
-            if key not in model:
-                errors.append(f"model.{key}")
-        if data.get("action_dim") is not None and model.get("action_dim") is not None:
-            if int(data["action_dim"]) != int(model["action_dim"]):
-                errors.append("data.action_dim must match model.action_dim")
-    elif "route_b" in str(name).lower() or "temporal_diffusion" in str(name).lower():
-        errors.append("route-b preset must resolve model.family=temporal_diffusion_policy")
-    else:
-        if family == "temporal_diffusion_policy":
-            errors.append("flat preset must not resolve temporal_diffusion_policy")
-    if errors:
-        raise ValueError(f"config preset {name!r} is inconsistent: {', '.join(errors)}")
-
-
 def _nested_get(mapping: dict[str, Any], path: tuple[str, ...], default: Any) -> Any:
     current: Any = mapping
     for key in path:
@@ -365,33 +225,6 @@ def _nested_get(mapping: dict[str, Any], path: tuple[str, ...], default: Any) ->
             return default
         current = current[key]
     return current
-
-
-def _configured_model_family(config: dict[str, Any]) -> str:
-    model_cfg = config.get("model", {}) if isinstance(config.get("model", {}), dict) else {}
-    key = str(model_cfg.get("family", "temporal_mlp")).lower().replace("-", "_")
-    aliases = {
-        "mlp": "temporal_mlp",
-        "temporal_mlp": "temporal_mlp",
-        "tf": "temporal_transformer",
-        "transformer": "temporal_transformer",
-        "temporal_transformer": "temporal_transformer",
-        "token_tf": "token_transformer",
-        "token_transformer": "token_transformer",
-        "tokenized_transformer": "token_transformer",
-        "cross_attention_transformer": "token_transformer",
-        "fm": "flow_matching",
-        "flow": "flow_matching",
-        "flow_matching": "flow_matching",
-        "dp": "diffusion_policy",
-        "diffusion": "diffusion_policy",
-        "diffusion_policy": "diffusion_policy",
-        "dp_temporal": "temporal_diffusion_policy",
-        "temporal_dp": "temporal_diffusion_policy",
-        "temporal_diffusion": "temporal_diffusion_policy",
-        "temporal_diffusion_policy": "temporal_diffusion_policy",
-    }
-    return aliases.get(key, key)
 
 
 def _reported_output_dim(
@@ -2151,7 +1984,7 @@ def _write_visualization_svg(path: Path, rows: list[dict[str, Any]]) -> None:
         for index, row in enumerate(series_rows)
         for x, y in [point(float(row["target"]), index)]
     )
-    title = f"{series_rows[0]['sample_id']} {series_rows[0]['joint_name']}"
+    title = _html_escape(f"{series_rows[0]['sample_id']} {series_rows[0]['joint_name']}")
     path.write_text(
         "\n".join(
             [
@@ -2174,8 +2007,8 @@ def _write_visualization_svg(path: Path, rows: list[dict[str, Any]]) -> None:
 def _write_visualization_html(path: Path, rows: list[dict[str, Any]], *, svg_path: Path) -> None:
     table_rows = "\n".join(
         "<tr>"
-        f"<td>{row['sample_id']}</td>"
-        f"<td>{row['joint_name']}</td>"
+        f"<td>{_html_escape(row['sample_id'])}</td>"
+        f"<td>{_html_escape(row['joint_name'])}</td>"
         f"<td>{row['horizon_index']}</td>"
         f"<td>{float(row['predicted']):.6f}</td>"
         f"<td>{float(row['target']):.6f}</td>"
@@ -2202,6 +2035,10 @@ def _write_visualization_html(path: Path, rows: list[dict[str, Any]], *, svg_pat
         ),
         encoding="utf-8",
     )
+
+
+def _html_escape(value: Any) -> str:
+    return html.escape(str(value), quote=True)
 
 
 def _first_visual_series(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

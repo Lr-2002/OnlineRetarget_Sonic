@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from online_retarget.config import Paths
+from online_retarget.config_presets import apply_config_preset as _apply_config_preset
 from online_retarget.data.bones_sonic import build_sonic_index
 from online_retarget.data.bvh_quality import BVHQualityConfig, scan_bvh_quality_from_index
 from online_retarget.data.curation import QualityPolicy, SplitConfig, build_split_index
@@ -41,6 +42,7 @@ from online_retarget.data.sonic_review_clips import (
 )
 from online_retarget.data.sonic_windowed_builder import (
     SonicWindowedBuildConfig,
+    _run_name,
     build_sonic_windowed_jsonl,
 )
 from online_retarget.data.skeleton_ae_registry import build_all_skeleton_ae_registry
@@ -990,27 +992,67 @@ def _export_sonic_review_clips(args: argparse.Namespace) -> None:
 
 
 def _build_sonic_windowed_jsonl(args: argparse.Namespace) -> None:
-    payload = _load_mapping_config(args.config) if args.config else {}
+    payload = _apply_config_preset(_load_mapping_config(args.config)) if args.config else {}
     data_cfg = _mapping_section(payload, "data")
     build_cfg = _mapping_section(data_cfg, "build")
-    experiment_cfg = _mapping_section(payload, "experiment")
     data_root = args.data_root or _path_from_config(data_cfg.get("root")) or Paths.from_env().data_root
     index_csv = args.index_csv or _path_from_config(data_cfg.get("index_csv"))
     if index_csv is None:
         raise SystemExit("build-sonic-windowed-jsonl requires --index-csv or data.index_csv in --config")
-    output_root = (
-        args.output_root
-        or _path_from_config(build_cfg.get("output_root"))
-        or _path_from_config(experiment_cfg.get("output_root"))
-        or Paths.from_env().output_root
+    build_config = _sonic_windowed_build_config_from_args(args, data_cfg=data_cfg, build_cfg=build_cfg)
+    output_root = _sonic_windowed_output_root_from_config(
+        args,
+        payload=payload,
+        data_cfg=data_cfg,
+        build_cfg=build_cfg,
+        build_config=build_config,
     )
     result = build_sonic_windowed_jsonl(
         data_root=data_root,
         index_csv=index_csv,
         output_root=output_root,
-        config=_sonic_windowed_build_config_from_args(args, data_cfg=data_cfg, build_cfg=build_cfg),
+        config=build_config,
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _sonic_windowed_output_root_from_config(
+    args: argparse.Namespace,
+    *,
+    payload: dict[str, object],
+    data_cfg: dict[str, object],
+    build_cfg: dict[str, object],
+    build_config: SonicWindowedBuildConfig,
+) -> Path:
+    if args.output_root is not None:
+        return args.output_root
+    samples_jsonl = _path_from_config(data_cfg.get("samples_jsonl"))
+    if samples_jsonl is not None:
+        return _output_root_from_configured_samples(samples_jsonl, build_config)
+    experiment_cfg = _mapping_section(payload, "experiment")
+    return (
+        _path_from_config(build_cfg.get("output_root"))
+        or _path_from_config(experiment_cfg.get("output_root"))
+        or Paths.from_env().output_root
+    )
+
+
+def _output_root_from_configured_samples(
+    samples_jsonl: Path,
+    build_config: SonicWindowedBuildConfig,
+) -> Path:
+    expected_run_name = _run_name(build_config)
+    if (
+        samples_jsonl.name != "samples.jsonl"
+        or samples_jsonl.parent.name != expected_run_name
+        or samples_jsonl.parent.parent.name != "supervised"
+    ):
+        raise SystemExit(
+            "data.samples_jsonl must match the build-sonic-windowed-jsonl run name for the "
+            f"selected policy_preset: expected */supervised/{expected_run_name}/samples.jsonl, "
+            f"got {samples_jsonl}"
+        )
+    return samples_jsonl.parent.parent.parent
 
 
 def _sonic_windowed_build_config_from_args(

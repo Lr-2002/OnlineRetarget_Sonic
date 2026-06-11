@@ -291,6 +291,47 @@ class SonicWindowedBuilderTests(unittest.TestCase):
         self.assertEqual(config.source_bvh_tar, "/mnt/data_oss/back_data/soma_proportional.tar")
         self.assertEqual(config.sonic_npz_root, "/mnt/data_cpfs/bones_sonic")
 
+    def test_cli_policy_preset_switch_drives_builder_paths(self) -> None:
+        cases = (
+            (
+                "flat_diffusion_policy",
+                1,
+                Path("runs/supervised/somabvh_walk_train_h8_fh10_stride10_limit128/samples.jsonl"),
+            ),
+            (
+                "route_b_temporal_diffusion",
+                5,
+                Path("runs/supervised/somabvh_walk_train_h8_fh10_fs5_stride10_limit128/samples.jsonl"),
+            ),
+        )
+        for preset, future_step, expected_samples in cases:
+            with self.subTest(preset=preset):
+                payload = cli_entry._apply_config_preset(_builder_preset_switch_config(preset))
+                data_cfg = payload["data"]
+                build_cfg = data_cfg["build"]
+                args = _empty_sonic_cli_args()
+                build_config = cli_entry._sonic_windowed_build_config_from_args(
+                    args,
+                    data_cfg=data_cfg,
+                    build_cfg=build_cfg,
+                )
+                output_root = cli_entry._sonic_windowed_output_root_from_config(
+                    args,
+                    payload=payload,
+                    data_cfg=data_cfg,
+                    build_cfg=build_cfg,
+                    build_config=build_config,
+                )
+
+                self.assertEqual(build_config.target_future_step, future_step)
+                self.assertEqual(build_config.target_horizon_frames, 10)
+                self.assertEqual(build_config.source_rotation, "rot6d")
+                self.assertEqual(
+                    output_root / "supervised" / _run_name(build_config) / "samples.jsonl",
+                    expected_samples,
+                )
+                self.assertEqual(Path(data_cfg["samples_jsonl"]), expected_samples)
+
     def test_sonic_body_pos_source_positions_are_root_orientation_local(self) -> None:
         assert np is not None
         body_pos = np.zeros((2, 30, 3), dtype=np.float32)
@@ -407,6 +448,7 @@ def _write_index(path: Path, *, walk_npz: Path, jump_npz: Path) -> None:
 
 def _empty_sonic_cli_args() -> SimpleNamespace:
     return SimpleNamespace(
+        output_root=None,
         split=None,
         task_query=None,
         source_mode=None,
@@ -430,6 +472,85 @@ def _empty_sonic_cli_args() -> SimpleNamespace:
         val_ratio=None,
         position_scale=None,
     )
+
+
+def _builder_preset_switch_config(policy_preset: str) -> dict:
+    return {
+        "policy_preset": policy_preset,
+        "data": {
+            "root": "/mnt/data_cpfs",
+            "index_csv": "runs/indices/sonic_index.csv",
+            "task": "walk",
+            "source_bvh_tar": "/mnt/data_oss/back_data/soma_proportional.tar",
+            "sonic_npz_root": "/mnt/data_cpfs/bones_sonic",
+            "build": {
+                "split": "train",
+                "source_mode": "soma_bvh",
+                "include_mirrors": False,
+                "limit": 128,
+                "history_frames": 8,
+                "target_frame_offset": 0,
+                "target_horizon_frames": 10,
+                "target_future_step": 5,
+                "source_rotation": "quat",
+                "include_source_angular_velocity": True,
+                "window_stride": 10,
+                "max_windows_per_clip": 1,
+                "train_ratio": 1.0,
+                "val_ratio": 0.0,
+                "position_scale": 0.01,
+            },
+        },
+        "policy_presets": {
+            "flat_diffusion_policy": {
+                "data": {
+                    "samples_jsonl": "runs/supervised/somabvh_walk_train_h8_fh10_stride10_limit128/samples.jsonl",
+                    "target_format": "bones_sonic_joint_pos_future_window",
+                    "history_frames": 8,
+                    "target_horizon_frames": 10,
+                    "target_future_step": 1,
+                    "source_body_count": 30,
+                    "source_body_token_dim": 15,
+                    "source_rotation": "rot6d",
+                    "action_dim": 29,
+                },
+                "model": {
+                    "family": "diffusion_policy",
+                    "hidden_dims": [512, 512, 256],
+                    "output": "g1_joint_position_future_window",
+                },
+                "loss": {"diffusion_policy": 1.0},
+            },
+            "route_b_temporal_diffusion": {
+                "data": {
+                    "samples_jsonl": "runs/supervised/somabvh_walk_train_h8_fh10_fs5_stride10_limit128/samples.jsonl",
+                    "target_format": "bones_sonic_joint_pos_future_window",
+                    "history_frames": 8,
+                    "target_horizon_frames": 10,
+                    "target_future_step": 5,
+                    "source_body_count": 30,
+                    "source_body_token_dim": 15,
+                    "source_rotation": "rot6d",
+                    "action_dim": 29,
+                },
+                "model": {
+                    "family": "temporal_diffusion_policy",
+                    "d_model": 128,
+                    "nhead": 4,
+                    "num_layers": 2,
+                    "dim_feedforward": 256,
+                    "action_dim": 29,
+                    "source_body_count": 30,
+                    "source_body_token_dim": 15,
+                    "source_skeleton_dim": 120,
+                    "morphology_dim": 13,
+                    "robot_state_dim": 94,
+                    "output": "g1_joint_position_future_window",
+                },
+                "loss": {"temporal_diffusion_policy": 1.0},
+            },
+        },
+    }
 
 
 def _write_sonic_npz(path: Path, frames: int = 5) -> None:
