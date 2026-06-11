@@ -502,35 +502,58 @@ def main() -> None:
         "build-sonic-windowed-jsonl",
         help="Build walk source-BVH to BONES-SONIC joint-position JSONL samples",
     )
-    sonic_windowed.add_argument("--data-root", type=Path, default=Paths.from_env().data_root)
-    sonic_windowed.add_argument("--index-csv", type=Path, required=True)
-    sonic_windowed.add_argument("--output-root", type=Path, default=Paths.from_env().output_root)
-    sonic_windowed.add_argument("--split", choices=("train", "val", "test"), default="train")
-    sonic_windowed.add_argument("--task-query", default="walk")
+    sonic_windowed.add_argument(
+        "--config",
+        type=Path,
+        help="Optional training/debug YAML config; data/build keys provide builder defaults.",
+    )
+    sonic_windowed.add_argument("--data-root", type=Path)
+    sonic_windowed.add_argument("--index-csv", type=Path)
+    sonic_windowed.add_argument("--output-root", type=Path)
+    sonic_windowed.add_argument("--split", choices=("train", "val", "test"))
+    sonic_windowed.add_argument("--task-query")
     sonic_windowed.add_argument(
         "--source-mode",
         choices=("sonic_body_pos", "soma_bvh"),
-        default="soma_bvh",
     )
-    sonic_windowed.add_argument("--include-mirrors", action="store_true")
-    sonic_windowed.add_argument("--limit", type=int, default=512)
+    sonic_windowed.add_argument("--include-mirrors", action="store_true", default=None)
+    sonic_windowed.add_argument("--limit", type=int)
     sonic_windowed.add_argument("--clip-limit", type=int)
-    sonic_windowed.add_argument("--history-frames", type=int, default=8)
-    sonic_windowed.add_argument("--target-frame-offset", type=int, default=0)
-    sonic_windowed.add_argument("--target-horizon-frames", type=int, default=1)
-    sonic_windowed.add_argument("--target-future-step", type=int, default=1)
-    sonic_windowed.add_argument("--source-rotation", choices=("rot6d",), default="rot6d")
+    sonic_windowed.add_argument("--history-frames", type=int)
+    sonic_windowed.add_argument("--target-frame-offset", type=int)
+    sonic_windowed.add_argument("--target-horizon-frames", type=int)
+    sonic_windowed.add_argument("--target-future-step", type=int)
+    sonic_windowed.add_argument("--source-rotation", choices=("rot6d",))
+    sonic_windowed.add_argument(
+        "--source-bvh-tar",
+        type=Path,
+        help="Explicit SOMA-proportional BVH tar path; defaults to data_root/soma_proportional.tar.",
+    )
+    sonic_windowed.add_argument(
+        "--sonic-npz-root",
+        type=Path,
+        help="Root for sonic_relative_path NPZ lookup, e.g. /mnt/data_cpfs/bones_sonic.",
+    )
+    sonic_windowed.add_argument(
+        "--sonic-path-prefix-from",
+        help="Prefix in index sonic_path to rewrite when sonic_relative_path root is not used.",
+    )
+    sonic_windowed.add_argument(
+        "--sonic-path-prefix-to",
+        help="Replacement prefix for --sonic-path-prefix-from.",
+    )
     sonic_windowed.add_argument(
         "--no-source-angular-velocity",
         action="store_true",
+        default=None,
         help="Reserve angular-velocity token slots but fill them with zeros.",
     )
-    sonic_windowed.add_argument("--window-stride", type=int, default=10)
-    sonic_windowed.add_argument("--max-windows-per-clip", type=int, default=8)
-    sonic_windowed.add_argument("--split-seed", type=int, default=17)
-    sonic_windowed.add_argument("--train-ratio", type=float, default=0.8)
-    sonic_windowed.add_argument("--val-ratio", type=float, default=0.1)
-    sonic_windowed.add_argument("--position-scale", type=float, default=0.01)
+    sonic_windowed.add_argument("--window-stride", type=int)
+    sonic_windowed.add_argument("--max-windows-per-clip", type=int)
+    sonic_windowed.add_argument("--split-seed", type=int)
+    sonic_windowed.add_argument("--train-ratio", type=float)
+    sonic_windowed.add_argument("--val-ratio", type=float)
+    sonic_windowed.add_argument("--position-scale", type=float)
 
     merge_quality = subparsers.add_parser(
         "merge-quality",
@@ -967,32 +990,121 @@ def _export_sonic_review_clips(args: argparse.Namespace) -> None:
 
 
 def _build_sonic_windowed_jsonl(args: argparse.Namespace) -> None:
+    payload = _load_mapping_config(args.config) if args.config else {}
+    data_cfg = _mapping_section(payload, "data")
+    build_cfg = _mapping_section(data_cfg, "build")
+    experiment_cfg = _mapping_section(payload, "experiment")
+    data_root = args.data_root or _path_from_config(data_cfg.get("root")) or Paths.from_env().data_root
+    index_csv = args.index_csv or _path_from_config(data_cfg.get("index_csv"))
+    if index_csv is None:
+        raise SystemExit("build-sonic-windowed-jsonl requires --index-csv or data.index_csv in --config")
+    output_root = (
+        args.output_root
+        or _path_from_config(build_cfg.get("output_root"))
+        or _path_from_config(experiment_cfg.get("output_root"))
+        or Paths.from_env().output_root
+    )
     result = build_sonic_windowed_jsonl(
-        data_root=args.data_root,
-        index_csv=args.index_csv,
-        output_root=args.output_root,
-        config=SonicWindowedBuildConfig(
-            split=args.split,
-            task_query=args.task_query,
-            source_mode=args.source_mode,
-            include_mirrors=args.include_mirrors,
-            limit=args.limit,
-            clip_limit=args.clip_limit,
-            history_frames=args.history_frames,
-            target_frame_offset=args.target_frame_offset,
-            target_horizon_frames=args.target_horizon_frames,
-            target_future_step=args.target_future_step,
-            source_rotation=args.source_rotation,
-            include_source_angular_velocity=not args.no_source_angular_velocity,
-            window_stride=args.window_stride,
-            max_windows_per_clip=args.max_windows_per_clip,
-            split_seed=args.split_seed,
-            train_ratio=args.train_ratio,
-            val_ratio=args.val_ratio,
-            position_scale=args.position_scale,
-        ),
+        data_root=data_root,
+        index_csv=index_csv,
+        output_root=output_root,
+        config=_sonic_windowed_build_config_from_args(args, data_cfg=data_cfg, build_cfg=build_cfg),
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _sonic_windowed_build_config_from_args(
+    args: argparse.Namespace,
+    *,
+    data_cfg: dict[str, object],
+    build_cfg: dict[str, object],
+) -> SonicWindowedBuildConfig:
+    defaults = SonicWindowedBuildConfig()
+
+    def pick(name: str, default: object) -> object:
+        cli_value = getattr(args, name)
+        if cli_value is not None:
+            return cli_value
+        if name in build_cfg and build_cfg[name] is not None:
+            return build_cfg[name]
+        if name in data_cfg and data_cfg[name] is not None:
+            return data_cfg[name]
+        return default
+
+    no_source_angular_velocity = getattr(args, "no_source_angular_velocity")
+    if no_source_angular_velocity is None:
+        include_source_angular_velocity = bool(
+            build_cfg.get(
+                "include_source_angular_velocity",
+                data_cfg.get("include_source_angular_velocity", defaults.include_source_angular_velocity),
+            )
+        )
+    else:
+        include_source_angular_velocity = not bool(no_source_angular_velocity)
+
+    return SonicWindowedBuildConfig(
+        split=str(pick("split", defaults.split)),
+        task_query=str(pick("task_query", data_cfg.get("task", defaults.task_query))),
+        source_mode=str(pick("source_mode", defaults.source_mode)),
+        include_mirrors=bool(pick("include_mirrors", defaults.include_mirrors)),
+        limit=int(pick("limit", defaults.limit)),
+        clip_limit=_optional_int(pick("clip_limit", defaults.clip_limit)),
+        history_frames=int(pick("history_frames", defaults.history_frames)),
+        target_frame_offset=int(pick("target_frame_offset", defaults.target_frame_offset)),
+        target_horizon_frames=int(pick("target_horizon_frames", defaults.target_horizon_frames)),
+        target_future_step=int(pick("target_future_step", defaults.target_future_step)),
+        source_rotation=str(pick("source_rotation", defaults.source_rotation)),
+        include_source_angular_velocity=include_source_angular_velocity,
+        source_bvh_tar=_optional_str(pick("source_bvh_tar", defaults.source_bvh_tar)),
+        sonic_npz_root=_optional_str(pick("sonic_npz_root", defaults.sonic_npz_root)),
+        sonic_path_prefix_from=_optional_str(
+            pick("sonic_path_prefix_from", defaults.sonic_path_prefix_from)
+        ),
+        sonic_path_prefix_to=_optional_str(
+            pick("sonic_path_prefix_to", defaults.sonic_path_prefix_to)
+        ),
+        window_stride=int(pick("window_stride", defaults.window_stride)),
+        max_windows_per_clip=int(pick("max_windows_per_clip", defaults.max_windows_per_clip)),
+        split_seed=int(pick("split_seed", defaults.split_seed)),
+        train_ratio=float(pick("train_ratio", defaults.train_ratio)),
+        val_ratio=float(pick("val_ratio", defaults.val_ratio)),
+        position_scale=float(pick("position_scale", defaults.position_scale)),
+    )
+
+
+def _load_mapping_config(path: Path) -> dict[str, object]:
+    try:
+        import yaml
+    except ImportError as exc:
+        raise SystemExit(f"PyYAML is required to read --config for build-sonic-windowed-jsonl: {path}") from exc
+    with path.open(encoding="utf-8") as f:
+        payload = yaml.safe_load(f) or {}
+    if not isinstance(payload, dict):
+        raise SystemExit(f"config must be a mapping: {path}")
+    return payload
+
+
+def _mapping_section(payload: dict[str, object], key: str) -> dict[str, object]:
+    value = payload.get(key)
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _path_from_config(value: object) -> Path | None:
+    if value in (None, ""):
+        return None
+    return Path(str(value)).expanduser()
+
+
+def _optional_int(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    return int(value)
+
+
+def _optional_str(value: object) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)
 
 
 def _split_index(args: argparse.Namespace) -> None:

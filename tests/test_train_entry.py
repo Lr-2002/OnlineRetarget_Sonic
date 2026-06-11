@@ -178,6 +178,7 @@ class TrainEntryTests(unittest.TestCase):
             checkpoint=Path("runs/train/run/checkpoint.pt"),
             predictions_jsonl=Path("runs/train/run/train_predictions.jsonl"),
             offline_eval={"summary_json": "runs/train/run/eval/train_offline_eval/eval_summary.json"},
+            visualization={"enabled": True, "summary_json": "runs/train/run/visualization/visual_manifest.json"},
             sample_count=2,
             input_dim=1547,
             output_dim=29,
@@ -200,9 +201,62 @@ class TrainEntryTests(unittest.TestCase):
             report["offline_eval"]["summary_json"],
             "runs/train/run/eval/train_offline_eval/eval_summary.json",
         )
+        self.assertEqual(
+            report["visualization"]["summary_json"],
+            "runs/train/run/visualization/visual_manifest.json",
+        )
         self.assertEqual(report["quality_gate"]["policy_id"], "policy")
         self.assertEqual(report["resume_checkpoint"], "runs/train/prev/checkpoint.pt")
         self.assertFalse(report["wandb"]["enabled"])
+
+    def test_visualization_artifacts_write_traceable_preview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            predictions = root / "train_predictions.jsonl"
+            predictions.write_text(
+                json.dumps(
+                    {
+                        "sample_id": "s1",
+                        "sequence_id": "bones_sonic/230101/walk.npz",
+                        "actor_uid": "A001",
+                        "category": "walk",
+                        "package": "Locomotion",
+                        "target_frame_indices": [10, 15],
+                        "target_joint_names": ["hip", "knee"],
+                        "predicted_joints": [[0.5, 1.5], [0.75, 1.75]],
+                        "target_joints": [[0.0, 1.0], [1.0, 2.0]],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = train_entry._write_visualization_artifacts(
+                config={
+                    "visualization": {
+                        "enabled": True,
+                        "artifact_name": "route_b_probe",
+                        "num_samples": 1,
+                        "max_joints": 2,
+                    }
+                },
+                predictions_jsonl=predictions,
+                output_dir=root / "train",
+                eval_result=None,
+                run_name="train_visualization",
+            )
+
+            summary = json.loads(Path(result["summary_json"]).read_text(encoding="utf-8"))
+            csv_text = Path(result["trajectory_csv"]).read_text(encoding="utf-8")
+            svg_exists = Path(result["trajectory_svg"]).exists()
+            html_exists = Path(result["trajectory_html"]).exists()
+
+        self.assertTrue(result["enabled"])
+        self.assertEqual(summary["artifact_version"], "route_b_joint_trajectory_v1")
+        self.assertEqual(summary["trajectory_row_count"], 4)
+        self.assertIn("s1", csv_text)
+        self.assertTrue(svg_exists)
+        self.assertTrue(html_exists)
 
     def test_quality_gate_blocks_formal_training_without_policy(self):
         context = train_entry._quality_gate_context(

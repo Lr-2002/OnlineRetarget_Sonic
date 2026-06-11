@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 import tarfile
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 try:
@@ -19,6 +20,7 @@ from online_retarget.data.schema import ObservationSpec
 from online_retarget.data.sonic_windowed_builder import (
     SonicWindowedBuildConfig,
     _flat_positions_to_body_positions,
+    _resolve_sonic_npz_path,
     _rot6d,
     _run_name,
     _source_features_from_bvh,
@@ -26,6 +28,7 @@ from online_retarget.data.sonic_windowed_builder import (
     build_sonic_windowed_jsonl,
 )
 from online_retarget.data.windowed_builder import parse_bvh_motion
+from online_retarget import cli as cli_entry
 
 
 class SonicWindowedBuilderValueTests(unittest.TestCase):
@@ -197,6 +200,97 @@ class SonicWindowedBuilderTests(unittest.TestCase):
         self.assertEqual(manifest["target_future_step"], 5)
         self.assertIn("_fs5_", str(result.samples_jsonl))
 
+    def test_build_sonic_windowed_jsonl_uses_explicit_data_paths(self) -> None:
+        assert np is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "incomplete_data_root"
+            output = Path(tmp) / "runs"
+            external = Path(tmp) / "external"
+            sonic_npz_root = Path(tmp) / "bones_sonic"
+            sonic_clip_dir = sonic_npz_root / "230101"
+            root.mkdir()
+            external.mkdir()
+            sonic_clip_dir.mkdir(parents=True)
+            source_tar = external / "soma_proportional.tar"
+            _write_source_tar(source_tar, frames=12)
+            walk_npz = sonic_clip_dir / "walk_forward__A001.npz"
+            _write_sonic_npz(walk_npz, frames=12)
+            index_csv = Path(tmp) / "sonic_index.csv"
+            _write_index(
+                index_csv,
+                walk_npz=Path("/home/user/data/motion_data/bones_sonic/230101/walk_forward__A001.npz"),
+                jump_npz=Path("/home/user/data/motion_data/bones_sonic/230101/jump__A001.npz"),
+            )
+
+            result = build_sonic_windowed_jsonl(
+                data_root=root,
+                index_csv=index_csv,
+                output_root=output,
+                config=SonicWindowedBuildConfig(
+                    split="train",
+                    task_query="walk",
+                    source_mode="soma_bvh",
+                    train_ratio=1.0,
+                    val_ratio=0.0,
+                    limit=1,
+                    history_frames=2,
+                    target_horizon_frames=2,
+                    target_future_step=5,
+                    window_stride=1,
+                    max_windows_per_clip=1,
+                    source_bvh_tar=str(source_tar),
+                    sonic_npz_root=str(sonic_npz_root),
+                ),
+            )
+            sample = json.loads(result.samples_jsonl.read_text(encoding="utf-8").splitlines()[0])
+            manifest = json.loads(result.manifest_json.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.sample_count, 1)
+        self.assertEqual(sample["target_g1_path"], str(walk_npz))
+        self.assertEqual(manifest["source_bvh_tar"], str(source_tar))
+        self.assertEqual(manifest["sonic_npz_root"], str(sonic_npz_root))
+
+    def test_sonic_path_prefix_rewrite_resolves_index_absolute_path(self) -> None:
+        resolved = _resolve_sonic_npz_path(
+            {"sonic_path": "/home/user/data/motion_data/bones_sonic/230101/walk.npz"},
+            SonicWindowedBuildConfig(
+                sonic_path_prefix_from="/home/user/data/motion_data/bones_sonic",
+                sonic_path_prefix_to="/mnt/data_cpfs/bones_sonic",
+            ),
+        )
+
+        self.assertEqual(resolved, Path("/mnt/data_cpfs/bones_sonic/230101/walk.npz"))
+
+    def test_cli_config_values_drive_sonic_windowed_build_config(self) -> None:
+        config = cli_entry._sonic_windowed_build_config_from_args(
+            _empty_sonic_cli_args(),
+            data_cfg={
+                "task": "walk",
+                "source_bvh_tar": "/mnt/data_oss/back_data/soma_proportional.tar",
+                "sonic_npz_root": "/mnt/data_cpfs/bones_sonic",
+                "sonic_path_prefix_from": "/home/user/data/motion_data/bones_sonic",
+                "sonic_path_prefix_to": "/mnt/data_cpfs/bones_sonic",
+            },
+            build_cfg={
+                "source_mode": "soma_bvh",
+                "limit": 128,
+                "history_frames": 8,
+                "target_horizon_frames": 10,
+                "target_future_step": 5,
+                "window_stride": 10,
+                "max_windows_per_clip": 1,
+                "train_ratio": 1.0,
+                "val_ratio": 0.0,
+            },
+        )
+
+        self.assertEqual(config.task_query, "walk")
+        self.assertEqual(config.limit, 128)
+        self.assertEqual(config.target_horizon_frames, 10)
+        self.assertEqual(config.target_future_step, 5)
+        self.assertEqual(config.source_bvh_tar, "/mnt/data_oss/back_data/soma_proportional.tar")
+        self.assertEqual(config.sonic_npz_root, "/mnt/data_cpfs/bones_sonic")
+
     def test_sonic_body_pos_source_positions_are_root_orientation_local(self) -> None:
         assert np is not None
         body_pos = np.zeros((2, 30, 3), dtype=np.float32)
@@ -309,6 +403,33 @@ def _write_index(path: Path, *, walk_npz: Path, jump_npz: Path) -> None:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _empty_sonic_cli_args() -> SimpleNamespace:
+    return SimpleNamespace(
+        split=None,
+        task_query=None,
+        source_mode=None,
+        include_mirrors=None,
+        limit=None,
+        clip_limit=None,
+        history_frames=None,
+        target_frame_offset=None,
+        target_horizon_frames=None,
+        target_future_step=None,
+        source_rotation=None,
+        no_source_angular_velocity=None,
+        source_bvh_tar=None,
+        sonic_npz_root=None,
+        sonic_path_prefix_from=None,
+        sonic_path_prefix_to=None,
+        window_stride=None,
+        max_windows_per_clip=None,
+        split_seed=None,
+        train_ratio=None,
+        val_ratio=None,
+        position_scale=None,
+    )
 
 
 def _write_sonic_npz(path: Path, frames: int = 5) -> None:
