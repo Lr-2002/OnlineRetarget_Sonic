@@ -1,6 +1,9 @@
+import contextlib
+import io
 import json
 import math
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -78,6 +81,40 @@ class TrainEntryTests(unittest.TestCase):
 
         self.assertEqual(updated["tracking"]["wandb_mode"], "offline")
         self.assertEqual(config["tracking"]["wandb_mode"], "disabled")
+
+    def test_load_config_fails_fast_without_pyyaml(self):
+        with mock.patch.object(train_entry, "yaml", None):
+            with self.assertRaises(SystemExit) as raised:
+                train_entry._load_config(Path("configs/bones_sonic_diffusion_policy_debug.yaml"))
+
+        self.assertIn("PyYAML is required to read --config", str(raised.exception))
+
+    def test_dry_run_reports_future_horizon_output_dim_from_config(self):
+        config = {
+            "data": {
+                "target_horizon_frames": 10,
+                "allow_debug_data": True,
+            },
+            "model": {
+                "output": "g1_joint_position_future_window",
+            },
+        }
+        fake_yaml = mock.Mock()
+        fake_yaml.safe_load.return_value = config
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text("ignored: true\n", encoding="utf-8")
+            with mock.patch.object(train_entry, "yaml", fake_yaml):
+                with mock.patch.object(
+                    sys,
+                    "argv",
+                    ["train.py", "--config", str(config_path), "--dry-run"],
+                ):
+                    stdout = io.StringIO()
+                    with contextlib.redirect_stdout(stdout):
+                        train_entry.main()
+
+        self.assertIn("output_dim=290", stdout.getvalue())
 
     def test_build_train_report_records_trace_artifacts(self):
         report = train_entry._build_train_report(

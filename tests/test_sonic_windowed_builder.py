@@ -83,6 +83,7 @@ class SonicWindowedBuilderTests(unittest.TestCase):
         self.assertIn("walk_forward", sample_rows[0]["sample_id"])
         self.assertEqual(manifest["builder"], "sonic_walk_soma_bvh_to_g1_joint_window_debug")
         self.assertEqual(manifest["source_format"], "soma_bvh")
+        self.assertEqual(manifest["target_format"], "bones_sonic_joint_pos_future_window")
         self.assertEqual(manifest["candidate_clip_count"], 1)
         self.assertEqual(manifest["target_horizon_frames"], 2)
 

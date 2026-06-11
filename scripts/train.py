@@ -64,6 +64,11 @@ def main() -> None:
     sample_manifest = _load_sample_manifest(Path(samples_jsonl) if samples_jsonl else None)
     observation = _observation_spec_from_config_and_manifest(config, sample_manifest)
     output = OutputSpec(target=str(_nested_get(config, ("model", "output"), "g1_joint_position")))
+    reported_output_dim = _reported_output_dim(
+        config,
+        output_spec=output,
+        sample_manifest=sample_manifest,
+    )
     action_column = args.action_column or str(_nested_get(config, ("data", "action_column"), "curation_action"))
     quality_gate = _quality_gate_context(
         config,
@@ -81,7 +86,7 @@ def main() -> None:
     print(f"git_sha={git_sha}")
     print(f"git_dirty={_git_dirty()}")
     print(f"observation_dim={observation.flattened_dim()}")
-    print(f"output_dim={output.output_dim()}")
+    print(f"output_dim={reported_output_dim}")
     print(f"quality_gate={json.dumps(quality_gate, sort_keys=True)}")
     if index_csv:
         index_path = Path(index_csv)
@@ -192,7 +197,10 @@ def _index_supports_motion_pair_refs(index_csv: Path, *, action_column: str) -> 
 
 def _load_config(path: Path) -> dict[str, Any]:
     if yaml is None:
-        return {}
+        raise SystemExit(
+            "PyYAML is required to read --config. Install the project environment "
+            f"from environment.yml or pass a Python environment with pyyaml available: {path}"
+        )
     with path.open(encoding="utf-8") as f:
         payload = yaml.safe_load(f) or {}
     if not isinstance(payload, dict):
@@ -207,6 +215,22 @@ def _nested_get(mapping: dict[str, Any], path: tuple[str, ...], default: Any) ->
             return default
         current = current[key]
     return current
+
+
+def _reported_output_dim(
+    config: dict[str, Any],
+    *,
+    output_spec: OutputSpec,
+    sample_manifest: dict[str, Any],
+) -> int:
+    manifest_output_dim = sample_manifest.get("output_dim")
+    if isinstance(manifest_output_dim, int) and manifest_output_dim > 0:
+        return manifest_output_dim
+    try:
+        horizon = int(_nested_get(config, ("data", "target_horizon_frames"), 1))
+    except (TypeError, ValueError):
+        horizon = 1
+    return output_spec.output_dim() * max(1, horizon)
 
 
 def _apply_wandb_mode_override(config: dict[str, Any], wandb_mode: str | None) -> dict[str, Any]:

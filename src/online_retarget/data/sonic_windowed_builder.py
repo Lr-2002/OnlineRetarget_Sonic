@@ -150,7 +150,7 @@ def build_sonic_windowed_jsonl(
             "reported as retargeting. This is not a promoted M2Q-gated dataset."
         ),
         "source_format": config.source_mode,
-        "target_format": "bones_sonic_joint_pos",
+        "target_format": _target_format(config),
         "observation_spec": spec.to_dict(),
         "config": config.to_dict(),
         "candidate_clip_count": len(task_rows),
@@ -339,6 +339,12 @@ def _body_positions_from_sonic(body_pos: Any, *, np: Any) -> list[list[float]]:
     pelvis = body_pos[:, :1, :]
     relative = body_pos - pelvis
     return relative.reshape((body_pos.shape[0], body_pos.shape[1] * body_pos.shape[2])).tolist()
+
+
+def _target_format(config: SonicWindowedBuildConfig) -> str:
+    if config.target_horizon_frames > 1:
+        return "bones_sonic_joint_pos_future_window"
+    return "bones_sonic_joint_pos"
 
 
 def _observation_from_history(
