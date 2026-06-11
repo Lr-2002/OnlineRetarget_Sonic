@@ -1783,6 +1783,15 @@ def include_root_pos_target(config: Mapping[str, Any]) -> bool:
     return "root_pos" in target_text
 
 
+def previous_g1_action_condition_enabled(config: Mapping[str, Any] | None) -> bool:
+    if config is None:
+        return False
+    features = config.get("features", {})
+    if not isinstance(features, Mapping):
+        return False
+    return bool(features.get("previous_g1_action_condition", False))
+
+
 def no_skeleton_encoder_feature_enabled(config: Mapping[str, Any] | None) -> bool:
     if config is None:
         return False
@@ -1974,6 +1983,10 @@ def build_soma_motionlib_features(
         ],
         axis=-1,
     )
+    if previous_g1_action_condition_enabled(config):
+        previous_idx = np.maximum(frame_indices.astype(np.int64, copy=False) - 1, 0)
+        previous_action = dof[previous_idx]
+        motion = np.concatenate([motion, previous_action], axis=-1)
 
     skeleton_anchor = soma_local[:, 0]
     skeleton_lengths = np.linalg.norm(skeleton_anchor, axis=-1)

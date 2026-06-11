@@ -373,6 +373,48 @@ class SonicKinTrainTimingTests(unittest.TestCase):
         self.assertEqual(target.shape, (2, 3 * (29 + 29) + 3 * 6))
         np.testing.assert_allclose(target[0, :29], dof[0])
 
+    def test_soma_motionlib_previous_g1_action_condition_uses_anchor_minus_one(self):
+        frames = 60
+        soma_joints = np.zeros((frames, 26, 3), dtype=np.float32)
+        identity = np.zeros((frames, 4), dtype=np.float32)
+        identity[:, 0] = 1.0
+        dof = np.arange(frames * 29, dtype=np.float32).reshape(frames, 29)
+        arrays = {
+            "soma_joints": soma_joints,
+            "soma_root_quat": identity.copy(),
+            "joint_pos": dof,
+            "joint_vel": sonic_train.finite_difference_velocity(dof, 50.0),
+            "root_pos": np.zeros((frames, 3), dtype=np.float32),
+            "root_rot": identity.copy(),
+        }
+        config = {
+            "features": {
+                "include_root_pos_target": True,
+                "previous_g1_action_condition": True,
+            }
+        }
+
+        motion, skeleton, target = sonic_train.build_soma_motionlib_features(
+            arrays,
+            np.asarray([0, 3], dtype=np.int64),
+            window=10,
+            step=5,
+            config=config,
+        )
+
+        self.assertEqual(motion.shape, (2, 869))
+        self.assertEqual(skeleton.shape, (2, 104))
+        self.assertEqual(target.shape, (2, 670))
+        np.testing.assert_allclose(motion[:, -29:], dof[[0, 2]])
+        command = target[:, : 10 * (29 + 29)].reshape(2, 10, 58)
+        expected_target_indices = np.asarray(
+            [
+                np.arange(0, 50, 5, dtype=np.int64),
+                np.arange(3, 53, 5, dtype=np.int64),
+            ]
+        )
+        np.testing.assert_allclose(command[..., :29], dof[expected_target_indices])
+
     def test_soma_motionlib_feature_builder_can_target_root_pos_and_rot_w(self):
         frames = 8
         soma_joints = np.zeros((frames, 26, 3), dtype=np.float32)

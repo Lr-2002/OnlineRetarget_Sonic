@@ -34,25 +34,29 @@ KIN_WALK_A_PLUS_B_MLP_CAPACITY_CONFIGS = (
         / "configs"
         / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_512_1m_4gpu.json",
         [512, 1024, 512],
-        1877662,
+        1892510,
     ),
     (
         REPO_ROOT
         / "configs"
         / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_1024_512_1m_4gpu.json",
         [512, 1024, 1024, 512],
-        2927262,
+        2942110,
     ),
     (
         REPO_ROOT
         / "configs"
         / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_2048_1024_512_1m_4gpu.json",
         [512, 1024, 2048, 1024, 512],
-        6075038,
+        6089886,
     ),
 )
 LR254_2GPU_UNIFORM_CONFIG = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_frozen_ae_uniform_2gpu_2kvis.json"
+)
+KIN_WALK_PREVIOUS_ACTION_CONFIGS = (
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_kin_walk_data_package_a_only_4gpu.json",
+    REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_4gpu.json",
 )
 EXPECTED_EVAL_METRICS = {
     "primary": "g1_joint_pos_rmse_rad",
@@ -227,6 +231,26 @@ class A0FrozenAEConfigTests(unittest.TestCase):
             self.assertNotIn("joint_pos_rmse", " ".join(config["losses"]["primary"]).lower())
             self.assertEqual(config["evaluation_metrics"], EXPECTED_EVAL_METRICS)
             self.assertNotIn("mpjpe_like", config_text)
+
+    def test_kin_walk_previous_action_condition_configs_pin_input_only_dims(self) -> None:
+        for path in KIN_WALK_PREVIOUS_ACTION_CONFIGS:
+            config = json.loads(path.read_text(encoding="utf-8"))
+            with self.subTest(path=path.name):
+                self.assertIn("previous_g1_action_condition", config["source_features"])
+                self.assertEqual(
+                    config["features"]["motion_feature"],
+                    "soma_joints_multi_future_local_nonflat_plus_soma_root_ori_b_multi_future_plus_previous_g1_action",
+                )
+                self.assertIs(config["features"]["previous_g1_action_condition"], True)
+                self.assertEqual(config["features"]["expected_dims"]["motion_token"], 869)
+                self.assertEqual(config["features"]["expected_dims"]["x_skel"], 104)
+                self.assertEqual(config["features"]["expected_dims"]["z_skel"], 104)
+                self.assertEqual(config["features"]["expected_dims"]["model_input"], 973)
+                self.assertEqual(config["features"]["expected_dims"]["target"], 670)
+                self.assertEqual(
+                    config["features"]["target_feature"],
+                    "command_multi_future_nonflat_plus_root_pos_w_mf_plus_root_rot_w_mf",
+                )
 
     def test_lr254_2gpu_uniform_config_requests_2k_metric_artifacts(self) -> None:
         config = json.loads(LR254_2GPU_UNIFORM_CONFIG.read_text(encoding="utf-8"))
@@ -869,7 +893,13 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
         for path, expected_hidden_dims, expected_parameter_numel in KIN_WALK_A_PLUS_B_MLP_CAPACITY_CONFIGS:
             with self.subTest(path=path.name):
                 config = json.loads(path.read_text(encoding="utf-8"))
-                model = sonic_train.make_model(840, 104, 670, config)
+                expected_dims = config["features"]["expected_dims"]
+                model = sonic_train.make_model(
+                    expected_dims["motion_token"],
+                    expected_dims["z_skel"],
+                    expected_dims["target"],
+                    config,
+                )
                 linear_layers = [layer for layer in model.net if isinstance(layer, torch.nn.Linear)]
 
                 self.assertEqual(config["model"]["hidden_dims"], expected_hidden_dims)
@@ -1149,6 +1179,37 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
                 skeleton_dim=64,
                 target_dim=670,
                 skeleton_feature_lookup=object(),
+            )
+
+        previous_action_condition = {
+            "features": {
+                "previous_g1_action_condition": True,
+                "expected_dims": {
+                    "motion_token": 869,
+                    "x_skel": 104,
+                    "z_skel": 104,
+                    "model_input": 973,
+                    "target": 670,
+                },
+            }
+        }
+        sonic_train.assert_expected_feature_dims(
+            previous_action_condition,
+            motion_dim=869,
+            skeleton_dim=104,
+            target_dim=670,
+            skeleton_feature_lookup=None,
+        )
+        stale_previous_action_condition = json.loads(json.dumps(previous_action_condition))
+        stale_previous_action_condition["features"]["expected_dims"]["motion_token"] = 840
+        stale_previous_action_condition["features"]["expected_dims"]["model_input"] = 944
+        with self.assertRaisesRegex(ValueError, "features.expected_dims mismatch: motion_token; model_input"):
+            sonic_train.assert_expected_feature_dims(
+                stale_previous_action_condition,
+                motion_dim=869,
+                skeleton_dim=104,
+                target_dim=670,
+                skeleton_feature_lookup=None,
             )
 
         no_encoder = {
