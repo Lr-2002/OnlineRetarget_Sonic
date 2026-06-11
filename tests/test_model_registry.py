@@ -88,6 +88,66 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertEqual(tuple(reconstruction_mse.shape), ())
         self.assertEqual(tuple(kl.shape), ())
 
+    def test_builds_temporal_diffusion_policy_preserves_action_horizon(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+        spec = ObservationSpec(history_frames=2, source_body_count=2)
+        built = build_model(
+            {
+                "model": {
+                    "family": "temporal_diffusion_policy",
+                    "d_model": 8,
+                    "nhead": 2,
+                    "num_layers": 1,
+                    "dim_feedforward": 16,
+                    "time_embed_dim": 4,
+                    "diffusion_steps": 4,
+                    "inference_steps": 1,
+                    "action_dim": 2,
+                    "source_body_token_dim": 15,
+                    "source_skeleton_dim": 8,
+                    "morphology_dim": 2,
+                    "robot_state_dim": 3,
+                    "max_horizon": 4,
+                }
+            },
+            input_dim=spec.flattened_dim(),
+            output_dim=2,
+            observation_spec=spec,
+        )
+        source_body_tokens = torch.zeros(3, 2, 2, 15)
+        source_skeleton = torch.zeros(3, 8)
+        morphology = torch.zeros(3, 2)
+        robot_state = torch.zeros(3, 3)
+        prev_action = torch.zeros(3, 2)
+        target = torch.zeros(3, 2, 2)
+
+        loss = built.model.diffusion_loss(
+            source_body_tokens,
+            target,
+            source_skeleton=source_skeleton,
+            morphology=morphology,
+            robot_state=robot_state,
+            prev_action=prev_action,
+            noise=torch.zeros_like(target),
+            timesteps=torch.zeros(3, dtype=torch.long),
+        )
+        prediction = built.model.sample(
+            source_body_tokens,
+            source_skeleton=source_skeleton,
+            morphology=morphology,
+            robot_state=robot_state,
+            prev_action=prev_action,
+            steps=1,
+            start="zeros",
+        )
+
+        self.assertEqual(built.family, "temporal_diffusion_policy")
+        self.assertEqual(tuple(loss.shape), ())
+        self.assertEqual(tuple(prediction.shape), (3, 2, 2))
+
 
 if __name__ == "__main__":
     unittest.main()

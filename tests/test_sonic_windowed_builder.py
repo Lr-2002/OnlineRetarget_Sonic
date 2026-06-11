@@ -77,6 +77,10 @@ class SonicWindowedBuilderTests(unittest.TestCase):
         self.assertEqual(len(sample_rows[0]["future_target_joints"]), 2)
         self.assertEqual(len(sample_rows[0]["future_target_joints"][0]), len(SONIC_JOINT_NAMES))
         self.assertEqual(len(sample_rows[0]["prev_target_joints"]), len(SONIC_JOINT_NAMES))
+        self.assertEqual(len(sample_rows[0]["source_body_tokens"]), 2)
+        self.assertEqual(len(sample_rows[0]["source_body_tokens"][0]), 2)
+        self.assertEqual(len(sample_rows[0]["source_body_tokens"][0][0]), 15)
+        self.assertEqual(len(sample_rows[0]["source_skeleton"]), 8)
         self.assertEqual(sample_rows[0]["target_horizon_frames"], 2)
         self.assertEqual(sample_rows[0]["target_frame_indices"], [1, 2])
         self.assertEqual(sample_rows[1]["prev_target_frame"], sample_rows[1]["target_frame"] - 1)
@@ -84,8 +88,63 @@ class SonicWindowedBuilderTests(unittest.TestCase):
         self.assertEqual(manifest["builder"], "sonic_walk_soma_bvh_to_g1_joint_window_debug")
         self.assertEqual(manifest["source_format"], "soma_bvh")
         self.assertEqual(manifest["target_format"], "bones_sonic_joint_pos_future_window")
+        self.assertEqual(manifest["source_body_token_dim"], 15)
+        self.assertEqual(manifest["source_step_dim"], 30)
+        self.assertEqual(manifest["source_skeleton_dim"], 8)
+        self.assertEqual(manifest["source_rotation_representation"], "rot6d")
+        self.assertEqual(manifest["target_future_step"], 1)
         self.assertEqual(manifest["candidate_clip_count"], 1)
         self.assertEqual(manifest["target_horizon_frames"], 2)
+
+    def test_build_sonic_windowed_jsonl_emits_rot6d_body_tokens(self) -> None:
+        assert np is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "data"
+            output = Path(tmp) / "runs"
+            sonic_root = root / "bones_sonic" / "230101"
+            root.mkdir()
+            sonic_root.mkdir(parents=True)
+            _write_source_tar(root / "soma_proportional.tar", frames=12)
+            walk_npz = sonic_root / "walk_forward__A001.npz"
+            jump_npz = sonic_root / "jump__A001.npz"
+            _write_sonic_npz(walk_npz, frames=12)
+            _write_sonic_npz(jump_npz, frames=12)
+            index_csv = Path(tmp) / "sonic_index.csv"
+            _write_index(index_csv, walk_npz=walk_npz, jump_npz=jump_npz)
+
+            result = build_sonic_windowed_jsonl(
+                data_root=root,
+                index_csv=index_csv,
+                output_root=output,
+                config=SonicWindowedBuildConfig(
+                    split="train",
+                    task_query="walk",
+                    source_mode="soma_bvh",
+                    train_ratio=1.0,
+                    val_ratio=0.0,
+                    limit=1,
+                    history_frames=2,
+                    target_horizon_frames=2,
+                    target_future_step=5,
+                    window_stride=1,
+                    max_windows_per_clip=1,
+                ),
+            )
+            sample = json.loads(result.samples_jsonl.read_text(encoding="utf-8").splitlines()[0])
+            manifest = json.loads(result.manifest_json.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(sample["source_body_tokens"]), 2)
+        self.assertEqual(len(sample["source_body_tokens"][0]), 30)
+        self.assertEqual(len(sample["source_body_tokens"][0][0]), 15)
+        self.assertEqual(len(sample["source_skeleton"]), 120)
+        self.assertEqual(sample["target_frame_indices"], [1, 6])
+        self.assertEqual(sample["target_future_step"], 5)
+        self.assertEqual(manifest["source_body_count"], 30)
+        self.assertEqual(manifest["source_body_token_dim"], 15)
+        self.assertEqual(manifest["source_step_dim"], 450)
+        self.assertEqual(manifest["source_skeleton_dim"], 120)
+        self.assertEqual(manifest["source_rotation_representation"], "rot6d")
+        self.assertEqual(manifest["target_future_step"], 5)
 
     def test_soma_bvh_reads_only_needed_prefix_frames(self) -> None:
         assert np is not None
@@ -164,13 +223,15 @@ def _write_sonic_npz(path: Path, frames: int = 5) -> None:
     joint_pos = np.zeros((frames, len(SONIC_JOINT_NAMES)), dtype=np.float32)
     for frame in range(frames):
         joint_pos[frame, 0] = float(frame)
+    body_quat_w = np.zeros((frames, 30, 4), dtype=np.float32)
+    body_quat_w[:, :, 0] = 1.0
     np.savez(
         path,
         fps=np.asarray([50], dtype=np.int64),
         joint_pos=joint_pos,
         joint_vel=np.zeros_like(joint_pos),
         body_pos_w=np.zeros((frames, 30, 3), dtype=np.float32),
-        body_quat_w=np.zeros((frames, 30, 4), dtype=np.float32),
+        body_quat_w=body_quat_w,
         body_lin_vel_w=np.zeros((frames, 30, 3), dtype=np.float32),
         body_ang_vel_w=np.zeros((frames, 30, 3), dtype=np.float32),
     )

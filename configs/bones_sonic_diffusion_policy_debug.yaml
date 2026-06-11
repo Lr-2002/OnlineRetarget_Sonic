@@ -13,22 +13,33 @@ data:
   target_format: bones_sonic_joint_pos_future_window
   history_frames: 8
   target_horizon_frames: 10
+  target_future_step: 5
   source_body_count: 30
+  source_body_token_dim: 15
+  source_rotation: rot6d
   task: walk
 
 model:
-  family: diffusion_policy
-  hidden_dims: [512, 512, 256]
-  activation: silu
+  family: temporal_diffusion_policy
+  d_model: 128
+  nhead: 4
+  num_layers: 2
+  dim_feedforward: 256
   dropout: 0.0
   time_embed_dim: 32
   diffusion_steps: 32
   inference_steps: 8
   inference_start: zeros
+  action_dim: 29
+  source_body_count: 30
+  source_body_token_dim: 15
+  source_skeleton_dim: 120
+  morphology_dim: 13
+  robot_state_dim: 94
   output: g1_joint_position_future_window
 
 loss:
-  diffusion_policy: 1.0
+  temporal_diffusion_policy: 1.0
 
 train:
   batch_size: 256

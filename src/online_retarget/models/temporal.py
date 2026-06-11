@@ -451,6 +451,234 @@ class DiffusionPolicyRetargeter(nn.Module):
         return state
 
 
+class TemporalDiffusionPolicyRetargeter(nn.Module):
+    """Temporal denoiser over structured source tokens and G1 action horizons."""
+
+    def __init__(
+        self,
+        *,
+        action_dim: int = 29,
+        source_body_token_dim: int = 15,
+        source_skeleton_dim: int = 120,
+        morphology_dim: int = 13,
+        robot_state_dim: int = 94,
+        d_model: int = 128,
+        nhead: int = 4,
+        num_layers: int = 2,
+        dim_feedforward: int = 256,
+        dropout: float = 0.0,
+        time_embed_dim: int = 32,
+        diffusion_steps: int = 32,
+        inference_steps: int | None = None,
+        beta_start: float = 1.0e-4,
+        beta_end: float = 2.0e-2,
+        max_horizon: int = 64,
+    ) -> None:
+        super().__init__()
+        if diffusion_steps <= 0:
+            raise ValueError("diffusion_steps must be positive")
+        if action_dim <= 0:
+            raise ValueError("action_dim must be positive")
+        if beta_start <= 0.0 or beta_end <= 0.0 or beta_end <= beta_start:
+            raise ValueError("expected 0 < beta_start < beta_end")
+        self.action_dim = action_dim
+        self.diffusion_steps = diffusion_steps
+        self.inference_steps = inference_steps or diffusion_steps
+        self.time_embed_dim = time_embed_dim
+        self.source_skeleton_dim = source_skeleton_dim
+        self.morphology_dim = morphology_dim
+        self.robot_state_dim = robot_state_dim
+
+        self.body_encoder = nn.Sequential(
+            nn.Linear(source_body_token_dim, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
+        self.action_encoder = nn.Linear(action_dim, d_model)
+        self.time_encoder = nn.Linear(time_embed_dim, d_model) if time_embed_dim > 0 else None
+        global_dim = source_skeleton_dim + morphology_dim + robot_state_dim + action_dim
+        self.global_encoder = nn.Linear(global_dim, d_model) if global_dim > 0 else None
+        self.position = nn.Parameter(torch.zeros(1, max_horizon, d_model))
+        layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers)
+        self.norm = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, action_dim)
+
+        betas = torch.linspace(beta_start, beta_end, diffusion_steps, dtype=torch.float32)
+        alphas = 1.0 - betas
+        alpha_bars = torch.cumprod(alphas, dim=0)
+        self.register_buffer("betas", betas)
+        self.register_buffer("alphas", alphas)
+        self.register_buffer("alpha_bars", alpha_bars)
+
+    def forward(
+        self,
+        source_body_tokens: torch.Tensor,
+        noisy_action: torch.Tensor,
+        timesteps: torch.Tensor,
+        *,
+        source_skeleton: torch.Tensor | None = None,
+        morphology: torch.Tensor | None = None,
+        robot_state: torch.Tensor | None = None,
+        prev_action: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if source_body_tokens.ndim != 4:
+            raise ValueError("source_body_tokens must have shape [B,T,N,D]")
+        if noisy_action.ndim != 3:
+            raise ValueError("noisy_action must have shape [B,T,J]")
+        if source_body_tokens.shape[1] != noisy_action.shape[1]:
+            raise ValueError("source/action horizons must match")
+        body_tokens = self.body_encoder(source_body_tokens).mean(dim=2)
+        tokens = body_tokens + self.action_encoder(noisy_action)
+        if timesteps.ndim == 2 and timesteps.shape[-1] == 1:
+            timesteps = timesteps.squeeze(-1)
+        time = timesteps.to(device=noisy_action.device, dtype=noisy_action.dtype).unsqueeze(-1)
+        time = time / max(1, self.diffusion_steps - 1)
+        if self.time_encoder is not None:
+            tokens = tokens + self.time_encoder(_time_embedding(time, self.time_embed_dim)).unsqueeze(1)
+        global_token = self._global_token(
+            noisy_action,
+            source_skeleton=source_skeleton,
+            morphology=morphology,
+            robot_state=robot_state,
+            prev_action=prev_action,
+        )
+        if global_token is not None:
+            tokens = tokens + global_token.unsqueeze(1)
+        if noisy_action.shape[1] > self.position.shape[1]:
+            raise ValueError("action horizon exceeds max_horizon")
+        tokens = tokens + self.position[:, : noisy_action.shape[1]]
+        encoded = self.encoder(tokens)
+        return self.head(self.norm(encoded))
+
+    def diffusion_loss(
+        self,
+        source_body_tokens: torch.Tensor,
+        target_action: torch.Tensor,
+        *,
+        source_skeleton: torch.Tensor | None = None,
+        morphology: torch.Tensor | None = None,
+        robot_state: torch.Tensor | None = None,
+        prev_action: torch.Tensor | None = None,
+        noise: torch.Tensor | None = None,
+        timesteps: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if noise is None:
+            noise = torch.randn_like(target_action)
+        if timesteps is None:
+            timesteps = torch.randint(
+                0,
+                self.diffusion_steps,
+                (target_action.shape[0],),
+                device=target_action.device,
+            )
+        alpha_bar = self.alpha_bars[timesteps].to(target_action.dtype).view(-1, 1, 1)
+        noisy_action = alpha_bar.sqrt() * target_action + (1.0 - alpha_bar).sqrt() * noise
+        pred_noise = self.forward(
+            source_body_tokens,
+            noisy_action,
+            timesteps,
+            source_skeleton=source_skeleton,
+            morphology=morphology,
+            robot_state=robot_state,
+            prev_action=prev_action,
+        )
+        return torch.nn.functional.mse_loss(pred_noise, noise)
+
+    @torch.no_grad()
+    def sample(
+        self,
+        source_body_tokens: torch.Tensor,
+        *,
+        source_skeleton: torch.Tensor | None = None,
+        morphology: torch.Tensor | None = None,
+        robot_state: torch.Tensor | None = None,
+        prev_action: torch.Tensor | None = None,
+        steps: int | None = None,
+        start: str = "noise",
+    ) -> torch.Tensor:
+        solve_steps = max(1, min(self.diffusion_steps, int(steps or self.inference_steps)))
+        shape = (source_body_tokens.shape[0], source_body_tokens.shape[1], self.action_dim)
+        if start == "noise":
+            state = torch.randn(*shape, device=source_body_tokens.device, dtype=source_body_tokens.dtype)
+        elif start == "zeros":
+            state = torch.zeros(*shape, device=source_body_tokens.device, dtype=source_body_tokens.dtype)
+        else:
+            raise ValueError(f"unsupported diffusion start: {start}")
+        indices = torch.linspace(
+            self.diffusion_steps - 1,
+            0,
+            solve_steps,
+            device=source_body_tokens.device,
+        ).round().to(torch.long)
+        for index in indices:
+            timestep = torch.full(
+                (source_body_tokens.shape[0],),
+                int(index.item()),
+                device=source_body_tokens.device,
+                dtype=torch.long,
+            )
+            beta = self.betas[index].to(dtype=source_body_tokens.dtype)
+            alpha = self.alphas[index].to(dtype=source_body_tokens.dtype)
+            alpha_bar = self.alpha_bars[index].to(dtype=source_body_tokens.dtype)
+            pred_noise = self.forward(
+                source_body_tokens,
+                state,
+                timestep,
+                source_skeleton=source_skeleton,
+                morphology=morphology,
+                robot_state=robot_state,
+                prev_action=prev_action,
+            )
+            state = (state - beta * pred_noise / (1.0 - alpha_bar).sqrt()) / alpha.sqrt()
+        return state
+
+    def _global_token(
+        self,
+        noisy_action: torch.Tensor,
+        *,
+        source_skeleton: torch.Tensor | None,
+        morphology: torch.Tensor | None,
+        robot_state: torch.Tensor | None,
+        prev_action: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if self.global_encoder is None:
+            return None
+        batch = noisy_action.shape[0]
+        dtype = noisy_action.dtype
+        device = noisy_action.device
+        pieces = []
+        for value, width in (
+            (source_skeleton, self.source_skeleton_dim),
+            (morphology, self.morphology_dim),
+            (robot_state, self.robot_state_dim),
+            (prev_action, self.action_dim),
+        ):
+            if width <= 0:
+                continue
+            if value is None:
+                pieces.append(torch.zeros(batch, width, device=device, dtype=dtype))
+                continue
+            piece = value.to(device=device, dtype=dtype).reshape(batch, -1)
+            if piece.shape[-1] < width:
+                padding = torch.zeros(batch, width - piece.shape[-1], device=device, dtype=dtype)
+                piece = torch.cat([piece, padding], dim=-1)
+            elif piece.shape[-1] > width:
+                piece = piece[:, :width]
+            pieces.append(piece)
+        if not pieces:
+            return None
+        return self.global_encoder(torch.cat(pieces, dim=-1))
+
+
 def _time_embedding(time: torch.Tensor, dim: int) -> torch.Tensor:
     if dim <= 0:
         return time.new_zeros((time.shape[0], 0))
