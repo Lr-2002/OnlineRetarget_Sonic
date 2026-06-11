@@ -13,6 +13,7 @@ PYTHON_BIN="${PYTHON_BIN:-/workspace/isaaclab/_isaac_sim/python.sh}"
 # CONFIG=configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_512_1m_4gpu.json scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
 # CONFIG=configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_1024_512_1m_4gpu.json scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
 # CONFIG=configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_2048_1024_512_1m_4gpu.json scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
+# CONFIG=configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_2048_1024_512_temporal0p1_1m_4gpu.json scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
 CONFIG="${CONFIG:-configs/sonic_kin_soma_motionlib_proportional_4gpu.json}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"

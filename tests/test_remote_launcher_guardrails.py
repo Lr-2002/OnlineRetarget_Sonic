@@ -46,6 +46,11 @@ FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_2048_1024_512_CONFIG = (
     / "configs"
     / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_2048_1024_512_1m_4gpu.json"
 )
+FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_2048_1024_512_TEMPORAL0P1_CONFIG = (
+    REPO_ROOT
+    / "configs"
+    / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_2048_1024_512_temporal0p1_1m_4gpu.json"
+)
 FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS = (
     FINAL_KIN_WALK_DATA_PACKAGE_A_ONLY_CONFIG,
     FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CONFIG,
@@ -55,9 +60,17 @@ FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CAPACITY_CONFIGS = (
     FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_1024_512_CONFIG,
     FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_2048_1024_512_CONFIG,
 )
+FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_TEMPORAL_WEIGHT_CONFIGS = (
+    FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_2048_1024_512_TEMPORAL0P1_CONFIG,
+)
+FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_FIXED_EVAL_CONFIGS = (
+    *FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CAPACITY_CONFIGS,
+    *FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_TEMPORAL_WEIGHT_CONFIGS,
+)
 FINAL_KIN_WALK_DATA_PACKAGE_FORMAL_CONFIGS = (
     *FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS,
     *FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CAPACITY_CONFIGS,
+    *FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_TEMPORAL_WEIGHT_CONFIGS,
 )
 FINAL_KIN_WALK_PACKAGE_INDICATOR = (
     "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/"
@@ -368,9 +381,80 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                 self.assertIn("ab-overlap-loss-on", config["wandb"]["tags"])
                 self.assertIn("a-plus-b", config["wandb"]["tags"])
 
-    def test_final_kin_walk_a_plus_b_capacity_configs_use_fixed_eval_items_across_run_groups(self) -> None:
+    def test_final_kin_walk_a_plus_b_2048_temporal0p1_variant_preserves_only_identity_and_temporal_weight(self) -> None:
+        base = json.loads(FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_2048_1024_512_CONFIG.read_text(encoding="utf-8"))
+        variant = json.loads(
+            FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_2048_1024_512_TEMPORAL0P1_CONFIG.read_text(
+                encoding="utf-8"
+            )
+        )
+
+        preserved_keys = (
+            "schema_version",
+            "owner",
+            "training_lane",
+            "source_repo",
+            "source_rev",
+            "input_data",
+            "source_features",
+            "target_decoder",
+            "decoder_targets",
+            "target_features",
+            "losses",
+            "features",
+            "split",
+            "normalization",
+            "model",
+            "visual_validation",
+            "metric_validation",
+            "evaluation_cohort",
+            "runtime",
+            "expected_artifacts",
+        )
+        for key in preserved_keys:
+            self.assertEqual(variant[key], base[key], key)
+
+        self.assertEqual(variant["model"]["hidden_dims"], [512, 1024, 2048, 1024, 512])
+        self.assertEqual(
+            self._mlp_parameter_numel(
+                variant["features"]["expected_dims"]["model_input"],
+                variant["model"]["hidden_dims"],
+                variant["features"]["expected_dims"]["target"],
+            ),
+            6075038,
+        )
+
+        base_training = dict(base["training"])
+        variant_training = dict(variant["training"])
+        self.assertEqual(base_training.pop("temporal_consistency_loss_weight"), 0.01)
+        self.assertEqual(variant_training.pop("temporal_consistency_loss_weight"), 0.1)
+        self.assertEqual(variant_training, base_training)
+
+        base_variant = dict(base["variant"])
+        temporal_variant = dict(variant["variant"])
+        self.assertNotEqual(temporal_variant.pop("name"), base_variant.pop("name"))
+        self.assertEqual(temporal_variant, base_variant)
+        self.assertIn("temporal0p1", variant["variant"]["name"])
+        self.assertIn("temporal0p1", variant["output_dir"])
+        self.assertIn("temporal0p1", variant["wandb"]["name"])
+        self.assertEqual(
+            variant["validation_command"],
+            f"CONFIG=configs/{FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_2048_1024_512_TEMPORAL0P1_CONFIG.name} scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh",
+        )
+
+        self.assertEqual(variant["evaluation_cohort"], LR270_SHARED_EVAL_COHORT)
+        self.assertIs(variant["evaluation_cohort"]["include_run_group"], False)
+        for key in ("enabled", "project", "entity", "group", "dir"):
+            self.assertEqual(variant["wandb"][key], base["wandb"][key], key)
+        self.assertEqual(
+            set(variant["wandb"]["tags"]) - {"temporal-consistency-weight-0p1"},
+            set(base["wandb"]["tags"]),
+        )
+        self.assertIn("temporal_consistency_loss_weight=0.1", variant["purpose"])
+
+    def test_final_kin_walk_a_plus_b_1m_configs_use_fixed_eval_items_across_run_groups(self) -> None:
         rows = [f"sample_{index:03d}.pkl" for index in range(120)]
-        for path in FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CAPACITY_CONFIGS:
+        for path in FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_FIXED_EVAL_CONFIGS:
             with self.subTest(path=path.name):
                 config = json.loads(path.read_text(encoding="utf-8"))
 
@@ -781,6 +865,10 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
         )
         self.assertIn(
             "configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_2048_1024_512_1m_4gpu.json",
+            text,
+        )
+        self.assertIn(
+            "configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_2048_1024_512_temporal0p1_1m_4gpu.json",
             text,
         )
         self.assertIn('NPROC_PER_NODE="${NPROC_PER_NODE:-4}"', text)
