@@ -115,10 +115,10 @@ LR270_SHARED_EVAL_COHORT = {
     "manifest_path": "eval_cohort_manifest.json",
 }
 FINAL_KIN_WALK_EXPECTED_DIMS = {
-    "motion_token": 869,
+    "motion_token": 871,
     "x_skel": 104,
     "z_skel": 104,
-    "model_input": 973,
+    "model_input": 975,
     "target": 670,
 }
 A0_FOUR_GPU_CONFIGS = (
@@ -323,14 +323,14 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
     def test_final_kin_walk_a_plus_b_capacity_configs_preserve_contract_except_model_capacity(self) -> None:
         base = json.loads(FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CONFIG.read_text(encoding="utf-8"))
         expected = {
-            FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_512_CONFIG: ([512, 1024, 512], 1892510),
+            FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_512_CONFIG: ([512, 1024, 512], 1893534),
             FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_1024_512_CONFIG: (
                 [512, 1024, 1024, 512],
-                2942110,
+                2943134,
             ),
             FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_2048_1024_512_CONFIG: (
                 [512, 1024, 2048, 1024, 512],
-                6089886,
+                6090910,
             ),
         }
         preserved_keys = (
@@ -421,7 +421,7 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
                 variant["model"]["hidden_dims"],
                 variant["features"]["expected_dims"]["target"],
             ),
-            6089886,
+            6090910,
         )
 
         base_training = dict(base["training"])

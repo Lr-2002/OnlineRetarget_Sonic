@@ -415,6 +415,96 @@ class SonicKinTrainTimingTests(unittest.TestCase):
         )
         np.testing.assert_allclose(command[..., :29], dof[expected_target_indices])
 
+    def test_soma_motionlib_previous_root_roll_pitch_uses_anchor_minus_one_and_excludes_yaw(self):
+        frames = 60
+        soma_joints = np.zeros((frames, 26, 3), dtype=np.float32)
+        soma_identity = np.zeros((frames, 4), dtype=np.float32)
+        soma_identity[:, 0] = 1.0
+        dof = np.arange(frames * 29, dtype=np.float32).reshape(frames, 29)
+        root_euler = np.zeros((frames, 3), dtype=np.float32)
+        root_euler[0] = [0.1, -0.2, 0.9]
+        root_euler[2] = [0.35, 0.15, -1.2]
+        root_rot = np.asarray(
+            [sonic_train._euler_xyz_to_quat_wxyz(row) for row in root_euler],
+            dtype=np.float32,
+        )
+        yaw_only = np.asarray(
+            [sonic_train._euler_xyz_to_quat_wxyz([0.0, 0.0, 1.3])],
+            dtype=np.float32,
+        )
+        np.testing.assert_allclose(
+            sonic_train.quat_to_roll_pitch(yaw_only),
+            np.zeros((1, 2), dtype=np.float32),
+            atol=1e-6,
+        )
+        arrays = {
+            "soma_joints": soma_joints,
+            "soma_root_quat": soma_identity.copy(),
+            "joint_pos": dof,
+            "joint_vel": sonic_train.finite_difference_velocity(dof, 50.0),
+            "root_pos": np.zeros((frames, 3), dtype=np.float32),
+            "root_rot": root_rot,
+        }
+        config = {
+            "features": {
+                "include_root_pos_target": True,
+                "previous_g1_action_condition": True,
+                "previous_g1_root_roll_pitch_condition": True,
+            }
+        }
+
+        motion, skeleton, target = sonic_train.build_soma_motionlib_features(
+            arrays,
+            np.asarray([0, 3], dtype=np.int64),
+            window=10,
+            step=5,
+            config=config,
+        )
+
+        self.assertEqual(motion.shape, (2, 871))
+        self.assertEqual(skeleton.shape, (2, 104))
+        self.assertEqual(target.shape, (2, 670))
+        np.testing.assert_allclose(motion[:, -31:-2], dof[[0, 2]])
+        np.testing.assert_allclose(
+            motion[:, -2:],
+            sonic_train.quat_to_roll_pitch(root_rot[[0, 2]]),
+            atol=1e-6,
+        )
+
+    def test_previous_root_roll_pitch_expected_dims_guard_rejects_stale_action_only_stats(self):
+        config = {
+            "features": {
+                "previous_g1_action_condition": True,
+                "previous_g1_root_roll_pitch_condition": True,
+                "expected_dims": {
+                    "motion_token": 871,
+                    "x_skel": 104,
+                    "z_skel": 104,
+                    "model_input": 975,
+                    "target": 670,
+                },
+            }
+        }
+
+        sonic_train.assert_expected_feature_dims(
+            config,
+            motion_dim=871,
+            skeleton_dim=104,
+            target_dim=670,
+            skeleton_feature_lookup=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "motion_token: expected 871, got 869; model_input: expected 975, got 973",
+        ):
+            sonic_train.assert_expected_feature_dims(
+                config,
+                motion_dim=869,
+                skeleton_dim=104,
+                target_dim=670,
+                skeleton_feature_lookup=None,
+            )
+
     def test_soma_motionlib_feature_builder_can_target_root_pos_and_rot_w(self):
         frames = 8
         soma_joints = np.zeros((frames, 26, 3), dtype=np.float32)

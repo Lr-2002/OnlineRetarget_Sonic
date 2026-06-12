@@ -1769,6 +1769,17 @@ def quat_to_rot6d(root_quat: np.ndarray) -> np.ndarray:
     return mat[..., :, :2].reshape(*mat.shape[:-2], 6)
 
 
+def quat_to_roll_pitch(root_quat: np.ndarray) -> np.ndarray:
+    mat = quat_to_matrix(root_quat)
+    sy = np.clip(mat[..., 0, 2], -1.0, 1.0)
+    pitch = np.arcsin(sy)
+    cy = np.cos(pitch)
+    roll_regular = np.arctan2(-mat[..., 1, 2], mat[..., 2, 2])
+    roll_gimbal = np.arctan2(mat[..., 2, 1], mat[..., 1, 1])
+    roll = np.where(np.abs(cy) > 1e-6, roll_regular, roll_gimbal)
+    return np.stack([roll, pitch], axis=-1).astype(np.float32, copy=False)
+
+
 def include_root_pos_target(config: Mapping[str, Any]) -> bool:
     features = config.get("features", {})
     if not isinstance(features, Mapping):
@@ -1790,6 +1801,15 @@ def previous_g1_action_condition_enabled(config: Mapping[str, Any] | None) -> bo
     if not isinstance(features, Mapping):
         return False
     return bool(features.get("previous_g1_action_condition", False))
+
+
+def previous_g1_root_roll_pitch_condition_enabled(config: Mapping[str, Any] | None) -> bool:
+    if config is None:
+        return False
+    features = config.get("features", {})
+    if not isinstance(features, Mapping):
+        return False
+    return bool(features.get("previous_g1_root_roll_pitch_condition", False))
 
 
 def no_skeleton_encoder_feature_enabled(config: Mapping[str, Any] | None) -> bool:
@@ -1983,10 +2003,17 @@ def build_soma_motionlib_features(
         ],
         axis=-1,
     )
-    if previous_g1_action_condition_enabled(config):
+    if (
+        previous_g1_action_condition_enabled(config)
+        or previous_g1_root_roll_pitch_condition_enabled(config)
+    ):
         previous_idx = np.maximum(frame_indices.astype(np.int64, copy=False) - 1, 0)
+    if previous_g1_action_condition_enabled(config):
         previous_action = dof[previous_idx]
         motion = np.concatenate([motion, previous_action], axis=-1)
+    if previous_g1_root_roll_pitch_condition_enabled(config):
+        previous_roll_pitch = quat_to_roll_pitch(root_rot[previous_idx])
+        motion = np.concatenate([motion, previous_roll_pitch], axis=-1)
 
     skeleton_anchor = soma_local[:, 0]
     skeleton_lengths = np.linalg.norm(skeleton_anchor, axis=-1)
