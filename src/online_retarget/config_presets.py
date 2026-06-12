@@ -13,6 +13,19 @@ BUILD_SYNC_KEYS = (
     "source_rotation",
 )
 
+TEMPORAL_DIFFUSION_FAMILIES = {
+    "temporal_diffusion_policy",
+    "dp_temporal",
+    "temporal_dp",
+    "temporal_diffusion",
+}
+DIFFUSION_UNET_SMALL_FAMILIES = {
+    "diffusion_policy_unet_small",
+    "diffusion_policy_unet",
+    "dp_unet_small",
+    "unet_diffusion_policy_small",
+}
+
 
 def apply_config_preset(config: dict[str, Any]) -> dict[str, Any]:
     preset_name = selected_config_preset(config)
@@ -92,7 +105,7 @@ def validate_config_preset_payload(name: str, preset: dict[str, Any]) -> None:
     missing = [f"data.{key}" for key in required_data if key not in data]
     missing.extend(f"model.{key}" for key in required_model if key not in model)
     family = str(model.get("family", "")).lower().replace("-", "_")
-    if family in {"temporal_diffusion_policy", "dp_temporal", "temporal_dp", "temporal_diffusion"}:
+    if family in TEMPORAL_DIFFUSION_FAMILIES:
         route_b_model_required = (
             "action_dim",
             "source_body_token_dim",
@@ -106,6 +119,18 @@ def validate_config_preset_payload(name: str, preset: dict[str, Any]) -> None:
             "dim_feedforward",
         )
         missing.extend(f"model.{key}" for key in route_b_model_required if key not in model)
+    elif family in DIFFUSION_UNET_SMALL_FAMILIES:
+        causal_model_required = (
+            "action_dim",
+            "reference_history_frames",
+            "reference_body_count",
+            "reference_body_token_dim",
+            "robot_state_dim",
+            "down_dims",
+            "condition_dim",
+            "diffusion_step_embed_dim",
+        )
+        missing.extend(f"model.{key}" for key in causal_model_required if key not in model)
     else:
         if "hidden_dims" not in model and "d_model" not in model:
             missing.append("model.hidden_dims or model.d_model")
@@ -163,6 +188,57 @@ def validate_resolved_config_preset(name: str, config: dict[str, Any]) -> None:
         if data.get("action_dim") is not None and model.get("action_dim") is not None:
             if int(data["action_dim"]) != int(model["action_dim"]):
                 errors.append("data.action_dim must match model.action_dim")
+    elif family == "diffusion_policy_unet_small":
+        if data.get("target_format") != "bones_sonic_joint_pos_future_window":
+            errors.append("data.target_format must be bones_sonic_joint_pos_future_window")
+        if model.get("output") != "g1_joint_position_future_window":
+            errors.append("model.output must be g1_joint_position_future_window")
+        for key in (
+            "history_frames",
+            "target_horizon_frames",
+            "target_future_step",
+            "source_body_count",
+            "source_body_token_dim",
+            "source_rotation",
+            "action_dim",
+        ):
+            if key not in data:
+                errors.append(f"data.{key}")
+        for key in (
+            "action_dim",
+            "reference_history_frames",
+            "reference_body_count",
+            "reference_body_token_dim",
+            "robot_state_dim",
+            "down_dims",
+            "condition_dim",
+            "diffusion_step_embed_dim",
+        ):
+            if key not in model:
+                errors.append(f"model.{key}")
+        if data.get("action_dim") is not None and model.get("action_dim") is not None:
+            if int(data["action_dim"]) != int(model["action_dim"]):
+                errors.append("data.action_dim must match model.action_dim")
+        if (
+            data.get("history_frames") is not None
+            and model.get("reference_history_frames") is not None
+        ):
+            if int(data["history_frames"]) != int(model["reference_history_frames"]):
+                errors.append("data.history_frames must match model.reference_history_frames")
+        if (
+            data.get("source_body_count") is not None
+            and model.get("reference_body_count") is not None
+        ):
+            if int(data["source_body_count"]) != int(model["reference_body_count"]):
+                errors.append("data.source_body_count must match model.reference_body_count")
+        if (
+            data.get("source_body_token_dim") is not None
+            and model.get("reference_body_token_dim") is not None
+        ):
+            if int(data["source_body_token_dim"]) != int(model["reference_body_token_dim"]):
+                errors.append(
+                    "data.source_body_token_dim must match model.reference_body_token_dim"
+                )
     elif "route_b" in str(name).lower() or "temporal_diffusion" in str(name).lower():
         errors.append("route-b preset must resolve model.family=temporal_diffusion_policy")
     else:
@@ -195,5 +271,9 @@ def configured_model_family(config: dict[str, Any]) -> str:
         "temporal_dp": "temporal_diffusion_policy",
         "temporal_diffusion": "temporal_diffusion_policy",
         "temporal_diffusion_policy": "temporal_diffusion_policy",
+        "dp_unet_small": "diffusion_policy_unet_small",
+        "diffusion_policy_unet": "diffusion_policy_unet_small",
+        "diffusion_policy_unet_small": "diffusion_policy_unet_small",
+        "unet_diffusion_policy_small": "diffusion_policy_unet_small",
     }
     return aliases.get(key, key)

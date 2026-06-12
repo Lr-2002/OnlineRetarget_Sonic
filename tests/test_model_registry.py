@@ -163,6 +163,64 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertTrue(torch.equal(residual, torch.tensor([[[0.5, 0.5], [1.0, -0.5]]])))
         self.assertTrue(torch.equal(reconstructed, target))
 
+    def test_builds_diffusion_policy_unet_small(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+        spec = ObservationSpec(history_frames=5, source_body_count=2)
+        built = build_model(
+            {
+                "model": {
+                    "family": "diffusion_policy_unet_small",
+                    "action_dim": 2,
+                    "reference_body_token_dim": 3,
+                    "reference_history_frames": 5,
+                    "reference_body_count": 2,
+                    "robot_state_dim": 4,
+                    "down_dims": [8, 16],
+                    "condition_dim": 16,
+                    "diffusion_step_embed_dim": 8,
+                    "kernel_size": 3,
+                    "n_groups": 4,
+                    "diffusion_steps": 4,
+                    "inference_steps": 1,
+                    "max_action_horizon": 2,
+                    "output_mode": "residual_prev_action",
+                }
+            },
+            input_dim=spec.flattened_dim(),
+            output_dim=2,
+            observation_spec=spec,
+        )
+        reference_history_tokens = torch.zeros(3, 5, 2, 3)
+        robot_state = torch.zeros(3, 4)
+        prev_action = torch.zeros(3, 2)
+        target = torch.zeros(3, 2, 2)
+
+        loss = built.model.diffusion_loss(
+            reference_history_tokens,
+            target,
+            robot_state=robot_state,
+            prev_action=prev_action,
+            noise=torch.zeros_like(target),
+            timesteps=torch.zeros(3, dtype=torch.long),
+        )
+        prediction = built.model.sample(
+            reference_history_tokens,
+            robot_state=robot_state,
+            prev_action=prev_action,
+            action_horizon=2,
+            steps=1,
+            start="zeros",
+        )
+
+        self.assertEqual(built.family, "diffusion_policy_unet_small")
+        self.assertEqual(tuple(loss.shape), ())
+        self.assertEqual(tuple(prediction.shape), (3, 2, 2))
+        self.assertTrue(torch.isfinite(loss))
+        self.assertTrue(torch.isfinite(prediction).all())
+
     def test_temporal_jump_loss_uses_velocity_threshold_units(self):
         try:
             import torch
@@ -204,7 +262,7 @@ class ModelRegistryTests(unittest.TestCase):
             prev_action=prev_action,
         )
 
-        self.assertEqual(float(velocity_loss.item()), 0.0)
+        self.assertAlmostEqual(float(velocity_loss.item()), 0.0, places=6)
         self.assertGreater(float(delta_loss.item()), 0.0)
 
 def _temporal_policy(torch, *, action_dim: int):

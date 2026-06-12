@@ -110,7 +110,9 @@ def build_model(
             source_body_token_dim=int(model_cfg.get("source_body_token_dim", 15)),
             source_skeleton_dim=int(model_cfg.get("source_skeleton_dim", 120)),
             morphology_dim=int(model_cfg.get("morphology_dim", observation_spec.morphology_dim())),
-            robot_state_dim=int(model_cfg.get("robot_state_dim", observation_spec.robot_state_dim())),
+            robot_state_dim=int(
+                model_cfg.get("robot_state_dim", observation_spec.robot_state_dim())
+            ),
             d_model=int(model_cfg.get("d_model", 128)),
             nhead=int(model_cfg.get("nhead", 4)),
             num_layers=int(model_cfg.get("num_layers", 2)),
@@ -125,6 +127,41 @@ def build_model(
             beta_end=float(model_cfg.get("beta_end", 2.0e-2)),
             max_horizon=int(model_cfg.get("max_horizon", 64)),
             output_mode=str(model_cfg.get("output_mode", "absolute")),
+        )
+    elif family == "diffusion_policy_unet_small":
+        from .diffusion_policy_unet import DiffusionPolicyUNetSmall
+
+        model = DiffusionPolicyUNetSmall(
+            action_dim=int(model_cfg.get("action_dim", 29)),
+            reference_body_token_dim=int(model_cfg.get("reference_body_token_dim", 15)),
+            reference_history_frames=int(
+                model_cfg.get("reference_history_frames", observation_spec.history_frames)
+            ),
+            reference_body_count=int(
+                model_cfg.get("reference_body_count", observation_spec.source_body_count)
+            ),
+            robot_state_dim=int(
+                model_cfg.get("robot_state_dim", observation_spec.robot_state_dim())
+            ),
+            down_dims=tuple(int(value) for value in model_cfg.get("down_dims", [128, 256])),
+            condition_dim=int(model_cfg.get("condition_dim", 256)),
+            diffusion_step_embed_dim=int(model_cfg.get("diffusion_step_embed_dim", 128)),
+            kernel_size=int(model_cfg.get("kernel_size", 5)),
+            groups=int(model_cfg.get("n_groups", model_cfg.get("groups", 8))),
+            cond_predict_scale=bool(model_cfg.get("cond_predict_scale", True)),
+            diffusion_steps=int(model_cfg.get("diffusion_steps", 32)),
+            inference_steps=int(
+                model_cfg.get("inference_steps", model_cfg.get("diffusion_steps", 32))
+            ),
+            beta_start=float(model_cfg.get("beta_start", 1.0e-4)),
+            beta_end=float(model_cfg.get("beta_end", 2.0e-2)),
+            max_action_horizon=int(
+                model_cfg.get(
+                    "max_action_horizon",
+                    model_cfg.get("target_horizon_frames", model_cfg.get("max_horizon", 64)),
+                )
+            ),
+            output_mode=str(model_cfg.get("output_mode", "residual_prev_action")),
         )
     else:
         raise ValueError(f"unsupported model family: {model_cfg.get('family')}")
@@ -153,5 +190,9 @@ def _canonical_family(family: str) -> str:
         "temporal_dp": "temporal_diffusion_policy",
         "temporal_diffusion": "temporal_diffusion_policy",
         "temporal_diffusion_policy": "temporal_diffusion_policy",
+        "dp_unet_small": "diffusion_policy_unet_small",
+        "diffusion_policy_unet": "diffusion_policy_unet_small",
+        "diffusion_policy_unet_small": "diffusion_policy_unet_small",
+        "unet_diffusion_policy_small": "diffusion_policy_unet_small",
     }
     return aliases.get(key, key)

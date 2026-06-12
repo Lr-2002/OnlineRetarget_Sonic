@@ -137,6 +137,27 @@ class TrainEntryTests(unittest.TestCase):
             },
         )
 
+    def test_config_preset_switches_diffusion_policy_unet_small_settings(self):
+        config = _preset_switch_config("diffusion_policy_unet_small")
+
+        resolved = train_entry._apply_config_preset(config)
+
+        self.assertEqual(resolved["data"]["history_frames"], 10)
+        self.assertEqual(resolved["data"]["target_horizon_frames"], 10)
+        self.assertEqual(resolved["data"]["target_future_step"], 5)
+        self.assertEqual(resolved["data"]["build"]["history_frames"], 10)
+        self.assertEqual(resolved["model"]["family"], "diffusion_policy_unet_small")
+        self.assertEqual(resolved["model"]["reference_history_frames"], 10)
+        self.assertEqual(resolved["model"]["reference_body_count"], 30)
+        self.assertEqual(resolved["model"]["reference_body_token_dim"], 15)
+        self.assertEqual(resolved["model"]["robot_state_dim"], 94)
+        self.assertEqual(resolved["model"]["output_mode"], "residual_prev_action")
+        self.assertEqual(resolved["loss"], {"diffusion_policy_unet_small": 1.0, "denoise": 1.0})
+        self.assertEqual(
+            train_entry._configured_model_family(resolved),
+            "diffusion_policy_unet_small",
+        )
+
     def test_config_preset_preserves_old_config_without_preset(self):
         config = {
             "data": {"samples_jsonl": "runs/supervised/flat/samples.jsonl"},
@@ -889,6 +910,84 @@ class TrainEntryTests(unittest.TestCase):
         self.assertIn("actual temporal condition source fields", str(raised.exception))
         self.assertIn("target_frame_indices", str(raised.exception))
 
+    def test_causal_unet_condition_tensors_use_reference_history_only(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+        sample = _causal_unet_sample()
+        sample["source_body_tokens"] = [
+            [[999.0, 999.0, 999.0], [999.0, 999.0, 999.0]]
+            for _ in range(2)
+        ]
+
+        tensors = train_entry._structured_diffusion_condition_tensors(
+            torch,
+            [sample],
+            family="diffusion_policy_unet_small",
+        )
+
+        self.assertEqual(tuple(tensors["reference_history_tokens"].shape), (1, 5, 2, 3))
+        self.assertEqual(tuple(tensors["target_action"].shape), (1, 2, 2))
+        self.assertNotIn("source_body_tokens", tensors)
+        self.assertNotIn("future_target_joints", tensors)
+        self.assertAlmostEqual(float(tensors["reference_history_tokens"].max().item()), 1.4)
+
+    def test_causal_unet_feature_contract_has_no_target_leakage(self):
+        samples = [_causal_unet_sample()]
+        tensors = _causal_unet_tensors()
+        config = _causal_unet_feature_contract_config()
+
+        report = train_entry._temporal_feature_contract_report(config, samples, tensors)
+
+        self.assertEqual(report["status"], "pass")
+        self.assertEqual(report["model_family"], "diffusion_policy_unet_small")
+        self.assertEqual(
+            report["actual_condition_sample_fields"],
+            [
+                "reference_history_tokens",
+                "prev_target_joints",
+                "previous_target_joints",
+                "prev_g1_joints",
+                "robot_state",
+            ],
+        )
+        self.assertEqual(
+            report["actual_model_condition_tensor_keys"],
+            ["reference_history_tokens", "prev_action", "robot_state"],
+        )
+        self.assertEqual(report["dimensions"]["reference_history_frames"], 5)
+        self.assertEqual(report["robot_state_field_missing_count"], 0)
+        self.assertFalse(
+            set(report["actual_condition_sample_fields"])
+            & set(report["forbidden_condition_sample_keys"])
+        )
+
+    def test_causal_unet_feature_contract_rejects_declared_target_condition_key(self):
+        samples = [_causal_unet_sample()]
+        tensors = _causal_unet_tensors()
+        config = _causal_unet_feature_contract_config()
+        config["feature_contract"]["condition_sample_keys"].append("future_target_joints")
+
+        with self.assertRaises(SystemExit) as raised:
+            train_entry._temporal_feature_contract_report(config, samples, tensors)
+
+        self.assertIn("future_target_joints", str(raised.exception))
+
+    def test_causal_unet_feature_contract_reports_missing_robot_state_field(self):
+        sample = _causal_unet_sample()
+        sample.pop("robot_state")
+        config = _causal_unet_feature_contract_config()
+
+        with self.assertRaises(SystemExit) as raised:
+            train_entry._temporal_feature_contract_report(
+                config,
+                [sample],
+                _causal_unet_tensors(),
+            )
+
+        self.assertIn("robot_state is missing", str(raised.exception))
+
     def test_temporal_training_dataset_keeps_fps_before_target_action(self):
         tensors = {key: _FakeDeviceTensor(key) for key in train_entry.TEMPORAL_BATCH_KEYS}
 
@@ -998,6 +1097,33 @@ def _preset_switch_config(policy_preset: str) -> dict:
                     "joint_limit": 0.0,
                 },
             },
+            "diffusion_policy_unet_small": {
+                "data": {
+                    "samples_jsonl": "runs/supervised/causal_unet/samples.jsonl",
+                    "target_format": "bones_sonic_joint_pos_future_window",
+                    "history_frames": 10,
+                    "target_horizon_frames": 10,
+                    "target_future_step": 5,
+                    "source_body_count": 30,
+                    "source_body_token_dim": 15,
+                    "source_rotation": "rot6d",
+                    "action_dim": 29,
+                },
+                "model": {
+                    "family": "diffusion_policy_unet_small",
+                    "action_dim": 29,
+                    "reference_history_frames": 10,
+                    "reference_body_count": 30,
+                    "reference_body_token_dim": 15,
+                    "robot_state_dim": 94,
+                    "down_dims": [128, 256],
+                    "condition_dim": 256,
+                    "diffusion_step_embed_dim": 128,
+                    "output_mode": "residual_prev_action",
+                    "output": "g1_joint_position_future_window",
+                },
+                "loss": {"diffusion_policy_unet_small": 1.0, "denoise": 1.0},
+            },
         },
     }
 
@@ -1083,6 +1209,96 @@ def _temporal_tensors() -> dict:
         "source_skeleton": _FakeTemporalTensor((1, 4)),
         "morphology": _FakeTemporalTensor((1, 2)),
         "robot_state": _FakeTemporalTensor((1, 5)),
+        "prev_action": _FakeTemporalTensor((1, 2)),
+        "fps": _FakeTemporalTensor((1,)),
+        "target_action": _FakeTemporalTensor((1, 2, 2)),
+    }
+
+
+def _causal_unet_sample() -> dict:
+    return {
+        "sample_id": "s1",
+        "actor_uid": "A001",
+        "observation": [0.0],
+        "reference_history_tokens": [
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [[1.1, 0.0, 0.0], [0.0, 1.1, 0.0]],
+            [[1.2, 0.0, 0.0], [0.0, 1.2, 0.0]],
+            [[1.3, 0.0, 0.0], [0.0, 1.3, 0.0]],
+            [[1.4, 0.0, 0.0], [0.0, 1.4, 0.0]],
+        ],
+        "robot_state": [0.0, 0.1, 0.2, 0.3],
+        "prev_target_joints": [0.0, 0.1],
+        "fps": 50.0,
+        "target_joints": [0.1, 0.2],
+        "future_target_joints": [[0.1, 0.2], [0.2, 0.4]],
+        "target_frame_indices": [10, 15],
+    }
+
+
+def _causal_unet_feature_contract_config() -> dict:
+    return {
+        "data": {"target_format": "bones_sonic_joint_pos_future_window"},
+        "model": {
+            "family": "diffusion_policy_unet_small",
+            "output": "g1_joint_position_future_window",
+            "output_mode": "residual_prev_action",
+            "robot_state_dim": 4,
+        },
+        "evaluation": {
+            "metrics": [
+                "joint_rmse",
+                "joint_velocity_rmse",
+                "predicted_minus_target_joint_jump_rate",
+                "max_joint_abs_error",
+            ]
+        },
+        "feature_contract": {
+            "enabled": True,
+            "enforce": True,
+            "condition_sample_keys": [
+                "reference_history_tokens",
+                "robot_state",
+                "prev_target_joints",
+                "previous_target_joints",
+                "prev_g1_joints",
+            ],
+            "forbid_condition_sample_keys": [
+                "source_body_tokens",
+                "target_joints",
+                "future_target_joints",
+                "target_frame",
+                "target_frame_indices",
+                "target_g1_path",
+                "actor_uid",
+            ],
+            "robot_state_policy": "require_field",
+            "expected": {
+                "reference_history_frames": 5,
+                "reference_body_count": 2,
+                "reference_body_token_dim": 3,
+                "target_horizon_frames": 2,
+                "source_body_count": 2,
+                "source_body_token_dim": 3,
+                "source_skeleton_dim": 0,
+                "morphology_dim": 0,
+                "robot_state_dim": 4,
+                "action_dim": 2,
+            },
+            "required_eval_metrics": [
+                "joint_rmse",
+                "joint_velocity_rmse",
+                "predicted_minus_target_joint_jump_rate",
+                "max_joint_abs_error",
+            ],
+        },
+    }
+
+
+def _causal_unet_tensors() -> dict:
+    return {
+        "reference_history_tokens": _FakeTemporalTensor((1, 5, 2, 3)),
+        "robot_state": _FakeTemporalTensor((1, 4), abs_sum=0.6),
         "prev_action": _FakeTemporalTensor((1, 2)),
         "fps": _FakeTemporalTensor((1,)),
         "target_action": _FakeTemporalTensor((1, 2, 2)),
