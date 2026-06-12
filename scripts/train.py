@@ -38,6 +38,12 @@ TEMPORAL_MODEL_CONDITION_SAMPLE_FIELDS = (
     "prev_g1_joints",
 )
 TEMPORAL_ROBOT_STATE_SAMPLE_FIELDS = ("robot_state",)
+CAUSAL_UNET_CONDITION_SAMPLE_FIELDS = (
+    "reference_history_tokens",
+    "prev_target_joints",
+    "previous_target_joints",
+    "prev_g1_joints",
+)
 TEMPORAL_FORBIDDEN_CONDITION_SAMPLE_FIELDS = (
     "target_joints",
     "future_target_joints",
@@ -55,6 +61,21 @@ TEMPORAL_BATCH_KEYS = (
     "fps",
     "target_action",
 )
+CAUSAL_UNET_BATCH_KEYS = (
+    "reference_history_tokens",
+    "robot_state",
+    "prev_action",
+    "fps",
+    "target_action",
+)
+STRUCTURED_DIFFUSION_FAMILIES = (
+    "temporal_diffusion_policy",
+    "diffusion_policy_unet_small",
+)
+
+
+def _is_structured_diffusion_family(family: str) -> bool:
+    return family in STRUCTURED_DIFFUSION_FAMILIES
 
 
 def main() -> None:
@@ -604,7 +625,7 @@ def _train_jsonl(
     samples = _load_supervised_samples(samples_jsonl)
     if not samples:
         raise SystemExit(f"no supervised samples found in {samples_jsonl}")
-    if _configured_model_family(config) == "temporal_diffusion_policy":
+    if _is_structured_diffusion_family(_configured_model_family(config)):
         _train_temporal_diffusion_jsonl(
             torch=torch,
             config=config,
@@ -841,7 +862,8 @@ def _train_temporal_diffusion_jsonl(
         _load_sample_manifest(samples_jsonl),
         input_dim=input_dim,
     )
-    tensors = _temporal_condition_tensors(torch, samples)
+    family = _configured_model_family(config)
+    tensors = _structured_diffusion_condition_tensors(torch, samples, family=family)
     samples, tensors, sample_filter = _filter_finite_temporal_tensors(
         torch,
         samples=samples,
@@ -885,7 +907,9 @@ def _train_temporal_diffusion_jsonl(
     output_dir.mkdir(parents=True, exist_ok=True)
     log_every = max(1, int(_nested_get(config, ("train", "log_every"), 100)))
     steps = min(max_steps, max_steps if max_steps > 0 else 1)
-    dataset = torch.utils.data.TensorDataset(*_temporal_training_dataset_tensors(tensors))
+    dataset = torch.utils.data.TensorDataset(
+        *_temporal_training_dataset_tensors(tensors, family=family)
+    )
     sampler = None
     if runtime["distributed"]:
         sampler = torch.utils.data.distributed.DistributedSampler(
@@ -910,7 +934,7 @@ def _train_temporal_diffusion_jsonl(
             sampler.set_epoch(epoch)
         for batch in loader:
             step += 1
-            condition = _temporal_batch_to_device(batch, runtime["device"])
+            condition = _temporal_batch_to_device(batch, runtime["device"], family=family)
             batch_y = condition.pop("target_action")
             loss = _training_loss(
                 torch,
@@ -1065,6 +1089,17 @@ def _training_loss(
             loss_config=loss_cfg,
             fps=observation.get("fps"),
         )
+    if family == "diffusion_policy_unet_small":
+        loss_cfg = _loss_config(config)
+        weight = float(loss_cfg.get("diffusion_policy_unet_small", 1.0))
+        return weight * _unwrap_model(model).diffusion_loss(
+            observation["reference_history_tokens"],
+            target,
+            robot_state=observation.get("robot_state"),
+            prev_action=observation.get("prev_action"),
+            loss_config=loss_cfg,
+            fps=observation.get("fps"),
+        )
     if family == "token_transformer":
         unwrapped = _unwrap_model(model)
         if prev_target is None:
@@ -1148,8 +1183,13 @@ def _predict_tensor(
 ):
     model.eval()
     predictions = []
-    if family == "temporal_diffusion_policy":
-        count = x["source_body_tokens"].shape[0]
+    if family in STRUCTURED_DIFFUSION_FAMILIES:
+        count_key = (
+            "reference_history_tokens"
+            if family == "diffusion_policy_unet_small"
+            else "source_body_tokens"
+        )
+        count = x[count_key].shape[0]
         diffusion_cfg = config.get("model", {}) if isinstance(config.get("model", {}), dict) else {}
         for start in range(0, count, max(1, batch_size)):
             batch = {
@@ -1157,20 +1197,32 @@ def _predict_tensor(
                 for key, value in x.items()
                 if key != "target_action"
             }
-            pred = _unwrap_model(model).sample(
-                batch["source_body_tokens"],
-                source_skeleton=batch.get("source_skeleton"),
-                morphology=batch.get("morphology"),
-                robot_state=batch.get("robot_state"),
-                prev_action=batch.get("prev_action"),
-                steps=int(
-                    diffusion_cfg.get(
-                        "inference_steps",
-                        diffusion_cfg.get("diffusion_steps", 32),
-                    )
-                ),
-                start=str(diffusion_cfg.get("inference_start", "zeros")),
+            steps = int(
+                diffusion_cfg.get(
+                    "inference_steps",
+                    diffusion_cfg.get("diffusion_steps", 32),
+                )
             )
+            start_mode = str(diffusion_cfg.get("inference_start", "zeros"))
+            if family == "diffusion_policy_unet_small":
+                pred = _unwrap_model(model).sample(
+                    batch["reference_history_tokens"],
+                    robot_state=batch.get("robot_state"),
+                    prev_action=batch.get("prev_action"),
+                    action_horizon=int(x["target_action"].shape[1]),
+                    steps=steps,
+                    start=start_mode,
+                )
+            else:
+                pred = _unwrap_model(model).sample(
+                    batch["source_body_tokens"],
+                    source_skeleton=batch.get("source_skeleton"),
+                    morphology=batch.get("morphology"),
+                    robot_state=batch.get("robot_state"),
+                    prev_action=batch.get("prev_action"),
+                    steps=steps,
+                    start=start_mode,
+                )
             predictions.append(pred.detach())
         return torch.cat(predictions, dim=0)
     for start in range(0, x.shape[0], max(1, batch_size)):
@@ -1259,6 +1311,17 @@ def _target_action_shape(sample: dict[str, Any]) -> tuple[int, int]:
     return len(sequence), len(sequence[0])
 
 
+def _structured_diffusion_condition_tensors(
+    torch,
+    samples: list[dict[str, Any]],
+    *,
+    family: str,
+) -> dict[str, Any]:
+    if family == "diffusion_policy_unet_small":
+        return _causal_unet_condition_tensors(torch, samples)
+    return _temporal_condition_tensors(torch, samples)
+
+
 def _temporal_condition_tensors(torch, samples: list[dict[str, Any]]) -> dict[str, Any]:
     if not samples:
         raise ValueError("samples must be non-empty")
@@ -1306,6 +1369,46 @@ def _temporal_condition_tensors(torch, samples: list[dict[str, Any]]) -> dict[st
     }
 
 
+def _causal_unet_condition_tensors(torch, samples: list[dict[str, Any]]) -> dict[str, Any]:
+    if not samples:
+        raise ValueError("samples must be non-empty")
+    first_target_shape = _target_action_shape(samples[0])
+    first_reference_shape = _reference_history_shape(samples[0])
+    robot_state_dim = len(_robot_state_vector(samples[0]))
+    action_dim = first_target_shape[1]
+    rows = {
+        "reference_history_tokens": [],
+        "robot_state": [],
+        "prev_action": [],
+        "fps": [],
+        "target_action": [],
+    }
+    for index, sample in enumerate(samples):
+        target_action = _target_action_sequence(sample)
+        target_shape = (len(target_action), len(target_action[0]) if target_action else 0)
+        if target_shape != first_target_shape:
+            raise ValueError(
+                "diffusion_policy_unet_small samples must share target shape "
+                f"{first_target_shape}; sample {index} has {target_shape}"
+            )
+        reference_tokens = _reference_history_token_sequence(sample)
+        reference_shape = _nested_token_shape(reference_tokens)
+        if reference_shape != first_reference_shape:
+            raise ValueError(
+                "diffusion_policy_unet_small samples must share reference_history_tokens "
+                f"shape {first_reference_shape}; sample {index} has {reference_shape}"
+            )
+        rows["reference_history_tokens"].append(reference_tokens)
+        rows["robot_state"].append(_pad_or_trim(_robot_state_vector(sample), robot_state_dim))
+        rows["prev_action"].append(_pad_or_trim(_prev_action_vector(sample), action_dim))
+        rows["fps"].append(float(sample.get("fps", 30.0)))
+        rows["target_action"].append(target_action)
+    return {
+        key: torch.tensor(value, dtype=torch.float32)
+        for key, value in rows.items()
+    }
+
+
 def _feature_contract_config(config: dict[str, Any]) -> dict[str, Any]:
     payload = config.get("feature_contract", {})
     return dict(payload) if isinstance(payload, dict) else {}
@@ -1321,6 +1424,7 @@ def _temporal_feature_contract_report(
     if not enabled:
         return {"enabled": False}
     model_cfg = config.get("model", {}) if isinstance(config.get("model", {}), dict) else {}
+    family = _configured_model_family(config)
     evaluation_cfg = (
         config.get("evaluation", {}) if isinstance(config.get("evaluation", {}), dict) else {}
     )
@@ -1331,10 +1435,16 @@ def _temporal_feature_contract_report(
         metric_names = [str(metric) for metric in metrics]
     model_robot_state_dim = int(model_cfg.get("robot_state_dim", tensors["robot_state"].shape[1]))
     actual_condition_sample_fields = list(
-        _temporal_condition_sample_fields(model_robot_state_dim=model_robot_state_dim)
+        _structured_condition_sample_fields(
+            family=family,
+            model_robot_state_dim=model_robot_state_dim,
+        )
     )
     actual_model_condition_tensor_keys = list(
-        _temporal_model_condition_tensor_keys(model_robot_state_dim=model_robot_state_dim)
+        _structured_model_condition_tensor_keys(
+            family=family,
+            model_robot_state_dim=model_robot_state_dim,
+        )
     )
     condition_keys = cfg.get("condition_sample_keys")
     condition_keys = (
@@ -1347,17 +1457,11 @@ def _temporal_feature_contract_report(
     forbidden_keys = (
         [str(key) for key in forbidden_keys] if isinstance(forbidden_keys, list) else []
     )
-    dimensions = {
-        "sample_count": len(samples),
-        "source_body_count": int(tensors["source_body_tokens"].shape[2]),
-        "source_body_token_dim": int(tensors["source_body_tokens"].shape[3]),
-        "target_horizon_frames": int(tensors["target_action"].shape[1]),
-        "action_dim": int(tensors["target_action"].shape[2]),
-        "source_skeleton_dim": int(tensors["source_skeleton"].shape[1]),
-        "morphology_dim": int(tensors["morphology"].shape[1]),
-        "robot_state_tensor_dim": int(tensors["robot_state"].shape[1]),
-        "model_robot_state_dim": model_robot_state_dim,
-    }
+    dimensions = _structured_condition_dimensions(
+        tensors,
+        family=family,
+        model_robot_state_dim=model_robot_state_dim,
+    )
     violations = []
     forbidden_declared_condition_keys = sorted(set(condition_keys) & set(forbidden_keys))
     if forbidden_declared_condition_keys:
@@ -1402,8 +1506,23 @@ def _temporal_feature_contract_report(
     robot_state_policy = str(cfg.get("robot_state_policy", "allow_zero"))
     robot_state_abs_sum = float(tensors["robot_state"].abs().sum().detach().cpu())
     robot_state_nonzero = robot_state_abs_sum > 0.0
+    robot_state_tensor_dim = int(tensors["robot_state"].shape[1])
+    robot_state_field_missing_count = sum(1 for sample in samples if "robot_state" not in sample)
     if robot_state_policy in {"disabled", "none"} and model_robot_state_dim != 0:
         violations.append("robot_state_policy=disabled requires model.robot_state_dim=0")
+    if (
+        robot_state_policy in {"require_field", "required", "require_nonzero"}
+        and robot_state_field_missing_count
+    ):
+        violations.append(
+            f"robot_state_policy={robot_state_policy} but robot_state is missing in "
+            f"{robot_state_field_missing_count} samples"
+        )
+    if model_robot_state_dim > 0 and robot_state_tensor_dim != model_robot_state_dim:
+        violations.append(
+            "robot_state tensor width must match model.robot_state_dim="
+            f"{model_robot_state_dim}; got {robot_state_tensor_dim}"
+        )
     if robot_state_policy == "require_nonzero" and not robot_state_nonzero:
         violations.append("robot_state_policy=require_nonzero but robot_state tensor is all zero")
     required_metrics = cfg.get("required_eval_metrics", ())
@@ -1430,11 +1549,13 @@ def _temporal_feature_contract_report(
         "output_contract": output_contract,
         "required_eval_metrics": required_metric_names,
         "robot_state_policy": robot_state_policy,
+        "model_family": family,
     }
     report = {
         "enabled": True,
         "name": str(cfg.get("name", "temporal_diffusion_policy_feature_eval_v1")),
         "status": "pass" if not violations else "fail",
+        "model_family": family,
         "condition_sample_keys": condition_keys,
         "actual_condition_sample_fields": actual_condition_sample_fields,
         "actual_model_condition_tensor_keys": actual_model_condition_tensor_keys,
@@ -1444,6 +1565,7 @@ def _temporal_feature_contract_report(
         "required_eval_metrics": required_metric_names,
         "missing_eval_metrics": missing_metrics,
         "robot_state_policy": robot_state_policy,
+        "robot_state_field_missing_count": robot_state_field_missing_count,
         "robot_state_nonzero": robot_state_nonzero,
         "actor_uid_used_as_input": "actor_uid" in actual_condition_sample_fields,
         "violations": violations,
@@ -1456,14 +1578,90 @@ def _temporal_feature_contract_report(
     return report
 
 
+def _structured_condition_dimensions(
+    tensors: dict[str, Any],
+    *,
+    family: str,
+    model_robot_state_dim: int,
+) -> dict[str, int]:
+    common = {
+        "sample_count": int(tensors["target_action"].shape[0]),
+        "target_horizon_frames": int(tensors["target_action"].shape[1]),
+        "action_dim": int(tensors["target_action"].shape[2]),
+        "robot_state_tensor_dim": int(tensors["robot_state"].shape[1]),
+        "model_robot_state_dim": model_robot_state_dim,
+    }
+    if family == "diffusion_policy_unet_small":
+        reference = tensors["reference_history_tokens"]
+        return {
+            **common,
+            "reference_history_frames": int(reference.shape[1]),
+            "reference_body_count": int(reference.shape[2]),
+            "reference_body_token_dim": int(reference.shape[3]),
+            "source_body_count": int(reference.shape[2]),
+            "source_body_token_dim": int(reference.shape[3]),
+            "source_skeleton_dim": 0,
+            "morphology_dim": 0,
+        }
+    return {
+        **common,
+        "source_body_count": int(tensors["source_body_tokens"].shape[2]),
+        "source_body_token_dim": int(tensors["source_body_tokens"].shape[3]),
+        "source_skeleton_dim": int(tensors["source_skeleton"].shape[1]),
+        "morphology_dim": int(tensors["morphology"].shape[1]),
+    }
+
+
+def _structured_condition_sample_fields(
+    *,
+    family: str,
+    model_robot_state_dim: int,
+) -> tuple[str, ...]:
+    if family == "diffusion_policy_unet_small":
+        fields = list(CAUSAL_UNET_CONDITION_SAMPLE_FIELDS)
+    else:
+        fields = list(TEMPORAL_MODEL_CONDITION_SAMPLE_FIELDS)
+    if model_robot_state_dim > 0:
+        fields.extend(TEMPORAL_ROBOT_STATE_SAMPLE_FIELDS)
+    return tuple(fields)
+
+
+def _structured_model_condition_tensor_keys(
+    *,
+    family: str,
+    model_robot_state_dim: int,
+) -> tuple[str, ...]:
+    if family == "diffusion_policy_unet_small":
+        keys = ["reference_history_tokens", "prev_action"]
+    else:
+        keys = ["source_body_tokens", "source_skeleton", "morphology", "prev_action"]
+    if model_robot_state_dim > 0:
+        keys.append("robot_state")
+    return tuple(keys)
+
+
 def _temporal_condition_sample_fields(*, model_robot_state_dim: int) -> tuple[str, ...]:
+    return _structured_condition_sample_fields(
+        family="temporal_diffusion_policy",
+        model_robot_state_dim=model_robot_state_dim,
+    )
+
+
+def _temporal_model_condition_tensor_keys(*, model_robot_state_dim: int) -> tuple[str, ...]:
+    return _structured_model_condition_tensor_keys(
+        family="temporal_diffusion_policy",
+        model_robot_state_dim=model_robot_state_dim,
+    )
+
+
+def _legacy_temporal_condition_sample_fields(*, model_robot_state_dim: int) -> tuple[str, ...]:
     fields = list(TEMPORAL_MODEL_CONDITION_SAMPLE_FIELDS)
     if model_robot_state_dim > 0:
         fields.extend(TEMPORAL_ROBOT_STATE_SAMPLE_FIELDS)
     return tuple(fields)
 
 
-def _temporal_model_condition_tensor_keys(*, model_robot_state_dim: int) -> tuple[str, ...]:
+def _legacy_temporal_model_condition_tensor_keys(*, model_robot_state_dim: int) -> tuple[str, ...]:
     keys = ["source_body_tokens", "source_skeleton", "morphology", "prev_action"]
     if model_robot_state_dim > 0:
         keys.append("robot_state")
@@ -1483,6 +1681,33 @@ def _source_body_token_sequence(sample: dict[str, Any]) -> list[list[list[float]
             for step in tokens
         ]
     raise ValueError("temporal_diffusion_policy samples require source_body_tokens [T,N,D]")
+
+
+def _reference_history_token_sequence(sample: dict[str, Any]) -> list[list[list[float]]]:
+    tokens = sample.get("reference_history_tokens")
+    if (
+        isinstance(tokens, list)
+        and tokens
+        and all(isinstance(step, list) and step for step in tokens)
+        and all(isinstance(body, list) for step in tokens for body in step)
+    ):
+        return [
+            [[float(value) for value in body] for body in step]
+            for step in tokens
+        ]
+    raise ValueError(
+        "diffusion_policy_unet_small samples require reference_history_tokens [H,N,D]"
+    )
+
+
+def _reference_history_shape(sample: dict[str, Any]) -> tuple[int, int, int]:
+    return _nested_token_shape(_reference_history_token_sequence(sample))
+
+
+def _nested_token_shape(tokens: list[list[list[float]]]) -> tuple[int, int, int]:
+    if not tokens or not tokens[0] or not tokens[0][0]:
+        raise ValueError("token sequence must be non-empty")
+    return len(tokens), len(tokens[0]), len(tokens[0][0])
 
 
 def _source_skeleton_vector(
@@ -1576,15 +1801,30 @@ def _filter_finite_temporal_tensors(
     return filtered_samples, filtered_tensors, report
 
 
-def _temporal_batch_to_device(batch, device) -> dict[str, Any]:
+def _temporal_batch_to_device(
+    batch,
+    device,
+    *,
+    family: str = "temporal_diffusion_policy",
+) -> dict[str, Any]:
     return {
         key: value.to(device, non_blocking=True)
-        for key, value in zip(TEMPORAL_BATCH_KEYS, batch)
+        for key, value in zip(_structured_diffusion_batch_keys(family), batch)
     }
 
 
-def _temporal_training_dataset_tensors(tensors: dict[str, Any]) -> tuple[Any, ...]:
-    return tuple(tensors[key] for key in TEMPORAL_BATCH_KEYS)
+def _temporal_training_dataset_tensors(
+    tensors: dict[str, Any],
+    *,
+    family: str = "temporal_diffusion_policy",
+) -> tuple[Any, ...]:
+    return tuple(tensors[key] for key in _structured_diffusion_batch_keys(family))
+
+
+def _structured_diffusion_batch_keys(family: str) -> tuple[str, ...]:
+    if family == "diffusion_policy_unet_small":
+        return CAUSAL_UNET_BATCH_KEYS
+    return TEMPORAL_BATCH_KEYS
 
 
 def _filter_finite_supervised_tensors(
@@ -1709,7 +1949,7 @@ def _predict_jsonl(
     samples = _load_supervised_samples(samples_jsonl)
     if not samples:
         raise SystemExit(f"no supervised samples found in {samples_jsonl}")
-    if _configured_model_family(config) == "temporal_diffusion_policy":
+    if _is_structured_diffusion_family(_configured_model_family(config)):
         _predict_temporal_diffusion_jsonl(
             torch=torch,
             config=config,
@@ -1858,7 +2098,8 @@ def _predict_temporal_diffusion_jsonl(
         raise SystemExit(f"checkpoint lacks model_state_dict: {checkpoint}")
     model.load_state_dict(state_dict)
     model.eval()
-    tensors = _temporal_condition_tensors(torch, samples)
+    family = _configured_model_family(config)
+    tensors = _structured_diffusion_condition_tensors(torch, samples, family=family)
     samples, tensors, sample_filter = _filter_finite_temporal_tensors(
         torch,
         samples=samples,
