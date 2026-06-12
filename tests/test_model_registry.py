@@ -184,7 +184,7 @@ class ModelRegistryTests(unittest.TestCase):
                     "kernel_size": 3,
                     "n_groups": 4,
                     "diffusion_steps": 4,
-                    "inference_steps": 1,
+                    "inference_steps": 4,
                     "max_action_horizon": 2,
                     "output_mode": "residual_prev_action",
                 }
@@ -211,7 +211,7 @@ class ModelRegistryTests(unittest.TestCase):
             robot_state=robot_state,
             prev_action=prev_action,
             action_horizon=2,
-            steps=1,
+            steps=4,
             start="zeros",
         )
 

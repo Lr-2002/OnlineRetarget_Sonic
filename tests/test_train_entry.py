@@ -150,13 +150,26 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(resolved["model"]["reference_history_frames"], 10)
         self.assertEqual(resolved["model"]["reference_body_count"], 30)
         self.assertEqual(resolved["model"]["reference_body_token_dim"], 15)
-        self.assertEqual(resolved["model"]["robot_state_dim"], 94)
+        self.assertEqual(resolved["model"]["robot_state_dim"], 0)
+        self.assertEqual(resolved["model"]["inference_steps"], 32)
         self.assertEqual(resolved["model"]["output_mode"], "residual_prev_action")
         self.assertEqual(resolved["loss"], {"diffusion_policy_unet_small": 1.0, "denoise": 1.0})
         self.assertEqual(
             train_entry._configured_model_family(resolved),
             "diffusion_policy_unet_small",
         )
+
+    def test_bones_sonic_diffusion_debug_defaults_to_no_robot_state_and_full_steps(self):
+        if train_entry.yaml is None:
+            self.skipTest("PyYAML is not installed")
+
+        resolved = train_entry._load_config(Path("configs/bones_sonic_diffusion_policy_debug.yaml"))
+
+        self.assertEqual(resolved["model"]["family"], "diffusion_policy_unet_small")
+        self.assertEqual(resolved["model"]["robot_state_dim"], 0)
+        self.assertEqual(resolved["model"]["inference_steps"], resolved["model"]["diffusion_steps"])
+        self.assertEqual(resolved["feature_contract"]["robot_state_policy"], "disabled")
+        self.assertNotIn("robot_state", resolved["feature_contract"]["condition_sample_keys"])
 
     def test_config_preset_preserves_old_config_without_preset(self):
         config = {
@@ -988,6 +1001,36 @@ class TrainEntryTests(unittest.TestCase):
 
         self.assertIn("robot_state is missing", str(raised.exception))
 
+    def test_causal_unet_feature_contract_rejects_all_zero_real_robot_state(self):
+        config = _causal_unet_feature_contract_config()
+        config["feature_contract"]["robot_state_policy"] = "require_nonzero"
+        tensors = _causal_unet_tensors(robot_state_abs_sum=0.0)
+
+        with self.assertRaises(SystemExit) as raised:
+            train_entry._temporal_feature_contract_report(
+                config,
+                [_causal_unet_sample()],
+                tensors,
+            )
+
+        self.assertIn("require_nonzero", str(raised.exception))
+        self.assertIn("all zero", str(raised.exception))
+
+    def test_causal_unet_feature_contract_rejects_wrong_width_robot_state(self):
+        config = _causal_unet_feature_contract_config()
+        config["feature_contract"]["robot_state_policy"] = "require_nonzero"
+        tensors = _causal_unet_tensors(robot_state_shape=(1, 3), robot_state_abs_sum=0.6)
+
+        with self.assertRaises(SystemExit) as raised:
+            train_entry._temporal_feature_contract_report(
+                config,
+                [_causal_unet_sample()],
+                tensors,
+            )
+
+        self.assertIn("robot_state tensor width", str(raised.exception))
+        self.assertIn("model.robot_state_dim=4", str(raised.exception))
+
     def test_temporal_training_dataset_keeps_fps_before_target_action(self):
         tensors = {key: _FakeDeviceTensor(key) for key in train_entry.TEMPORAL_BATCH_KEYS}
 
@@ -1115,10 +1158,12 @@ def _preset_switch_config(policy_preset: str) -> dict:
                     "reference_history_frames": 10,
                     "reference_body_count": 30,
                     "reference_body_token_dim": 15,
-                    "robot_state_dim": 94,
+                    "robot_state_dim": 0,
                     "down_dims": [128, 256],
                     "condition_dim": 256,
                     "diffusion_step_embed_dim": 128,
+                    "diffusion_steps": 32,
+                    "inference_steps": 32,
                     "output_mode": "residual_prev_action",
                     "output": "g1_joint_position_future_window",
                 },
@@ -1295,10 +1340,14 @@ def _causal_unet_feature_contract_config() -> dict:
     }
 
 
-def _causal_unet_tensors() -> dict:
+def _causal_unet_tensors(
+    *,
+    robot_state_shape: tuple[int, ...] = (1, 4),
+    robot_state_abs_sum: float = 0.6,
+) -> dict:
     return {
         "reference_history_tokens": _FakeTemporalTensor((1, 5, 2, 3)),
-        "robot_state": _FakeTemporalTensor((1, 4), abs_sum=0.6),
+        "robot_state": _FakeTemporalTensor(robot_state_shape, abs_sum=robot_state_abs_sum),
         "prev_action": _FakeTemporalTensor((1, 2)),
         "fps": _FakeTemporalTensor((1,)),
         "target_action": _FakeTemporalTensor((1, 2, 2)),

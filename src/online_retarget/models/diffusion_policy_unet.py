@@ -79,7 +79,7 @@ class DiffusionPolicyUNetSmall(nn.Module):
         groups: int = 8,
         cond_predict_scale: bool = True,
         diffusion_steps: int = 32,
-        inference_steps: int | None = 8,
+        inference_steps: int | None = None,
         beta_start: float = 1.0e-4,
         beta_end: float = 2.0e-2,
         max_action_horizon: int = 64,
@@ -316,7 +316,12 @@ class DiffusionPolicyUNetSmall(nn.Module):
             )
         else:
             raise ValueError(f"unsupported diffusion start: {start}")
-        solve_steps = max(1, min(self.diffusion_steps, int(steps or self.inference_steps)))
+        solve_steps = int(steps or self.inference_steps)
+        if solve_steps != self.diffusion_steps:
+            raise ValueError(
+                "TinyDDPMScheduler sampling requires inference_steps == diffusion_steps; "
+                "skipped timestep updates are not implemented"
+            )
         indices = torch.linspace(
             self.diffusion_steps - 1,
             0,
@@ -447,18 +452,16 @@ class DiffusionPolicyUNetSmall(nn.Module):
         if self.robot_state_dim <= 0:
             return reference.new_zeros((reference.shape[0], 0))
         if robot_state is None:
-            return reference.new_zeros((reference.shape[0], self.robot_state_dim))
+            raise ValueError("robot_state is required when robot_state_dim > 0")
         vector = robot_state.to(device=reference.device, dtype=reference.dtype).reshape(
             reference.shape[0],
             -1,
         )
-        if vector.shape[-1] < self.robot_state_dim:
-            padding = reference.new_zeros(
-                (reference.shape[0], self.robot_state_dim - vector.shape[-1])
+        if vector.shape[-1] != self.robot_state_dim:
+            raise ValueError(
+                f"robot_state width must match robot_state_dim={self.robot_state_dim}; "
+                f"got {vector.shape[-1]}"
             )
-            vector = torch.cat([vector, padding], dim=-1)
-        elif vector.shape[-1] > self.robot_state_dim:
-            vector = vector[:, : self.robot_state_dim]
         return vector
 
 

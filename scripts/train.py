@@ -1506,13 +1506,22 @@ def _temporal_feature_contract_report(
     robot_state_policy = str(cfg.get("robot_state_policy", "allow_zero"))
     robot_state_abs_sum = float(tensors["robot_state"].abs().sum().detach().cpu())
     robot_state_nonzero = robot_state_abs_sum > 0.0
+    robot_state_tensor_dim = int(tensors["robot_state"].shape[1])
     robot_state_field_missing_count = sum(1 for sample in samples if "robot_state" not in sample)
     if robot_state_policy in {"disabled", "none"} and model_robot_state_dim != 0:
         violations.append("robot_state_policy=disabled requires model.robot_state_dim=0")
-    if robot_state_policy in {"require_field", "required"} and robot_state_field_missing_count:
+    if (
+        robot_state_policy in {"require_field", "required", "require_nonzero"}
+        and robot_state_field_missing_count
+    ):
         violations.append(
-            "robot_state_policy=require_field but robot_state is missing in "
+            f"robot_state_policy={robot_state_policy} but robot_state is missing in "
             f"{robot_state_field_missing_count} samples"
+        )
+    if model_robot_state_dim > 0 and robot_state_tensor_dim != model_robot_state_dim:
+        violations.append(
+            "robot_state tensor width must match model.robot_state_dim="
+            f"{model_robot_state_dim}; got {robot_state_tensor_dim}"
         )
     if robot_state_policy == "require_nonzero" and not robot_state_nonzero:
         violations.append("robot_state_policy=require_nonzero but robot_state tensor is all zero")

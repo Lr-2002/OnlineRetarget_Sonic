@@ -41,7 +41,7 @@ policy_presets:
       reference_history_frames: 10
       reference_body_count: 30
       reference_body_token_dim: 15
-      robot_state_dim: 94
+      robot_state_dim: 0
       down_dims: [128, 256]
       condition_dim: 256
       diffusion_step_embed_dim: 128
@@ -49,7 +49,7 @@ policy_presets:
       n_groups: 8
       cond_predict_scale: true
       diffusion_steps: 32
-      inference_steps: 8
+      inference_steps: 32
       inference_start: zeros
       max_action_horizon: 10
       output_mode: residual_prev_action
@@ -63,7 +63,6 @@ policy_presets:
       name: diffusion_policy_unet_small_strict_causal_p0
       condition_sample_keys:
         - reference_history_tokens
-        - robot_state
         - prev_target_joints
         - previous_target_joints
         - prev_g1_joints
@@ -75,7 +74,7 @@ policy_presets:
         - target_frame_indices
         - target_g1_path
         - actor_uid
-      robot_state_policy: require_field
+      robot_state_policy: disabled
       expected:
         reference_history_frames: 10
         reference_body_count: 30
@@ -85,7 +84,7 @@ policy_presets:
         source_body_token_dim: 15
         source_skeleton_dim: 0
         morphology_dim: 0
-        robot_state_dim: 94
+        robot_state_dim: 0
         action_dim: 29
       required_eval_metrics:
         - joint_rmse

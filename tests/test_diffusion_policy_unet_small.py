@@ -22,7 +22,7 @@ class DiffusionPolicyUNetSmallTests(unittest.TestCase):
             kernel_size=3,
             groups=4,
             diffusion_steps=4,
-            inference_steps=2,
+            inference_steps=4,
             max_action_horizon=4,
             output_mode="residual_prev_action",
         )
@@ -53,7 +53,7 @@ class DiffusionPolicyUNetSmallTests(unittest.TestCase):
             robot_state=robot_state,
             prev_action=prev_action,
             action_horizon=4,
-            steps=1,
+            steps=4,
             start="zeros",
         )
 
@@ -90,4 +90,68 @@ class DiffusionPolicyUNetSmallTests(unittest.TestCase):
                 torch.zeros(1, 2, 3),
                 torch.zeros(1, 2, 2),
                 torch.zeros(1, dtype=torch.long),
+            )
+
+    def test_rejects_skipped_timestep_sampling(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+        from online_retarget.models.diffusion_policy_unet import DiffusionPolicyUNetSmall
+
+        model = DiffusionPolicyUNetSmall(
+            action_dim=2,
+            reference_body_token_dim=3,
+            reference_history_frames=5,
+            reference_body_count=2,
+            robot_state_dim=0,
+            down_dims=(8,),
+            condition_dim=8,
+            diffusion_step_embed_dim=4,
+            diffusion_steps=4,
+            inference_steps=4,
+            max_action_horizon=2,
+            output_mode="absolute",
+        )
+
+        with self.assertRaisesRegex(ValueError, "inference_steps == diffusion_steps"):
+            model.sample(
+                torch.zeros(1, 5, 2, 3),
+                action_horizon=2,
+                steps=2,
+                start="zeros",
+            )
+
+    def test_requires_exact_robot_state_when_enabled(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+        from online_retarget.models.diffusion_policy_unet import DiffusionPolicyUNetSmall
+
+        model = DiffusionPolicyUNetSmall(
+            action_dim=2,
+            reference_body_token_dim=3,
+            reference_history_frames=5,
+            reference_body_count=2,
+            robot_state_dim=4,
+            down_dims=(8,),
+            condition_dim=8,
+            diffusion_step_embed_dim=4,
+            diffusion_steps=4,
+            max_action_horizon=2,
+            output_mode="absolute",
+        )
+        reference_history_tokens = torch.zeros(1, 5, 2, 3)
+        noisy_action = torch.zeros(1, 2, 2)
+        timesteps = torch.zeros(1, dtype=torch.long)
+
+        with self.assertRaisesRegex(ValueError, "robot_state is required"):
+            model(reference_history_tokens, noisy_action, timesteps)
+        with self.assertRaisesRegex(ValueError, "robot_state width"):
+            model(
+                reference_history_tokens,
+                noisy_action,
+                timesteps,
+                robot_state=torch.zeros(1, 3),
             )
