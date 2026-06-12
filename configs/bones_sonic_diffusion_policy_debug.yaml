@@ -141,3 +141,12 @@ visualization:
   num_samples: 4
   max_joints: 8
   wandb_upload: true
+  capsule:
+    enabled: true
+    model_xml: /mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training/gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml
+    output_dir: capsule_preview
+    num_samples: 2
+    max_frames: 48
+    width: 640
+    height: 360
+    fps: 50.0

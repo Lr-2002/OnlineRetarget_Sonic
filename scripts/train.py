@@ -10,6 +10,7 @@ import html
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 from typing import Any
 
@@ -1843,6 +1844,11 @@ def _write_visualization_artifacts(
     _write_visualization_svg(svg_path, rows)
     html_path = artifact_dir / "trajectory_preview.html"
     _write_visualization_html(html_path, rows, svg_path=svg_path)
+    capsule = _write_capsule_visualization_artifacts(
+        visual_cfg=visual_cfg,
+        samples=samples,
+        artifact_dir=artifact_dir,
+    )
     summary_path = artifact_dir / "visual_manifest.json"
     eval_payload = eval_result.to_dict() if eval_result is not None else {}
     summary = {
@@ -1855,6 +1861,7 @@ def _write_visualization_artifacts(
         "trajectory_csv": str(trajectory_csv),
         "trajectory_svg": str(svg_path),
         "trajectory_html": str(html_path),
+        "capsule_visualization": capsule,
         "summary_json": str(summary_path),
         "sample_count": len(samples),
         "trajectory_row_count": len(rows),
@@ -1925,6 +1932,310 @@ def _visualization_rows(samples: list[dict[str, Any]], *, max_joints: int) -> li
                     }
                 )
     return rows
+
+
+def _write_capsule_visualization_artifacts(
+    *,
+    visual_cfg: dict[str, Any],
+    samples: list[dict[str, Any]],
+    artifact_dir: Path,
+) -> dict[str, Any]:
+    capsule_cfg = visual_cfg.get("capsule", {})
+    if capsule_cfg is True:
+        capsule_cfg = {"enabled": True}
+    if not isinstance(capsule_cfg, dict) or not bool(capsule_cfg.get("enabled", False)):
+        return {"enabled": False}
+    capsule_dir = artifact_dir / str(capsule_cfg.get("output_dir") or "capsule_preview")
+    capsule_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = capsule_dir / "capsule_manifest.json"
+    html_path = capsule_dir / "capsule_preview.html"
+    num_samples = max(1, int(capsule_cfg.get("num_samples", visual_cfg.get("num_samples", 1))))
+    max_frames = max(0, int(capsule_cfg.get("max_frames", capsule_cfg.get("render_max_frames", 120))))
+    width = max(1, int(capsule_cfg.get("width", capsule_cfg.get("render_width", 640))))
+    height = max(1, int(capsule_cfg.get("height", capsule_cfg.get("render_height", 360))))
+    fps = float(capsule_cfg.get("fps", 50.0))
+    model_xml = _optional_path(capsule_cfg.get("model_xml") or visual_cfg.get("g1_model_xml"))
+    selected_samples = samples[:num_samples]
+    sample_reports: list[dict[str, Any]] = []
+    render_statuses: list[str] = []
+    deps: dict[str, Any] | None = None
+    deps_error = ""
+    if model_xml is None or not model_xml.exists():
+        deps_error = f"g1_model_xml is missing: {model_xml}" if model_xml else "g1_model_xml is not configured"
+    else:
+        try:
+            deps = _load_route_b_capsule_render_deps()
+        except Exception as exc:
+            deps_error = f"Route B capsule render dependencies are unavailable: {exc}"
+
+    model = None
+    edges: Any = None
+    render_config = None
+    if deps is not None and model_xml is not None:
+        try:
+            model = deps["load_g1_kinematic_model"](model_xml)
+            edges = deps["_g1_capsule_edges"](model)
+            render_config = deps["ReviewClipExportConfig"](
+                render_max_frames=max_frames,
+                render_width=width,
+                render_height=height,
+                fps=fps,
+                model_xml=model_xml,
+            )
+        except Exception as exc:
+            deps_error = f"Could not initialize Route B G1 capsule renderer: {exc}"
+            deps = None
+
+    for index, sample in enumerate(selected_samples):
+        sample_dir = capsule_dir / f"{index:02d}_{_safe_visual_name(str(sample.get('sample_id', 'sample')))}"
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        predicted_sequence = _joint_sequence_for_capsules(sample.get("predicted_joints"), max_frames=max_frames)
+        target_sequence = _joint_sequence_for_capsules(sample.get("target_joints"), max_frames=max_frames)
+        trajectory_path = sample_dir / "joint_trajectory.json"
+        trajectory_payload = {
+            "sample_id": str(sample.get("sample_id", "")),
+            "sequence_id": str(sample.get("sequence_id", "")),
+            "fps": fps,
+            "target_joint_names": sample.get("target_joint_names", []),
+            "predicted_joints": predicted_sequence,
+            "target_joints": target_sequence,
+            "note": "Route B capsule preview uses G1 FK with root fixed at origin; it is a train/eval visualization artifact, not Isaac Lab rollout evidence.",
+        }
+        trajectory_path.write_text(
+            json.dumps(trajectory_payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        sample_report: dict[str, Any] = {
+            "sample_id": str(sample.get("sample_id", "")),
+            "sequence_id": str(sample.get("sequence_id", "")),
+            "trajectory_json": str(trajectory_path),
+            "predicted_frames": len(predicted_sequence),
+            "target_frames": len(target_sequence),
+            "target_video": "",
+            "predicted_video": "",
+            "target_render": {"status": "blocked", "message": deps_error or "capsule renderer unavailable"},
+            "predicted_render": {"status": "blocked", "message": deps_error or "capsule renderer unavailable"},
+        }
+        if deps is not None and model is not None and render_config is not None and edges is not None:
+            sample_report["target_render"] = _render_route_b_capsule_sequence(
+                deps=deps,
+                model=model,
+                edges=edges,
+                render_config=render_config,
+                sequence=target_sequence,
+                video_path=sample_dir / "target_g1_3d_capsules.mp4",
+                label="Route B target G1 FK capsules",
+                capsule_color=(61, 107, 160),
+                key_color=(139, 91, 41),
+            )
+            sample_report["predicted_render"] = _render_route_b_capsule_sequence(
+                deps=deps,
+                model=model,
+                edges=edges,
+                render_config=render_config,
+                sequence=predicted_sequence,
+                video_path=sample_dir / "predicted_g1_3d_capsules.mp4",
+                label="Route B predicted G1 FK capsules",
+                capsule_color=(142, 77, 117),
+                key_color=(122, 89, 35),
+            )
+            for key, render_key in (
+                ("target_video", "target_render"),
+                ("predicted_video", "predicted_render"),
+            ):
+                render = sample_report[render_key]
+                if isinstance(render, dict) and render.get("status") == "ok":
+                    sample_report[key] = str(render.get("video_path", ""))
+        for render_key in ("target_render", "predicted_render"):
+            render = sample_report.get(render_key)
+            if isinstance(render, dict):
+                render_statuses.append(str(render.get("status", "unknown")))
+        sample_reports.append(sample_report)
+
+    if not selected_samples:
+        status = "empty"
+    elif render_statuses and all(status == "ok" for status in render_statuses):
+        status = "ok"
+    elif any(status == "ok" for status in render_statuses):
+        status = "partial"
+    else:
+        status = "blocked"
+    manifest = {
+        "enabled": True,
+        "artifact_version": "route_b_g1_capsule_visualization_v1",
+        "status": status,
+        "message": deps_error,
+        "backend": "online_retarget.data.review_clips._render_capsule_3d_video",
+        "sonic_semantics": [
+            "software_perspective_capsules",
+            "g1_fk_body_capsule_edges",
+            "target_vs_predicted_route_b_joint_sequences",
+        ],
+        "model_xml": str(model_xml) if model_xml is not None else "",
+        "output_dir": str(capsule_dir),
+        "manifest_json": str(manifest_path),
+        "html": str(html_path),
+        "num_samples": num_samples,
+        "max_frames": max_frames,
+        "width": width,
+        "height": height,
+        "fps": fps,
+        "samples": sample_reports,
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_capsule_visualization_html(html_path, manifest)
+    return manifest
+
+
+def _load_route_b_capsule_render_deps() -> dict[str, Any]:
+    from online_retarget.data.review_clips import (
+        ReviewClipExportConfig,
+        _g1_capsule_edges,
+        _g1_capsule_frames,
+        _render_capsule_3d_video,
+    )
+    from online_retarget.data.g1_quality import load_g1_kinematic_model
+
+    return {
+        "ReviewClipExportConfig": ReviewClipExportConfig,
+        "_g1_capsule_edges": _g1_capsule_edges,
+        "_g1_capsule_frames": _g1_capsule_frames,
+        "_render_capsule_3d_video": _render_capsule_3d_video,
+        "load_g1_kinematic_model": load_g1_kinematic_model,
+    }
+
+
+def _render_route_b_capsule_sequence(
+    *,
+    deps: dict[str, Any],
+    model: Any,
+    edges: Any,
+    render_config: Any,
+    sequence: list[list[float]],
+    video_path: Path,
+    label: str,
+    capsule_color: tuple[int, int, int],
+    key_color: tuple[int, int, int],
+) -> dict[str, Any]:
+    if not sequence:
+        return {"status": "blocked", "message": "No Route B joint frames were available."}
+    try:
+        trajectory = _g1_joint_sequence_to_trajectory(sequence)
+        frames = deps["_g1_capsule_frames"](model, trajectory)
+        return deps["_render_capsule_3d_video"](
+            frames=frames,
+            edges=edges,
+            video_path=video_path,
+            config=render_config,
+            label=label,
+            up_axis=2,
+            capsule_color=capsule_color,
+            key_color=key_color,
+        )
+    except Exception as exc:
+        return {"status": "failed", "message": f"Route B capsule render failed: {exc}"}
+
+
+def _g1_joint_sequence_to_trajectory(sequence: list[list[float]]) -> list[dict[str, Any]]:
+    from online_retarget.data.bones_seed import G1_JOINT_COLUMNS
+
+    trajectory: list[dict[str, Any]] = []
+    for frame, joints in enumerate(sequence):
+        trajectory.append(
+            {
+                "frame": frame,
+                "root": [0.0, 0.0, 0.0],
+                "root_euler": [0.0, 0.0, 0.0],
+                "joints": {
+                    column: float(joints[index]) if index < len(joints) else 0.0
+                    for index, column in enumerate(G1_JOINT_COLUMNS)
+                },
+            }
+        )
+    return trajectory
+
+
+def _joint_sequence_for_capsules(value: Any, *, max_frames: int) -> list[list[float]]:
+    if not isinstance(value, list):
+        return []
+    if value and all(isinstance(row, list) for row in value):
+        rows = value
+    elif all(isinstance(item, (int, float)) for item in value):
+        rows = [value]
+    else:
+        return []
+    if max_frames > 0:
+        rows = rows[:max_frames]
+    sequence: list[list[float]] = []
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        try:
+            sequence.append([float(item) for item in row])
+        except (TypeError, ValueError):
+            continue
+    return sequence
+
+
+def _write_capsule_visualization_html(path: Path, manifest: dict[str, Any]) -> None:
+    sample_rows = []
+    for sample in manifest.get("samples", []):
+        if not isinstance(sample, dict):
+            continue
+        target_video = _video_tag(sample.get("target_video", ""), base_dir=path.parent)
+        predicted_video = _video_tag(sample.get("predicted_video", ""), base_dir=path.parent)
+        target_render = sample.get("target_render") if isinstance(sample.get("target_render"), dict) else {}
+        predicted_render = sample.get("predicted_render") if isinstance(sample.get("predicted_render"), dict) else {}
+        sample_rows.append(
+            "<section>"
+            f"<h2>{_html_escape(sample.get('sample_id', 'sample'))}</h2>"
+            f"<p>target: {_html_escape(target_render.get('status', ''))} - {_html_escape(target_render.get('message', ''))}</p>"
+            f"{target_video}"
+            f"<p>predicted: {_html_escape(predicted_render.get('status', ''))} - {_html_escape(predicted_render.get('message', ''))}</p>"
+            f"{predicted_video}"
+            "</section>"
+        )
+    path.write_text(
+        "\n".join(
+            [
+                "<!doctype html>",
+                '<html><head><meta charset="utf-8"><title>Route B 3D capsule preview</title></head>',
+                "<body>",
+                "<h1>Route B 3D capsule preview</h1>",
+                f"<p>Status: {_html_escape(manifest.get('status', ''))}</p>",
+                f"<p>Backend: {_html_escape(manifest.get('backend', ''))}</p>",
+                f"<p>Model XML: {_html_escape(manifest.get('model_xml', ''))}</p>",
+                *sample_rows,
+                "</body></html>",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _video_tag(path_text: Any, *, base_dir: Path) -> str:
+    if not path_text:
+        return ""
+    try:
+        src = os.path.relpath(Path(str(path_text)), base_dir)
+    except ValueError:
+        src = str(path_text)
+    return (
+        '<video controls muted playsinline width="640" '
+        f'src="{_html_escape(src)}"></video>'
+    )
+
+
+def _optional_path(value: Any) -> Path | None:
+    if value in (None, ""):
+        return None
+    return Path(str(value)).expanduser()
+
+
+def _safe_visual_name(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._")
+    return safe[:96] or "sample"
 
 
 def _write_visualization_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -2168,15 +2479,30 @@ def _wandb_log_visualization(run, visualization: dict[str, Any], config: dict[st
         return
     if not bool(_nested_get(config, ("visualization", "wandb_upload"), False)):
         return
-    for key in ("summary_json", "trajectory_csv", "trajectory_svg", "trajectory_html"):
-        path_text = visualization.get(key)
+    capsule = visualization.get("capsule_visualization", {})
+    if not isinstance(capsule, dict):
+        capsule = {}
+    for key in (
+        "summary_json",
+        "trajectory_csv",
+        "trajectory_svg",
+        "trajectory_html",
+        "manifest_json",
+        "html",
+    ):
+        source = capsule if key in {"manifest_json", "html"} else visualization
+        path_text = source.get(key)
         if path_text:
             _wandb_save(run, Path(str(path_text)))
+    for video_path in _capsule_video_paths(capsule):
+        _wandb_save(run, video_path)
     payload = {
         "visualization/status": visualization.get("status", ""),
         "visualization/summary_json": visualization.get("summary_json", ""),
         "visualization/sample_count": visualization.get("sample_count", 0),
         "visualization/trajectory_row_count": visualization.get("trajectory_row_count", 0),
+        "visualization/capsule_status": capsule.get("status", ""),
+        "visualization/capsule_manifest": capsule.get("manifest_json", ""),
     }
     html_path = Path(str(visualization.get("trajectory_html", "")))
     if html_path.exists():
@@ -2188,7 +2514,33 @@ def _wandb_log_visualization(run, visualization: dict[str, Any], config: dict[st
             )
         except Exception:
             pass
+    capsule_html = Path(str(capsule.get("html", "")))
+    if capsule_html.exists():
+        try:
+            import wandb
+
+            payload["visualization/capsule_preview"] = wandb.Html(
+                capsule_html.read_text(encoding="utf-8")
+            )
+            for index, video_path in enumerate(_capsule_video_paths(capsule)[:4]):
+                payload[f"visualization/capsule_video_{index}"] = wandb.Video(str(video_path))
+        except Exception:
+            pass
     _wandb_log(run, payload)
+
+
+def _capsule_video_paths(capsule: dict[str, Any]) -> list[Path]:
+    paths: list[Path] = []
+    for sample in capsule.get("samples", []):
+        if not isinstance(sample, dict):
+            continue
+        for key in ("target_video", "predicted_video"):
+            path_text = sample.get(key)
+            if path_text:
+                path = Path(str(path_text))
+                if path.exists():
+                    paths.append(path)
+    return paths
 
 
 def _wandb_finish(run) -> None:
