@@ -46,6 +46,15 @@ TEMPORAL_FORBIDDEN_CONDITION_SAMPLE_FIELDS = (
     "target_g1_path",
     "actor_uid",
 )
+TEMPORAL_BATCH_KEYS = (
+    "source_body_tokens",
+    "source_skeleton",
+    "morphology",
+    "robot_state",
+    "prev_action",
+    "fps",
+    "target_action",
+)
 
 
 def main() -> None:
@@ -876,14 +885,7 @@ def _train_temporal_diffusion_jsonl(
     output_dir.mkdir(parents=True, exist_ok=True)
     log_every = max(1, int(_nested_get(config, ("train", "log_every"), 100)))
     steps = min(max_steps, max_steps if max_steps > 0 else 1)
-    dataset = torch.utils.data.TensorDataset(
-        tensors["source_body_tokens"],
-        tensors["source_skeleton"],
-        tensors["morphology"],
-        tensors["robot_state"],
-        tensors["prev_action"],
-        tensors["target_action"],
-    )
+    dataset = torch.utils.data.TensorDataset(*_temporal_training_dataset_tensors(tensors))
     sampler = None
     if runtime["distributed"]:
         sampler = torch.utils.data.distributed.DistributedSampler(
@@ -1575,19 +1577,14 @@ def _filter_finite_temporal_tensors(
 
 
 def _temporal_batch_to_device(batch, device) -> dict[str, Any]:
-    keys = (
-        "source_body_tokens",
-        "source_skeleton",
-        "morphology",
-        "robot_state",
-        "prev_action",
-        "fps",
-        "target_action",
-    )
     return {
         key: value.to(device, non_blocking=True)
-        for key, value in zip(keys, batch)
+        for key, value in zip(TEMPORAL_BATCH_KEYS, batch)
     }
+
+
+def _temporal_training_dataset_tensors(tensors: dict[str, Any]) -> tuple[Any, ...]:
+    return tuple(tensors[key] for key in TEMPORAL_BATCH_KEYS)
 
 
 def _filter_finite_supervised_tensors(
