@@ -33,6 +33,60 @@ class TrainEntryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 train_entry._load_supervised_samples(samples)
 
+    def test_load_supervised_samples_shards_ddp_without_parsing_other_ranks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            samples = Path(tmp) / "samples.jsonl"
+            lines = [
+                _sample_json("s0"),
+                _sample_json("s1"),
+                "{not-json-on-other-rank}",
+                _sample_json("s3"),
+                _sample_json("s4"),
+                _sample_json("s5"),
+                _sample_json("s6"),
+                _sample_json("s7"),
+            ]
+            samples.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            loaded, report = train_entry._load_supervised_samples_with_report(
+                samples,
+                rank=1,
+                world_size=4,
+            )
+
+        self.assertEqual([sample["sample_id"] for sample in loaded], ["s1", "s5"])
+        self.assertTrue(report["sharded"])
+        self.assertEqual(report["assignment"], "nonempty_jsonl_row_index_mod_world_size")
+        self.assertEqual(report["total_nonempty_rows_seen"], 8)
+        self.assertEqual(report["parsed_count"], 2)
+        self.assertEqual(report["materialized_count"], 2)
+        self.assertEqual(report["skipped_by_shard_count"], 6)
+
+    def test_load_supervised_samples_drops_uneven_ddp_tail_for_equal_rank_lengths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            samples = Path(tmp) / "samples.jsonl"
+            samples.write_text(
+                "\n".join(_sample_json(f"s{index}") for index in range(8)) + "\n",
+                encoding="utf-8",
+            )
+
+            shards = [
+                train_entry._load_supervised_samples_with_report(
+                    samples,
+                    rank=rank,
+                    world_size=3,
+                )
+                for rank in range(3)
+            ]
+
+        self.assertEqual([[sample["sample_id"] for sample in loaded] for loaded, _report in shards], [
+            ["s0", "s3"],
+            ["s1", "s4"],
+            ["s2", "s5"],
+        ])
+        self.assertEqual([report["materialized_count"] for _loaded, report in shards], [2, 2, 2])
+        self.assertEqual([report["dropped_uneven_tail_count"] for _loaded, report in shards], [1, 1, 0])
+
     def test_write_prediction_jsonl_matches_eval_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "predictions.jsonl"
@@ -918,6 +972,16 @@ def _write_policy_audit(
         )
         + "\n",
         encoding="utf-8",
+    )
+
+
+def _sample_json(sample_id: str) -> str:
+    return json.dumps(
+        {
+            "sample_id": sample_id,
+            "observation": [0.0, 1.0],
+            "target_joints": [0.5],
+        }
     )
 
 
