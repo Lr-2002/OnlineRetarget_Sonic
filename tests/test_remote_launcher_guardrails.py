@@ -51,6 +51,11 @@ FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_2048_1024_512_TEMPORAL0P1_CONF
     / "configs"
     / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_2048_1024_512_temporal0p1_1m_4gpu.json"
 )
+FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_BASE_UP_CONFIG = (
+    REPO_ROOT
+    / "configs"
+    / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_base_up_4gpu.json"
+)
 FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS = (
     FINAL_KIN_WALK_DATA_PACKAGE_A_ONLY_CONFIG,
     FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CONFIG,
@@ -63,6 +68,9 @@ FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CAPACITY_CONFIGS = (
 FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_TEMPORAL_WEIGHT_CONFIGS = (
     FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_MLP_512_1024_2048_1024_512_TEMPORAL0P1_CONFIG,
 )
+FINAL_KIN_WALK_DATA_PACKAGE_INPUT_ABLATION_CONFIGS = (
+    FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_BASE_UP_CONFIG,
+)
 FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_FIXED_EVAL_CONFIGS = (
     *FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CAPACITY_CONFIGS,
     *FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_TEMPORAL_WEIGHT_CONFIGS,
@@ -71,6 +79,7 @@ FINAL_KIN_WALK_DATA_PACKAGE_FORMAL_CONFIGS = (
     *FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS,
     *FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CAPACITY_CONFIGS,
     *FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_TEMPORAL_WEIGHT_CONFIGS,
+    *FINAL_KIN_WALK_DATA_PACKAGE_INPUT_ABLATION_CONFIGS,
 )
 FINAL_KIN_WALK_PACKAGE_INDICATOR = (
     "/mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/"
@@ -120,6 +129,11 @@ FINAL_KIN_WALK_EXPECTED_DIMS = {
     "z_skel": 104,
     "model_input": 975,
     "target": 670,
+}
+FINAL_KIN_WALK_BASE_UP_EXPECTED_DIMS = {
+    **FINAL_KIN_WALK_EXPECTED_DIMS,
+    "motion_token": 874,
+    "model_input": 978,
 }
 A0_FOUR_GPU_CONFIGS = (
     REPO_ROOT / "configs" / "sonic_kin_soma_motionlib_a0_no_skeleton_encoder_uniform_4gpu.json",
@@ -574,6 +588,59 @@ class SupervisedSomaMotionlibFourGpuConfigTests(unittest.TestCase):
             [*a_only["losses"]["auxiliary"], "g1_kin_command_ab_overlap_mse"],
         )
 
+    def test_final_kin_walk_a_plus_b_base_up_extends_only_input_contract(self) -> None:
+        base = json.loads(FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_CONFIG.read_text(encoding="utf-8"))
+        candidate = json.loads(FINAL_KIN_WALK_DATA_PACKAGE_A_PLUS_B_BASE_UP_CONFIG.read_text(encoding="utf-8"))
+        preserved_keys = (
+            "source_repo",
+            "source_rev",
+            "input_data",
+            "target_decoder",
+            "decoder_targets",
+            "target_features",
+            "losses",
+            "split",
+            "normalization",
+            "model",
+            "training",
+            "visual_validation",
+            "metric_validation",
+            "evaluation_cohort",
+            "runtime",
+            "expected_artifacts",
+        )
+        for key in preserved_keys:
+            if key == "training":
+                base_training = dict(base[key])
+                candidate_training = dict(candidate[key])
+                self.assertEqual(candidate_training.pop("loss_mode"), "a_plus_b")
+                self.assertEqual(candidate_training, base_training)
+            else:
+                self.assertEqual(candidate[key], base[key], key)
+
+        self.assertEqual(candidate["features"]["expected_dims"], FINAL_KIN_WALK_BASE_UP_EXPECTED_DIMS)
+        base_features = dict(base["features"])
+        candidate_features = dict(candidate["features"])
+        self.assertEqual(candidate_features.pop("previous_g1_base_up_condition"), True)
+        self.assertNotIn("previous_g1_base_up_condition", base_features)
+        self.assertEqual(
+            candidate_features.pop("motion_feature"),
+            base_features.pop("motion_feature") + "_plus_previous_g1_base_up",
+        )
+        self.assertEqual(candidate_features.pop("expected_dims"), FINAL_KIN_WALK_BASE_UP_EXPECTED_DIMS)
+        self.assertEqual(base_features.pop("expected_dims"), FINAL_KIN_WALK_EXPECTED_DIMS)
+        self.assertEqual(candidate_features, base_features)
+        self.assertEqual(
+            candidate["source_features"],
+            [
+                *base["source_features"][:-1],
+                "previous_g1_base_up_condition",
+                base["source_features"][-1],
+            ],
+        )
+        self.assertIn("a_plus_b_base_up", candidate["validation_command"])
+        self.assertIn("previous-base-up", candidate["wandb"]["tags"])
+
     def test_final_kin_walk_package_configs_preserve_shared_metric_eval_cohort(self) -> None:
         for path in FINAL_KIN_WALK_DATA_PACKAGE_CONFIGS:
             with self.subTest(path=path.name):
@@ -851,10 +918,12 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
         self.assertIn("LR-273 temporal-consistency loss-on treatment", text)
         self.assertIn("LR-274 loss-off baseline", text)
         self.assertIn("LR-280 kin/walk data-package smoke targets", text)
+        self.assertIn("LR-313 input-ablation candidate", text)
         self.assertIn("configs/sonic_kin_soma_motionlib_proportional_4gpu.json", text)
         self.assertIn("configs/sonic_kin_soma_motionlib_proportional_loss_off_baseline_4gpu.json", text)
         self.assertIn("configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_only_4gpu.json", text)
         self.assertIn("configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_4gpu.json", text)
+        self.assertIn("configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_base_up_4gpu.json", text)
         self.assertIn(
             "configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_512_1m_4gpu.json",
             text,

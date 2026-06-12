@@ -9,6 +9,8 @@ PYTHON_BIN="${PYTHON_BIN:-/workspace/isaaclab/_isaac_sim/python.sh}"
 # Final LR-280 kin/walk data-package smoke targets:
 # CONFIG=configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_only_4gpu.json scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
 # CONFIG=configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_4gpu.json scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
+# LR-313 input-ablation candidate:
+# CONFIG=configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_base_up_4gpu.json scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
 # LR-290 A+B non-uniform MLP capacity experiments:
 # CONFIG=configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_512_1m_4gpu.json scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
 # CONFIG=configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_1024_512_1m_4gpu.json scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
