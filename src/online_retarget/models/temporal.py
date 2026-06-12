@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import torch
 from torch import nn
@@ -473,6 +474,7 @@ class TemporalDiffusionPolicyRetargeter(nn.Module):
         beta_start: float = 1.0e-4,
         beta_end: float = 2.0e-2,
         max_horizon: int = 64,
+        output_mode: str = "absolute",
     ) -> None:
         super().__init__()
         if diffusion_steps <= 0:
@@ -481,6 +483,8 @@ class TemporalDiffusionPolicyRetargeter(nn.Module):
             raise ValueError("action_dim must be positive")
         if beta_start <= 0.0 or beta_end <= 0.0 or beta_end <= beta_start:
             raise ValueError("expected 0 < beta_start < beta_end")
+        if output_mode not in {"absolute", "residual_prev_action"}:
+            raise ValueError("output_mode must be absolute or residual_prev_action")
         self.action_dim = action_dim
         self.diffusion_steps = diffusion_steps
         self.inference_steps = inference_steps or diffusion_steps
@@ -488,6 +492,7 @@ class TemporalDiffusionPolicyRetargeter(nn.Module):
         self.source_skeleton_dim = source_skeleton_dim
         self.morphology_dim = morphology_dim
         self.robot_state_dim = robot_state_dim
+        self.output_mode = output_mode
 
         self.body_encoder = nn.Sequential(
             nn.Linear(source_body_token_dim, d_model),
@@ -570,18 +575,21 @@ class TemporalDiffusionPolicyRetargeter(nn.Module):
         prev_action: torch.Tensor | None = None,
         noise: torch.Tensor | None = None,
         timesteps: torch.Tensor | None = None,
+        loss_config: dict[str, Any] | None = None,
+        fps: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        model_target = self._to_model_action(target_action, prev_action)
         if noise is None:
-            noise = torch.randn_like(target_action)
+            noise = torch.randn_like(model_target)
         if timesteps is None:
             timesteps = torch.randint(
                 0,
                 self.diffusion_steps,
-                (target_action.shape[0],),
-                device=target_action.device,
+                (model_target.shape[0],),
+                device=model_target.device,
             )
-        alpha_bar = self.alpha_bars[timesteps].to(target_action.dtype).view(-1, 1, 1)
-        noisy_action = alpha_bar.sqrt() * target_action + (1.0 - alpha_bar).sqrt() * noise
+        alpha_bar = self.alpha_bars[timesteps].to(model_target.dtype).view(-1, 1, 1)
+        noisy_action = alpha_bar.sqrt() * model_target + (1.0 - alpha_bar).sqrt() * noise
         pred_noise = self.forward(
             source_body_tokens,
             noisy_action,
@@ -591,7 +599,24 @@ class TemporalDiffusionPolicyRetargeter(nn.Module):
             robot_state=robot_state,
             prev_action=prev_action,
         )
-        return torch.nn.functional.mse_loss(pred_noise, noise)
+        loss_cfg = loss_config or {}
+        denoise_weight = float(loss_cfg.get("denoise", loss_cfg.get("noise_mse", 1.0)))
+        total = denoise_weight * torch.nn.functional.mse_loss(
+            pred_noise, noise
+        )
+        if self._has_auxiliary_loss(loss_cfg):
+            pred_model_action = (
+                noisy_action - (1.0 - alpha_bar).sqrt() * pred_noise
+            ) / alpha_bar.sqrt()
+            pred_action = self._from_model_action(pred_model_action, prev_action)
+            total = total + self._stability_loss(
+                pred_action,
+                target_action,
+                loss_cfg,
+                prev_action=prev_action,
+                fps=fps,
+            )
+        return total
 
     @torch.no_grad()
     def sample(
@@ -639,7 +664,216 @@ class TemporalDiffusionPolicyRetargeter(nn.Module):
                 prev_action=prev_action,
             )
             state = (state - beta * pred_noise / (1.0 - alpha_bar).sqrt()) / alpha.sqrt()
-        return state
+        return self._from_model_action(state, prev_action)
+
+    def _to_model_action(
+        self,
+        target_action: torch.Tensor,
+        prev_action: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if self.output_mode == "absolute":
+            return target_action
+        reference = self._prev_action_reference(target_action, prev_action)
+        return target_action - reference
+
+    def _from_model_action(
+        self,
+        model_action: torch.Tensor,
+        prev_action: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if self.output_mode == "absolute":
+            return model_action
+        reference = self._prev_action_reference(model_action, prev_action)
+        return reference + model_action
+
+    def _prev_action_reference(
+        self,
+        action: torch.Tensor,
+        prev_action: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if prev_action is None:
+            raise ValueError("residual_prev_action output_mode requires prev_action")
+        reference = prev_action.to(device=action.device, dtype=action.dtype)
+        if reference.ndim != 2:
+            reference = reference.reshape(action.shape[0], -1)
+        if reference.shape[-1] != self.action_dim:
+            raise ValueError(
+                f"prev_action width must match action_dim={self.action_dim}; "
+                f"got {reference.shape[-1]}"
+            )
+        return reference.unsqueeze(1)
+
+    @staticmethod
+    def _has_auxiliary_loss(loss_config: dict[str, Any]) -> bool:
+        keys = (
+            "x0_reconstruction",
+            "q_reconstruction",
+            "velocity",
+            "acceleration",
+            "jerk",
+            "delta_smoothness",
+            "joint_jump",
+            "joint_limit",
+        )
+        return any(float(loss_config.get(key, 0.0)) != 0.0 for key in keys)
+
+    def _stability_loss(
+        self,
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+        loss_config: dict[str, Any],
+        *,
+        prev_action: torch.Tensor | None = None,
+        fps: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        total = prediction.new_tensor(0.0)
+        reconstruction_weight = float(
+            loss_config.get("x0_reconstruction", loss_config.get("q_reconstruction", 0.0))
+        )
+        if reconstruction_weight:
+            total = total + reconstruction_weight * torch.nn.functional.mse_loss(prediction, target)
+        velocity_weight = float(loss_config.get("velocity", 0.0))
+        if velocity_weight and prediction.shape[1] >= 2:
+            pred_velocity = prediction[:, 1:] - prediction[:, :-1]
+            target_velocity = target[:, 1:] - target[:, :-1]
+            velocity_loss = torch.nn.functional.mse_loss(pred_velocity, target_velocity)
+            total = total + velocity_weight * velocity_loss
+        delta_smoothness_weight = float(loss_config.get("delta_smoothness", 0.0))
+        if delta_smoothness_weight:
+            total = total + delta_smoothness_weight * self._delta_smoothness_loss(
+                prediction,
+                prev_action,
+            )
+        acceleration_weight = float(loss_config.get("acceleration", 0.0))
+        if acceleration_weight and prediction.shape[1] >= 3:
+            pred_accel = prediction[:, 2:] - 2.0 * prediction[:, 1:-1] + prediction[:, :-2]
+            target_accel = target[:, 2:] - 2.0 * target[:, 1:-1] + target[:, :-2]
+            total = total + acceleration_weight * torch.nn.functional.mse_loss(
+                pred_accel,
+                target_accel,
+            )
+        jerk_weight = float(loss_config.get("jerk", 0.0))
+        if jerk_weight and prediction.shape[1] >= 4:
+            pred_jerk = (
+                prediction[:, 3:]
+                - 3.0 * prediction[:, 2:-1]
+                + 3.0 * prediction[:, 1:-2]
+                - prediction[:, :-3]
+            )
+            target_jerk = (
+                target[:, 3:]
+                - 3.0 * target[:, 2:-1]
+                + 3.0 * target[:, 1:-2]
+                - target[:, :-3]
+            )
+            total = total + jerk_weight * torch.nn.functional.mse_loss(pred_jerk, target_jerk)
+        jump_weight = float(loss_config.get("joint_jump", 0.0))
+        if jump_weight and prediction.shape[1] >= 2:
+            threshold = self._joint_jump_delta_threshold(
+                prediction,
+                loss_config,
+                fps=fps,
+            )
+            pred_jump = torch.relu((prediction[:, 1:] - prediction[:, :-1]).abs() - threshold)
+            target_jump = torch.relu((target[:, 1:] - target[:, :-1]).abs() - threshold)
+            total = total + jump_weight * torch.nn.functional.mse_loss(pred_jump, target_jump)
+        limit_weight = float(loss_config.get("joint_limit", 0.0))
+        if limit_weight:
+            total = total + limit_weight * self._joint_limit_loss(prediction, loss_config)
+        return total
+
+    def _delta_smoothness_loss(
+        self,
+        prediction: torch.Tensor,
+        prev_action: torch.Tensor | None,
+    ) -> torch.Tensor:
+        deltas = []
+        if prev_action is not None:
+            reference = self._prev_action_reference(prediction, prev_action)
+            deltas.append(prediction[:, :1] - reference)
+        if prediction.shape[1] >= 2:
+            deltas.append(prediction[:, 1:] - prediction[:, :-1])
+        if not deltas:
+            return prediction.new_tensor(0.0)
+        return torch.mean(torch.cat(deltas, dim=1).square())
+
+    def _joint_jump_delta_threshold(
+        self,
+        reference: torch.Tensor,
+        loss_config: dict[str, Any],
+        *,
+        fps: torch.Tensor | None,
+    ) -> torch.Tensor:
+        explicit_delta = loss_config.get(
+            "joint_jump_delta_threshold",
+            loss_config.get("joint_jump_delta"),
+        )
+        if explicit_delta is not None:
+            return self._threshold_tensor(reference, explicit_delta)
+        velocity = float(loss_config.get("joint_jump_velocity", 20.0))
+        if fps is None:
+            fps = reference.new_full(
+                (reference.shape[0],),
+                float(loss_config.get("joint_jump_fps", loss_config.get("fps", 30.0))),
+            )
+        fps_tensor = torch.as_tensor(fps, device=reference.device, dtype=reference.dtype)
+        fps_tensor = fps_tensor.reshape(reference.shape[0], -1)[:, :1]
+        if torch.any(fps_tensor <= 0):
+            raise ValueError("joint_jump fps must be positive")
+        return (velocity / fps_tensor).reshape(reference.shape[0], 1, 1)
+
+    def _threshold_tensor(
+        self,
+        reference: torch.Tensor,
+        value,
+    ) -> torch.Tensor:
+        if isinstance(value, (int, float)):
+            return reference.new_full((1, 1, 1), float(value))
+        tensor = torch.as_tensor(value, device=reference.device, dtype=reference.dtype)
+        return tensor.reshape(1, 1, -1)
+
+    def _joint_limit_loss(
+        self,
+        prediction: torch.Tensor,
+        loss_config: dict[str, Any],
+    ) -> torch.Tensor:
+        lower = self._optional_limit_tensor(
+            prediction,
+            loss_config.get("joint_limit_min"),
+        )
+        upper = self._optional_limit_tensor(
+            prediction,
+            loss_config.get("joint_limit_max"),
+        )
+        penalty = prediction.new_zeros(prediction.shape)
+        if lower is not None:
+            penalty = penalty + torch.relu(lower - prediction)
+        if upper is not None:
+            penalty = penalty + torch.relu(prediction - upper)
+        return torch.mean(penalty.square())
+
+    def _optional_limit_tensor(
+        self,
+        reference: torch.Tensor,
+        value,
+    ) -> torch.Tensor | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return reference.new_full((1, 1, self.action_dim), float(value))
+        tensor = torch.as_tensor(
+            value,
+            device=reference.device,
+            dtype=reference.dtype,
+        ).reshape(1, 1, -1)
+        if tensor.shape[-1] == 1:
+            return tensor.expand(1, 1, self.action_dim)
+        if tensor.shape[-1] != self.action_dim:
+            raise ValueError(
+                f"joint limit width must be 1 or action_dim={self.action_dim}; "
+                f"got {tensor.shape[-1]}"
+            )
+        return tensor
 
     def _global_token(
         self,

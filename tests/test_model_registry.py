@@ -111,6 +111,7 @@ class ModelRegistryTests(unittest.TestCase):
                     "morphology_dim": 2,
                     "robot_state_dim": 3,
                     "max_horizon": 4,
+                    "output_mode": "residual_prev_action",
                 }
             },
             input_dim=spec.flattened_dim(),
@@ -133,6 +134,13 @@ class ModelRegistryTests(unittest.TestCase):
             prev_action=prev_action,
             noise=torch.zeros_like(target),
             timesteps=torch.zeros(3, dtype=torch.long),
+            loss_config={
+                "denoise": 1.0,
+                "x0_reconstruction": 0.1,
+                "velocity": 0.1,
+                "acceleration": 0.1,
+                "joint_jump": 0.1,
+            },
         )
         prediction = built.model.sample(
             source_body_tokens,
@@ -145,8 +153,78 @@ class ModelRegistryTests(unittest.TestCase):
         )
 
         self.assertEqual(built.family, "temporal_diffusion_policy")
+        self.assertEqual(built.model.output_mode, "residual_prev_action")
         self.assertEqual(tuple(loss.shape), ())
         self.assertEqual(tuple(prediction.shape), (3, 2, 2))
+        target = torch.tensor([[[1.0, 2.0], [1.5, 1.0]]])
+        prev_action = torch.tensor([[0.5, 1.5]])
+        residual = built.model._to_model_action(target, prev_action)
+        reconstructed = built.model._from_model_action(residual, prev_action)
+        self.assertTrue(torch.equal(residual, torch.tensor([[[0.5, 0.5], [1.0, -0.5]]])))
+        self.assertTrue(torch.equal(reconstructed, target))
+
+    def test_temporal_jump_loss_uses_velocity_threshold_units(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+        model = _temporal_policy(torch, action_dim=1)
+        prediction = torch.tensor([[[0.0], [0.5]]])
+        target = torch.zeros_like(prediction)
+
+        loss = model._stability_loss(
+            prediction,
+            target,
+            {"joint_jump": 1.0, "joint_jump_velocity": 20.0},
+            fps=torch.tensor([50.0]),
+        )
+
+        self.assertGreater(float(loss.item()), 0.0)
+
+    def test_temporal_delta_smoothness_is_distinct_from_velocity_loss(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+        model = _temporal_policy(torch, action_dim=1)
+        prediction = torch.tensor([[[0.0], [0.2], [0.4]]])
+        target = torch.tensor([[[1.0], [1.2], [1.4]]])
+        prev_action = torch.zeros(1, 1)
+
+        velocity_loss = model._stability_loss(
+            prediction,
+            target,
+            {"velocity": 1.0},
+            prev_action=prev_action,
+        )
+        delta_loss = model._stability_loss(
+            prediction,
+            target,
+            {"delta_smoothness": 1.0},
+            prev_action=prev_action,
+        )
+
+        self.assertEqual(float(velocity_loss.item()), 0.0)
+        self.assertGreater(float(delta_loss.item()), 0.0)
+
+def _temporal_policy(torch, *, action_dim: int):
+    from online_retarget.models.temporal import TemporalDiffusionPolicyRetargeter
+
+    return TemporalDiffusionPolicyRetargeter(
+        action_dim=action_dim,
+        source_body_token_dim=3,
+        source_skeleton_dim=0,
+        morphology_dim=0,
+        robot_state_dim=0,
+        d_model=8,
+        nhead=2,
+        num_layers=1,
+        dim_feedforward=16,
+        time_embed_dim=4,
+        diffusion_steps=4,
+        inference_steps=1,
+        max_horizon=4,
+    )
 
 
 if __name__ == "__main__":

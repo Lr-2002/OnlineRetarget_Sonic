@@ -124,6 +124,7 @@ def build_model(
             beta_start=float(model_cfg.get("beta_start", 1.0e-4)),
             beta_end=float(model_cfg.get("beta_end", 2.0e-2)),
             max_horizon=int(model_cfg.get("max_horizon", 64)),
+            output_mode=str(model_cfg.get("output_mode", "absolute")),
         )
     else:
         raise ValueError(f"unsupported model family: {model_cfg.get('family')}")
