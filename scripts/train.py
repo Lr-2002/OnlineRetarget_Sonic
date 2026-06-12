@@ -601,14 +601,23 @@ def _train_jsonl(
 ) -> None:
     from online_retarget.models.registry import build_model
 
-    samples = _load_supervised_samples(samples_jsonl)
+    sample_rank = rank if runtime["distributed"] else 0
+    sample_world_size = world_size if runtime["distributed"] else 1
+    samples, sample_loader = _load_supervised_samples_with_report(
+        samples_jsonl,
+        rank=sample_rank,
+        world_size=sample_world_size,
+    )
     if not samples:
         raise SystemExit(f"no supervised samples found in {samples_jsonl}")
+    if rank == 0:
+        print(f"sample_loader={json.dumps(sample_loader, sort_keys=True)}")
     if _configured_model_family(config) == "temporal_diffusion_policy":
         _train_temporal_diffusion_jsonl(
             torch=torch,
             config=config,
             samples=samples,
+            sample_loader=sample_loader,
             samples_jsonl=samples_jsonl,
             output_dir=output_dir,
             resume_checkpoint=resume_checkpoint,
@@ -680,15 +689,6 @@ def _train_jsonl(
     steps = min(max_steps, max_steps if max_steps > 0 else 1)
     dataset = torch.utils.data.TensorDataset(x, y, prev_y)
     sampler = None
-    if runtime["distributed"]:
-        sampler = torch.utils.data.distributed.DistributedSampler(
-            dataset,
-            num_replicas=world_size,
-            rank=rank,
-            shuffle=True,
-            seed=seed,
-            drop_last=False,
-        )
     loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=min(batch_size, len(dataset)),
@@ -793,6 +793,7 @@ def _train_jsonl(
         distributed_runtime=_runtime_report(runtime),
         resume_checkpoint=str(resume_checkpoint) if resume_checkpoint is not None else "",
         sample_filter=sample_filter,
+        sample_loader=sample_loader,
     )
     torch.save(
         {
@@ -820,6 +821,7 @@ def _train_temporal_diffusion_jsonl(
     torch,
     config: dict[str, Any],
     samples: list[dict[str, Any]],
+    sample_loader: dict[str, Any],
     samples_jsonl: Path,
     output_dir: Path,
     resume_checkpoint: Path | None,
@@ -887,15 +889,6 @@ def _train_temporal_diffusion_jsonl(
     steps = min(max_steps, max_steps if max_steps > 0 else 1)
     dataset = torch.utils.data.TensorDataset(*_temporal_training_dataset_tensors(tensors))
     sampler = None
-    if runtime["distributed"]:
-        sampler = torch.utils.data.distributed.DistributedSampler(
-            dataset,
-            num_replicas=world_size,
-            rank=rank,
-            shuffle=True,
-            seed=seed,
-            drop_last=False,
-        )
     loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=min(batch_size, len(dataset)),
@@ -1010,6 +1003,7 @@ def _train_temporal_diffusion_jsonl(
         distributed_runtime=_runtime_report(runtime),
         resume_checkpoint=str(resume_checkpoint) if resume_checkpoint is not None else "",
         sample_filter=sample_filter,
+        sample_loader=sample_loader,
     )
     torch.save(
         {
@@ -1670,14 +1664,45 @@ def _evaluation_config(config: dict[str, Any], *, run_name: str) -> EvaluationCo
     )
 
 
-def _load_supervised_samples(samples_jsonl: Path) -> list[dict[str, Any]]:
+def _load_supervised_samples(
+    samples_jsonl: Path,
+    *,
+    rank: int = 0,
+    world_size: int = 1,
+) -> list[dict[str, Any]]:
+    samples, _report = _load_supervised_samples_with_report(
+        samples_jsonl,
+        rank=rank,
+        world_size=world_size,
+    )
+    return samples
+
+
+def _load_supervised_samples_with_report(
+    samples_jsonl: Path,
+    *,
+    rank: int = 0,
+    world_size: int = 1,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if world_size <= 0:
+        raise ValueError(f"world_size must be positive, got {world_size}")
+    if rank < 0 or rank >= world_size:
+        raise ValueError(f"rank must be in [0, {world_size}), got {rank}")
+
     samples = []
+    total_nonempty_rows = 0
+    parsed_count = 0
     with samples_jsonl.open(encoding="utf-8") as f:
         for line_number, line in enumerate(f, start=1):
             stripped = line.strip()
             if not stripped:
                 continue
+            sample_index = total_nonempty_rows
+            total_nonempty_rows += 1
+            if world_size > 1 and sample_index % world_size != rank:
+                continue
             sample = json.loads(stripped)
+            parsed_count += 1
             if "observation" not in sample:
                 raise ValueError(f"sample on line {line_number} lacks observation")
             try:
@@ -1687,7 +1712,27 @@ def _load_supervised_samples(samples_jsonl: Path) -> list[dict[str, Any]]:
                     f"sample on line {line_number} lacks target_joints/future_target_joints"
                 ) from exc
             samples.append(sample)
-    return samples
+
+    dropped_uneven_tail_count = 0
+    if world_size > 1:
+        even_shard_count = total_nonempty_rows // world_size
+        if len(samples) > even_shard_count:
+            dropped_uneven_tail_count = len(samples) - even_shard_count
+            samples = samples[:even_shard_count]
+
+    report = {
+        "path": str(samples_jsonl),
+        "rank": int(rank),
+        "world_size": int(world_size),
+        "sharded": bool(world_size > 1),
+        "assignment": "nonempty_jsonl_row_index_mod_world_size",
+        "total_nonempty_rows_seen": int(total_nonempty_rows),
+        "parsed_count": int(parsed_count),
+        "materialized_count": int(len(samples)),
+        "skipped_by_shard_count": int(total_nonempty_rows - parsed_count),
+        "dropped_uneven_tail_count": int(dropped_uneven_tail_count),
+    }
+    return samples, report
 
 
 def _predict_jsonl(
@@ -2585,6 +2630,7 @@ def _build_train_report(
     distributed_runtime: dict[str, Any] | None = None,
     resume_checkpoint: str = "",
     sample_filter: dict[str, Any] | None = None,
+    sample_loader: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "samples_jsonl": str(samples_jsonl),
@@ -2612,6 +2658,13 @@ def _build_train_report(
         "rank": rank,
         "distributed_runtime": distributed_runtime or {},
         "resume_checkpoint": resume_checkpoint,
+        "sample_loader": sample_loader
+        or {
+            "rank": rank,
+            "world_size": world_size,
+            "sharded": False,
+            "materialized_count": sample_count,
+        },
         "sample_filter": sample_filter
         or {
             "input_count": sample_count,
