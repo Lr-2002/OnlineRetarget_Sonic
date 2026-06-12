@@ -471,6 +471,68 @@ class SonicKinTrainTimingTests(unittest.TestCase):
             atol=1e-6,
         )
 
+    def test_soma_motionlib_previous_base_up_uses_anchor_minus_one_and_extends_dims(self):
+        frames = 60
+        soma_joints = np.zeros((frames, 26, 3), dtype=np.float32)
+        soma_identity = np.zeros((frames, 4), dtype=np.float32)
+        soma_identity[:, 0] = 1.0
+        dof = np.arange(frames * 29, dtype=np.float32).reshape(frames, 29)
+        root_euler = np.zeros((frames, 3), dtype=np.float32)
+        root_euler[0] = [0.1, -0.2, 0.9]
+        root_euler[2] = [0.35, 0.15, -1.2]
+        root_rot = np.asarray(
+            [sonic_train._euler_xyz_to_quat_wxyz(row) for row in root_euler],
+            dtype=np.float32,
+        )
+        yaw_only = np.asarray(
+            [sonic_train._euler_xyz_to_quat_wxyz([0.0, 0.0, 1.3])],
+            dtype=np.float32,
+        )
+        np.testing.assert_allclose(
+            sonic_train.quat_to_base_up_vector(yaw_only),
+            np.asarray([[0.0, 0.0, 1.0]], dtype=np.float32),
+            atol=1e-6,
+        )
+        arrays = {
+            "soma_joints": soma_joints,
+            "soma_root_quat": soma_identity.copy(),
+            "joint_pos": dof,
+            "joint_vel": sonic_train.finite_difference_velocity(dof, 50.0),
+            "root_pos": np.zeros((frames, 3), dtype=np.float32),
+            "root_rot": root_rot,
+        }
+        config = {
+            "features": {
+                "include_root_pos_target": True,
+                "previous_g1_action_condition": True,
+                "previous_g1_root_roll_pitch_condition": True,
+                "previous_g1_base_up_condition": True,
+            }
+        }
+
+        motion, skeleton, target = sonic_train.build_soma_motionlib_features(
+            arrays,
+            np.asarray([0, 3], dtype=np.int64),
+            window=10,
+            step=5,
+            config=config,
+        )
+
+        self.assertEqual(motion.shape, (2, 874))
+        self.assertEqual(skeleton.shape, (2, 104))
+        self.assertEqual(target.shape, (2, 670))
+        np.testing.assert_allclose(motion[:, -34:-5], dof[[0, 2]])
+        np.testing.assert_allclose(
+            motion[:, -5:-3],
+            sonic_train.quat_to_roll_pitch(root_rot[[0, 2]]),
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            motion[:, -3:],
+            sonic_train.quat_to_base_up_vector(root_rot[[0, 2]]),
+            atol=1e-6,
+        )
+
     def test_previous_root_roll_pitch_expected_dims_guard_rejects_stale_action_only_stats(self):
         config = {
             "features": {
@@ -500,6 +562,41 @@ class SonicKinTrainTimingTests(unittest.TestCase):
             sonic_train.assert_expected_feature_dims(
                 config,
                 motion_dim=869,
+                skeleton_dim=104,
+                target_dim=670,
+                skeleton_feature_lookup=None,
+            )
+
+    def test_previous_base_up_expected_dims_guard_rejects_stale_root_roll_pitch_stats(self):
+        config = {
+            "features": {
+                "previous_g1_action_condition": True,
+                "previous_g1_root_roll_pitch_condition": True,
+                "previous_g1_base_up_condition": True,
+                "expected_dims": {
+                    "motion_token": 874,
+                    "x_skel": 104,
+                    "z_skel": 104,
+                    "model_input": 978,
+                    "target": 670,
+                },
+            }
+        }
+
+        sonic_train.assert_expected_feature_dims(
+            config,
+            motion_dim=874,
+            skeleton_dim=104,
+            target_dim=670,
+            skeleton_feature_lookup=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "motion_token: expected 874, got 871; model_input: expected 978, got 975",
+        ):
+            sonic_train.assert_expected_feature_dims(
+                config,
+                motion_dim=871,
                 skeleton_dim=104,
                 target_dim=670,
                 skeleton_feature_lookup=None,
@@ -743,6 +840,58 @@ class SonicKinTrainTimingTests(unittest.TestCase):
             ),
             0.02,
         )
+
+    def test_loss_mode_selects_none_a_only_and_a_plus_b_without_changing_legacy_default(self):
+        self.assertIsNone(sonic_train.command_loss_mode({"training": {}}))
+        none = {
+            "training": {
+                "loss_mode": "none",
+                "temporal_consistency_loss_enabled": False,
+                "temporal_consistency_loss_weight": 0.0,
+                "ab_overlap_loss_enabled": False,
+                "ab_overlap_loss_weight": 0.0,
+            }
+        }
+        a_only = {"training": {"loss_mode": "a only"}}
+        a_plus_b = {
+            "training": {
+                "loss_mode": "a+b",
+                "temporal_consistency_loss_weight": 0.02,
+                "ab_overlap_loss_weight": 0.03,
+            }
+        }
+
+        self.assertEqual(sonic_train.command_loss_mode(none), "none")
+        self.assertEqual(sonic_train.temporal_consistency_loss_weight(none), 0.0)
+        self.assertEqual(sonic_train.command_ab_overlap_loss_weight(none), 0.0)
+        self.assertEqual(sonic_train.command_loss_mode(a_only), "a_only")
+        self.assertEqual(sonic_train.temporal_consistency_loss_weight(a_only), 0.01)
+        self.assertEqual(sonic_train.command_ab_overlap_loss_weight(a_only), 0.0)
+        self.assertEqual(sonic_train.command_loss_mode(a_plus_b), "a_plus_b")
+        self.assertEqual(sonic_train.temporal_consistency_loss_weight(a_plus_b), 0.02)
+        self.assertEqual(sonic_train.command_ab_overlap_loss_weight(a_plus_b), 0.03)
+
+    def test_loss_mode_rejects_conflicting_legacy_toggles(self):
+        with self.assertRaisesRegex(ValueError, "conflicts with training.temporal_consistency_loss_enabled"):
+            sonic_train.temporal_consistency_loss_weight(
+                {
+                    "training": {
+                        "loss_mode": "a_only",
+                        "temporal_consistency_loss_enabled": False,
+                    }
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "requires training.ab_overlap_loss_weight=0.0"):
+            sonic_train.command_ab_overlap_loss_weight(
+                {
+                    "training": {
+                        "loss_mode": "none",
+                        "ab_overlap_loss_weight": 0.01,
+                    }
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "training.loss_mode must be one of"):
+            sonic_train.command_loss_mode({"training": {"loss_mode": "needs_magic"}})
 
     def test_loss_and_metrics_adds_temporal_command_delta_mse_when_enabled(self):
         torch = sonic_train.torch

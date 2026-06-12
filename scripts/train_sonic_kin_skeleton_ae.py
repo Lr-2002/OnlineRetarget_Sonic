@@ -207,6 +207,23 @@ EVAL_METRIC_CONTRACT: dict[str, Any] = {
 }
 TEMPORAL_CONSISTENCY_LOSS_WEIGHT_DEFAULT = 0.01
 AB_OVERLAP_LOSS_WEIGHT_DEFAULT = 0.01
+LOSS_MODE_NONE = "none"
+LOSS_MODE_A_ONLY = "a_only"
+LOSS_MODE_A_PLUS_B = "a_plus_b"
+LOSS_MODE_ALIASES = {
+    "none": LOSS_MODE_NONE,
+    "off": LOSS_MODE_NONE,
+    "loss_off": LOSS_MODE_NONE,
+    "loss-off": LOSS_MODE_NONE,
+    "a": LOSS_MODE_A_ONLY,
+    "a only": LOSS_MODE_A_ONLY,
+    "a-only": LOSS_MODE_A_ONLY,
+    "a_only": LOSS_MODE_A_ONLY,
+    "a+b": LOSS_MODE_A_PLUS_B,
+    "a plus b": LOSS_MODE_A_PLUS_B,
+    "a-plus-b": LOSS_MODE_A_PLUS_B,
+    "a_plus_b": LOSS_MODE_A_PLUS_B,
+}
 RAW_SONIC_DATASET_KIN = "kin"
 RAW_SONIC_DATASET_PHY = "phy"
 RAW_SONIC_DATASETS = (RAW_SONIC_DATASET_KIN, RAW_SONIC_DATASET_PHY)
@@ -1780,6 +1797,11 @@ def quat_to_roll_pitch(root_quat: np.ndarray) -> np.ndarray:
     return np.stack([roll, pitch], axis=-1).astype(np.float32, copy=False)
 
 
+def quat_to_base_up_vector(root_quat: np.ndarray) -> np.ndarray:
+    mat = quat_to_matrix(root_quat)
+    return mat[..., :, 2].astype(np.float32, copy=False)
+
+
 def include_root_pos_target(config: Mapping[str, Any]) -> bool:
     features = config.get("features", {})
     if not isinstance(features, Mapping):
@@ -1810,6 +1832,15 @@ def previous_g1_root_roll_pitch_condition_enabled(config: Mapping[str, Any] | No
     if not isinstance(features, Mapping):
         return False
     return bool(features.get("previous_g1_root_roll_pitch_condition", False))
+
+
+def previous_g1_base_up_condition_enabled(config: Mapping[str, Any] | None) -> bool:
+    if config is None:
+        return False
+    features = config.get("features", {})
+    if not isinstance(features, Mapping):
+        return False
+    return bool(features.get("previous_g1_base_up_condition", False))
 
 
 def no_skeleton_encoder_feature_enabled(config: Mapping[str, Any] | None) -> bool:
@@ -2006,6 +2037,7 @@ def build_soma_motionlib_features(
     if (
         previous_g1_action_condition_enabled(config)
         or previous_g1_root_roll_pitch_condition_enabled(config)
+        or previous_g1_base_up_condition_enabled(config)
     ):
         previous_idx = np.maximum(frame_indices.astype(np.int64, copy=False) - 1, 0)
     if previous_g1_action_condition_enabled(config):
@@ -2014,6 +2046,9 @@ def build_soma_motionlib_features(
     if previous_g1_root_roll_pitch_condition_enabled(config):
         previous_roll_pitch = quat_to_roll_pitch(root_rot[previous_idx])
         motion = np.concatenate([motion, previous_roll_pitch], axis=-1)
+    if previous_g1_base_up_condition_enabled(config):
+        previous_base_up = quat_to_base_up_vector(root_rot[previous_idx])
+        motion = np.concatenate([motion, previous_base_up], axis=-1)
 
     skeleton_anchor = soma_local[:, 0]
     skeleton_lengths = np.linalg.norm(skeleton_anchor, axis=-1)
@@ -3412,6 +3447,23 @@ def normalize_batch(
 
 def temporal_consistency_loss_weight(config: Mapping[str, Any]) -> float:
     training = config.get("training")
+    mode = command_loss_mode(config)
+    if mode is not None:
+        _validate_loss_mode_toggle(
+            training,
+            "temporal_consistency_loss_enabled",
+            mode in (LOSS_MODE_A_ONLY, LOSS_MODE_A_PLUS_B),
+            mode,
+        )
+        if mode == LOSS_MODE_NONE:
+            _validate_disabled_loss_weight(training, "temporal_consistency_loss_weight", mode)
+            return 0.0
+        return float(
+            training.get(
+                "temporal_consistency_loss_weight",
+                TEMPORAL_CONSISTENCY_LOSS_WEIGHT_DEFAULT,
+            )
+        )
     if not isinstance(training, Mapping) or not training.get("temporal_consistency_loss_enabled", False):
         return 0.0
     return float(
@@ -3424,9 +3476,59 @@ def temporal_consistency_loss_weight(config: Mapping[str, Any]) -> float:
 
 def command_ab_overlap_loss_weight(config: Mapping[str, Any]) -> float:
     training = config.get("training")
+    mode = command_loss_mode(config)
+    if mode is not None:
+        _validate_loss_mode_toggle(
+            training,
+            "ab_overlap_loss_enabled",
+            mode == LOSS_MODE_A_PLUS_B,
+            mode,
+        )
+        if mode != LOSS_MODE_A_PLUS_B:
+            _validate_disabled_loss_weight(training, "ab_overlap_loss_weight", mode)
+            return 0.0
+        return float(training.get("ab_overlap_loss_weight", AB_OVERLAP_LOSS_WEIGHT_DEFAULT))
     if not isinstance(training, Mapping) or not training.get("ab_overlap_loss_enabled", False):
         return 0.0
     return float(training.get("ab_overlap_loss_weight", AB_OVERLAP_LOSS_WEIGHT_DEFAULT))
+
+
+def command_loss_mode(config: Mapping[str, Any]) -> str | None:
+    training = config.get("training")
+    if not isinstance(training, Mapping):
+        return None
+    raw_mode = training.get("loss_mode")
+    if raw_mode in ("", None):
+        return None
+    key = str(raw_mode).strip().lower()
+    mode = LOSS_MODE_ALIASES.get(key)
+    if mode is None:
+        expected = ", ".join((LOSS_MODE_NONE, LOSS_MODE_A_ONLY, LOSS_MODE_A_PLUS_B))
+        raise ValueError(f"training.loss_mode must be one of {expected}; got {raw_mode!r}")
+    return mode
+
+
+def _validate_loss_mode_toggle(
+    training: Mapping[str, Any] | Any,
+    key: str,
+    expected: bool,
+    mode: str,
+) -> None:
+    if not isinstance(training, Mapping):
+        raise ValueError("training.loss_mode requires training config section")
+    if key in training and bool(training[key]) is not expected:
+        raise ValueError(
+            f"training.loss_mode={mode!r} conflicts with training.{key}={training[key]!r}"
+        )
+
+
+def _validate_disabled_loss_weight(training: Mapping[str, Any] | Any, key: str, mode: str) -> None:
+    if not isinstance(training, Mapping):
+        raise ValueError("training.loss_mode requires training config section")
+    if key in training and float(training[key]) != 0.0:
+        raise ValueError(
+            f"training.loss_mode={mode!r} requires training.{key}=0.0 when the loss is disabled"
+        )
 
 
 def command_ab_overlap_batch_offset(config: Mapping[str, Any]) -> int:
