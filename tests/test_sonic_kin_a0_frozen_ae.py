@@ -34,21 +34,21 @@ KIN_WALK_A_PLUS_B_MLP_CAPACITY_CONFIGS = (
         / "configs"
         / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_512_1m_4gpu.json",
         [512, 1024, 512],
-        1892510,
+        1893534,
     ),
     (
         REPO_ROOT
         / "configs"
         / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_1024_512_1m_4gpu.json",
         [512, 1024, 1024, 512],
-        2942110,
+        2943134,
     ),
     (
         REPO_ROOT
         / "configs"
         / "sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_mlp_512_1024_2048_1024_512_1m_4gpu.json",
         [512, 1024, 2048, 1024, 512],
-        6089886,
+        6090910,
     ),
 )
 LR254_2GPU_UNIFORM_CONFIG = (
@@ -237,15 +237,20 @@ class A0FrozenAEConfigTests(unittest.TestCase):
             config = json.loads(path.read_text(encoding="utf-8"))
             with self.subTest(path=path.name):
                 self.assertIn("previous_g1_action_condition", config["source_features"])
+                self.assertIn("previous_g1_root_roll_pitch_condition", config["source_features"])
                 self.assertEqual(
                     config["features"]["motion_feature"],
-                    "soma_joints_multi_future_local_nonflat_plus_soma_root_ori_b_multi_future_plus_previous_g1_action",
+                    "soma_joints_multi_future_local_nonflat"
+                    "_plus_soma_root_ori_b_multi_future"
+                    "_plus_previous_g1_action"
+                    "_plus_previous_g1_root_roll_pitch",
                 )
                 self.assertIs(config["features"]["previous_g1_action_condition"], True)
-                self.assertEqual(config["features"]["expected_dims"]["motion_token"], 869)
+                self.assertIs(config["features"]["previous_g1_root_roll_pitch_condition"], True)
+                self.assertEqual(config["features"]["expected_dims"]["motion_token"], 871)
                 self.assertEqual(config["features"]["expected_dims"]["x_skel"], 104)
                 self.assertEqual(config["features"]["expected_dims"]["z_skel"], 104)
-                self.assertEqual(config["features"]["expected_dims"]["model_input"], 973)
+                self.assertEqual(config["features"]["expected_dims"]["model_input"], 975)
                 self.assertEqual(config["features"]["expected_dims"]["target"], 670)
                 self.assertEqual(
                     config["features"]["target_feature"],
@@ -1184,18 +1189,19 @@ class A0FrozenAEFeatureTests(unittest.TestCase):
         previous_action_condition = {
             "features": {
                 "previous_g1_action_condition": True,
+                "previous_g1_root_roll_pitch_condition": True,
                 "expected_dims": {
-                    "motion_token": 869,
+                    "motion_token": 871,
                     "x_skel": 104,
                     "z_skel": 104,
-                    "model_input": 973,
+                    "model_input": 975,
                     "target": 670,
                 },
             }
         }
         sonic_train.assert_expected_feature_dims(
             previous_action_condition,
-            motion_dim=869,
+            motion_dim=871,
             skeleton_dim=104,
             target_dim=670,
             skeleton_feature_lookup=None,
