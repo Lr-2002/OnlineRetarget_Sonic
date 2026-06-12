@@ -305,6 +305,137 @@ class TrainEntryTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", svg_text)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html_text)
 
+    def test_capsule_visualization_writes_blocked_manifest_without_model_xml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            predictions = root / "train_predictions.jsonl"
+            predictions.write_text(
+                json.dumps(
+                    {
+                        "sample_id": "s1",
+                        "sequence_id": "clip.npz",
+                        "target_joint_names": ["j0", "j1"],
+                        "predicted_joints": [[0.5, 1.5], [0.75, 1.75]],
+                        "target_joints": [[0.0, 1.0], [1.0, 2.0]],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = train_entry._write_visualization_artifacts(
+                config={
+                    "visualization": {
+                        "enabled": True,
+                        "artifact_name": "route_b_probe",
+                        "num_samples": 1,
+                        "max_joints": 2,
+                        "capsule": {
+                            "enabled": True,
+                            "model_xml": root / "missing_g1.xml",
+                            "num_samples": 1,
+                            "max_frames": 1,
+                        },
+                    }
+                },
+                predictions_jsonl=predictions,
+                output_dir=root / "train",
+                eval_result=None,
+                run_name="train_visualization",
+            )
+
+            capsule = result["capsule_visualization"]
+            manifest = json.loads(Path(capsule["manifest_json"]).read_text(encoding="utf-8"))
+            html_text = Path(capsule["html"]).read_text(encoding="utf-8")
+            trajectory = json.loads(
+                Path(manifest["samples"][0]["trajectory_json"]).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(capsule["status"], "blocked")
+        self.assertEqual(manifest["artifact_version"], "route_b_g1_capsule_visualization_v1")
+        self.assertIn("g1_model_xml is missing", manifest["message"])
+        self.assertIn("Route B 3D capsule preview", html_text)
+        self.assertEqual(len(trajectory["predicted_joints"]), 1)
+        self.assertEqual(manifest["samples"][0]["target_render"]["status"], "blocked")
+
+    def test_capsule_visualization_uses_sonic_capsule_renderer_hooks(self):
+        class FakeRenderConfig:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        render_calls = []
+
+        def fake_render(**kwargs):
+            video_path = kwargs["video_path"]
+            video_path.write_bytes(b"mp4")
+            render_calls.append(kwargs)
+            return {
+                "status": "ok",
+                "message": "rendered",
+                "video_path": str(video_path),
+                "render_backend": "software_perspective_capsules",
+                "frames": len(kwargs["frames"]),
+            }
+
+        deps = {
+            "ReviewClipExportConfig": FakeRenderConfig,
+            "load_g1_kinematic_model": lambda path: {"model_xml": str(path)},
+            "_g1_capsule_edges": lambda model: (("pelvis", "torso"),),
+            "_g1_capsule_frames": lambda model, trajectory: [
+                {"pelvis": (0.0, 0.0, 0.0), "torso": (0.0, 0.0, 1.0)}
+                for _ in trajectory
+            ],
+            "_render_capsule_3d_video": fake_render,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model_xml = root / "g1.xml"
+            model_xml.write_text("<mujoco/>\n", encoding="utf-8")
+            predictions = root / "train_predictions.jsonl"
+            predictions.write_text(
+                json.dumps(
+                    {
+                        "sample_id": "s1",
+                        "predicted_joints": [[0.5, 1.5], [0.75, 1.75]],
+                        "target_joints": [[0.0, 1.0], [1.0, 2.0]],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(train_entry, "_load_route_b_capsule_render_deps", return_value=deps):
+                result = train_entry._write_visualization_artifacts(
+                    config={
+                        "visualization": {
+                            "enabled": True,
+                            "artifact_name": "route_b_probe",
+                            "num_samples": 1,
+                            "capsule": {
+                                "enabled": True,
+                                "model_xml": model_xml,
+                                "num_samples": 1,
+                                "max_frames": 2,
+                            },
+                        }
+                    },
+                    predictions_jsonl=predictions,
+                    output_dir=root / "train",
+                    eval_result=None,
+                    run_name="train_visualization",
+                )
+
+            capsule = result["capsule_visualization"]
+            videos = train_entry._capsule_video_paths(capsule)
+
+        self.assertEqual(capsule["status"], "ok")
+        self.assertEqual(len(render_calls), 2)
+        self.assertEqual(len(videos), 2)
+        self.assertEqual({call["label"] for call in render_calls}, {
+            "Route B target G1 FK capsules",
+            "Route B predicted G1 FK capsules",
+        })
+
     def test_quality_gate_blocks_formal_training_without_policy(self):
         context = train_entry._quality_gate_context(
             {},
