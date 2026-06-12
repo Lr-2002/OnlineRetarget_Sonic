@@ -558,6 +558,7 @@ def _builder_preset_switch_config(policy_preset: str) -> dict:
                     "delta_smoothness": 0.05,
                     "joint_jump": 0.02,
                     "joint_jump_velocity": 20.0,
+                    "joint_jump_fps": 50.0,
                     "joint_limit": 0.0,
                 },
             },

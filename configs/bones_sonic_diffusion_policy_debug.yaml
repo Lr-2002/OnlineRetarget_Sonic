@@ -103,6 +103,7 @@ policy_presets:
       delta_smoothness: 0.05
       joint_jump: 0.02
       joint_jump_velocity: 20.0
+      joint_jump_fps: 50.0
       joint_limit: 0.0
 
 feature_contract:
@@ -114,6 +115,8 @@ feature_contract:
     - source_skeleton
     - morphology
     - prev_target_joints
+    - previous_target_joints
+    - prev_g1_joints
   forbid_condition_sample_keys:
     - target_joints
     - future_target_joints

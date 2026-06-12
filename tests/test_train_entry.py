@@ -132,6 +132,7 @@ class TrainEntryTests(unittest.TestCase):
                 "delta_smoothness": 0.05,
                 "joint_jump": 0.02,
                 "joint_jump_velocity": 20.0,
+                "joint_jump_fps": 50.0,
                 "joint_limit": 0.0,
             },
         )
@@ -839,10 +840,25 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(report["dimensions"]["model_robot_state_dim"], 0)
         self.assertEqual(report["dimensions"]["robot_state_tensor_dim"], 5)
         self.assertEqual(report["output_contract"]["model_output_mode"], "residual_prev_action")
+        self.assertEqual(
+            report["actual_condition_sample_fields"],
+            [
+                "source_body_tokens",
+                "source_skeleton",
+                "morphology",
+                "prev_target_joints",
+                "previous_target_joints",
+                "prev_g1_joints",
+            ],
+        )
+        self.assertEqual(
+            report["actual_model_condition_tensor_keys"],
+            ["source_body_tokens", "source_skeleton", "morphology", "prev_action"],
+        )
         self.assertFalse(report["actor_uid_used_as_input"])
         self.assertEqual(len(report["digest"]), 64)
 
-    def test_temporal_feature_contract_rejects_target_only_condition_key(self):
+    def test_temporal_feature_contract_rejects_declared_target_only_condition_key(self):
         samples = [_temporal_sample()]
         tensors = _temporal_tensors()
         config = _temporal_feature_contract_config()
@@ -852,6 +868,26 @@ class TrainEntryTests(unittest.TestCase):
             train_entry._temporal_feature_contract_report(config, samples, tensors)
 
         self.assertIn("future_target_joints", str(raised.exception))
+
+    def test_temporal_feature_contract_rejects_actual_target_only_condition_field(self):
+        samples = [_temporal_sample()]
+        tensors = _temporal_tensors()
+        config = _temporal_feature_contract_config()
+        actual_fields = (
+            *train_entry.TEMPORAL_MODEL_CONDITION_SAMPLE_FIELDS,
+            "target_frame_indices",
+        )
+
+        with mock.patch.object(
+            train_entry,
+            "TEMPORAL_MODEL_CONDITION_SAMPLE_FIELDS",
+            actual_fields,
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                train_entry._temporal_feature_contract_report(config, samples, tensors)
+
+        self.assertIn("actual temporal condition source fields", str(raised.exception))
+        self.assertIn("target_frame_indices", str(raised.exception))
 
 
 def _write_policy_audit(
@@ -948,6 +984,7 @@ def _preset_switch_config(policy_preset: str) -> dict:
                     "delta_smoothness": 0.05,
                     "joint_jump": 0.02,
                     "joint_jump_velocity": 20.0,
+                    "joint_jump_fps": 50.0,
                     "joint_limit": 0.0,
                 },
             },
@@ -968,6 +1005,7 @@ def _temporal_sample() -> dict:
         "morphology": [1.7, 70.0],
         "robot_state": [0.0, 0.0, 0.0, 0.0, 0.0],
         "prev_target_joints": [0.0, 0.1],
+        "fps": 50.0,
         "target_joints": [0.1, 0.2],
         "future_target_joints": [[0.1, 0.2], [0.2, 0.4]],
         "target_frame_indices": [10, 15],
@@ -998,6 +1036,8 @@ def _temporal_feature_contract_config() -> dict:
                 "source_skeleton",
                 "morphology",
                 "prev_target_joints",
+                "previous_target_joints",
+                "prev_g1_joints",
             ],
             "forbid_condition_sample_keys": [
                 "target_joints",
@@ -1034,6 +1074,7 @@ def _temporal_tensors() -> dict:
         "morphology": _FakeTemporalTensor((1, 2)),
         "robot_state": _FakeTemporalTensor((1, 5)),
         "prev_action": _FakeTemporalTensor((1, 2)),
+        "fps": _FakeTemporalTensor((1,)),
         "target_action": _FakeTemporalTensor((1, 2, 2)),
     }
 

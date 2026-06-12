@@ -29,6 +29,23 @@ from online_retarget.evaluation import EvaluationConfig, evaluate_jsonl
 
 
 FORMAL_SAMPLE_BUILDER = "bvh_fk_30body_window"
+TEMPORAL_MODEL_CONDITION_SAMPLE_FIELDS = (
+    "source_body_tokens",
+    "source_skeleton",
+    "morphology",
+    "prev_target_joints",
+    "previous_target_joints",
+    "prev_g1_joints",
+)
+TEMPORAL_ROBOT_STATE_SAMPLE_FIELDS = ("robot_state",)
+TEMPORAL_FORBIDDEN_CONDITION_SAMPLE_FIELDS = (
+    "target_joints",
+    "future_target_joints",
+    "target_frame",
+    "target_frame_indices",
+    "target_g1_path",
+    "actor_uid",
+)
 
 
 def main() -> None:
@@ -1044,6 +1061,7 @@ def _training_loss(
             robot_state=observation.get("robot_state"),
             prev_action=observation.get("prev_action"),
             loss_config=loss_cfg,
+            fps=observation.get("fps"),
         )
     if family == "token_transformer":
         unwrapped = _unwrap_model(model)
@@ -1254,6 +1272,7 @@ def _temporal_condition_tensors(torch, samples: list[dict[str, Any]]) -> dict[st
         "morphology": [],
         "robot_state": [],
         "prev_action": [],
+        "fps": [],
         "target_action": [],
     }
     for index, sample in enumerate(samples):
@@ -1277,6 +1296,7 @@ def _temporal_condition_tensors(torch, samples: list[dict[str, Any]]) -> dict[st
         rows["morphology"].append(_pad_or_trim(_morphology_condition_vector(sample), morphology_dim))
         rows["robot_state"].append(_pad_or_trim(_robot_state_vector(sample), robot_state_dim))
         rows["prev_action"].append(_pad_or_trim(_prev_action_vector(sample), action_dim))
+        rows["fps"].append(float(sample.get("fps", 30.0)))
         rows["target_action"].append(target_action)
     return {
         key: torch.tensor(value, dtype=torch.float32)
@@ -1308,27 +1328,19 @@ def _temporal_feature_contract_report(
     else:
         metric_names = [str(metric) for metric in metrics]
     model_robot_state_dim = int(model_cfg.get("robot_state_dim", tensors["robot_state"].shape[1]))
+    actual_condition_sample_fields = list(
+        _temporal_condition_sample_fields(model_robot_state_dim=model_robot_state_dim)
+    )
+    actual_model_condition_tensor_keys = list(
+        _temporal_model_condition_tensor_keys(model_robot_state_dim=model_robot_state_dim)
+    )
     condition_keys = cfg.get("condition_sample_keys")
-    if not isinstance(condition_keys, list):
-        condition_keys = [
-            "source_body_tokens",
-            "source_skeleton",
-            "morphology",
-            "prev_target_joints",
-        ]
-        if model_robot_state_dim > 0:
-            condition_keys.append("robot_state")
-    condition_keys = [str(key) for key in condition_keys]
+    condition_keys = (
+        [str(key) for key in condition_keys] if isinstance(condition_keys, list) else []
+    )
     forbidden_keys = cfg.get(
         "forbid_condition_sample_keys",
-        [
-            "target_joints",
-            "future_target_joints",
-            "target_frame",
-            "target_frame_indices",
-            "target_g1_path",
-            "actor_uid",
-        ],
+        list(TEMPORAL_FORBIDDEN_CONDITION_SAMPLE_FIELDS),
     )
     forbidden_keys = (
         [str(key) for key in forbidden_keys] if isinstance(forbidden_keys, list) else []
@@ -1345,11 +1357,32 @@ def _temporal_feature_contract_report(
         "model_robot_state_dim": model_robot_state_dim,
     }
     violations = []
-    forbidden_condition_keys = sorted(set(condition_keys) & set(forbidden_keys))
-    if forbidden_condition_keys:
+    forbidden_declared_condition_keys = sorted(set(condition_keys) & set(forbidden_keys))
+    if forbidden_declared_condition_keys:
         violations.append(
             "condition_sample_keys include target-only or identity keys: "
-            + ", ".join(forbidden_condition_keys)
+            + ", ".join(forbidden_declared_condition_keys)
+        )
+    forbidden_actual_condition_keys = sorted(
+        set(actual_condition_sample_fields) & set(forbidden_keys)
+    )
+    if forbidden_actual_condition_keys:
+        violations.append(
+            "actual temporal condition source fields include target-only or identity keys: "
+            + ", ".join(forbidden_actual_condition_keys)
+        )
+    if condition_keys and set(condition_keys) != set(actual_condition_sample_fields):
+        missing_actual = sorted(set(actual_condition_sample_fields) - set(condition_keys))
+        stale_declared = sorted(set(condition_keys) - set(actual_condition_sample_fields))
+        detail = []
+        if missing_actual:
+            detail.append("missing actual fields: " + ", ".join(missing_actual))
+        if stale_declared:
+            detail.append("declares unused fields: " + ", ".join(stale_declared))
+        violations.append(
+            "condition_sample_keys must match actual condition source fields ("
+            + "; ".join(detail)
+            + ")"
         )
     expected = cfg.get("expected", {})
     if isinstance(expected, dict):
@@ -1389,6 +1422,8 @@ def _temporal_feature_contract_report(
     }
     digest_payload = {
         "condition_sample_keys": condition_keys,
+        "actual_condition_sample_fields": actual_condition_sample_fields,
+        "actual_model_condition_tensor_keys": actual_model_condition_tensor_keys,
         "dimensions": dimensions,
         "output_contract": output_contract,
         "required_eval_metrics": required_metric_names,
@@ -1399,6 +1434,8 @@ def _temporal_feature_contract_report(
         "name": str(cfg.get("name", "temporal_diffusion_policy_feature_eval_v1")),
         "status": "pass" if not violations else "fail",
         "condition_sample_keys": condition_keys,
+        "actual_condition_sample_fields": actual_condition_sample_fields,
+        "actual_model_condition_tensor_keys": actual_model_condition_tensor_keys,
         "forbidden_condition_sample_keys": forbidden_keys,
         "dimensions": dimensions,
         "output_contract": output_contract,
@@ -1406,7 +1443,7 @@ def _temporal_feature_contract_report(
         "missing_eval_metrics": missing_metrics,
         "robot_state_policy": robot_state_policy,
         "robot_state_nonzero": robot_state_nonzero,
-        "actor_uid_used_as_input": "actor_uid" in condition_keys,
+        "actor_uid_used_as_input": "actor_uid" in actual_condition_sample_fields,
         "violations": violations,
         "digest": hashlib.sha256(
             json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1415,6 +1452,20 @@ def _temporal_feature_contract_report(
     if violations and bool(cfg.get("enforce", True)):
         raise SystemExit("Temporal feature contract failed: " + "; ".join(violations))
     return report
+
+
+def _temporal_condition_sample_fields(*, model_robot_state_dim: int) -> tuple[str, ...]:
+    fields = list(TEMPORAL_MODEL_CONDITION_SAMPLE_FIELDS)
+    if model_robot_state_dim > 0:
+        fields.extend(TEMPORAL_ROBOT_STATE_SAMPLE_FIELDS)
+    return tuple(fields)
+
+
+def _temporal_model_condition_tensor_keys(*, model_robot_state_dim: int) -> tuple[str, ...]:
+    keys = ["source_body_tokens", "source_skeleton", "morphology", "prev_action"]
+    if model_robot_state_dim > 0:
+        keys.append("robot_state")
+    return tuple(keys)
 
 
 def _source_body_token_sequence(sample: dict[str, Any]) -> list[list[list[float]]]:
@@ -1530,6 +1581,7 @@ def _temporal_batch_to_device(batch, device) -> dict[str, Any]:
         "morphology",
         "robot_state",
         "prev_action",
+        "fps",
         "target_action",
     )
     return {
