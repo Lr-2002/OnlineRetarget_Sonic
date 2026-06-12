@@ -27,6 +27,7 @@
   "source_features": [
     "soma_joints_multi_future_local_nonflat_plus_soma_root_ori_b_multi_future",
     "previous_g1_action_condition",
+    "previous_g1_root_roll_pitch_condition",
     "actor_specific_proportional_soma_skeleton"
   ],
   "target_decoder": {
@@ -71,16 +72,17 @@
   "features": {
     "future_window_frames": 10,
     "future_step": 5,
-    "motion_feature": "soma_joints_multi_future_local_nonflat_plus_soma_root_ori_b_multi_future_plus_previous_g1_action",
+    "motion_feature": "soma_joints_multi_future_local_nonflat_plus_soma_root_ori_b_multi_future_plus_previous_g1_action_plus_previous_g1_root_roll_pitch",
     "skeleton_feature": "anchor_frame_soma_root_local_joint_positions_plus_joint_distances",
     "target_feature": "command_multi_future_nonflat_plus_root_pos_w_mf_plus_root_rot_w_mf",
     "include_root_pos_target": true,
     "previous_g1_action_condition": true,
+    "previous_g1_root_roll_pitch_condition": true,
     "expected_dims": {
-      "motion_token": 869,
+      "motion_token": 871,
       "x_skel": 104,
       "z_skel": 104,
-      "model_input": 973,
+      "model_input": 975,
       "target": 670
     }
   },
