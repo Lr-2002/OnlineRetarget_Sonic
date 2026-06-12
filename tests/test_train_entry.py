@@ -889,6 +889,16 @@ class TrainEntryTests(unittest.TestCase):
         self.assertIn("actual temporal condition source fields", str(raised.exception))
         self.assertIn("target_frame_indices", str(raised.exception))
 
+    def test_temporal_training_dataset_keeps_fps_before_target_action(self):
+        tensors = {key: _FakeDeviceTensor(key) for key in train_entry.TEMPORAL_BATCH_KEYS}
+
+        batch = train_entry._temporal_training_dataset_tensors(tensors)
+        condition = train_entry._temporal_batch_to_device(batch, device="cpu")
+
+        self.assertEqual([tensor.name for tensor in batch], list(train_entry.TEMPORAL_BATCH_KEYS))
+        self.assertEqual(condition["fps"].name, "fps")
+        self.assertEqual(condition["target_action"].name, "target_action")
+
 
 def _write_policy_audit(
     path: Path,
@@ -1098,6 +1108,14 @@ class _FakeTemporalTensor:
 
     def __float__(self):
         return float(self._abs_sum)
+
+
+class _FakeDeviceTensor:
+    def __init__(self, name: str):
+        self.name = name
+
+    def to(self, device, non_blocking=False):
+        return self
 
 
 class _FakeTensor:
