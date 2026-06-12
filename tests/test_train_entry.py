@@ -117,8 +117,24 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(route_b["model"]["nhead"], 4)
         self.assertEqual(route_b["model"]["num_layers"], 2)
         self.assertEqual(route_b["model"]["dim_feedforward"], 256)
+        self.assertEqual(route_b["model"]["robot_state_dim"], 0)
+        self.assertEqual(route_b["model"]["output_mode"], "residual_prev_action")
         self.assertEqual(route_b["model"]["output"], "g1_joint_position_future_window")
-        self.assertEqual(route_b["loss"], {"temporal_diffusion_policy": 1.0})
+        self.assertEqual(
+            route_b["loss"],
+            {
+                "temporal_diffusion_policy": 1.0,
+                "denoise": 1.0,
+                "x0_reconstruction": 0.25,
+                "velocity": 0.1,
+                "acceleration": 0.05,
+                "jerk": 0.0,
+                "delta_smoothness": 0.05,
+                "joint_jump": 0.02,
+                "joint_jump_velocity": 20.0,
+                "joint_limit": 0.0,
+            },
+        )
 
     def test_config_preset_preserves_old_config_without_preset(self):
         config = {
@@ -810,6 +826,33 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(report["dropped_examples"][0]["sample_id"], "bad")
         self.assertEqual(report["dropped_examples"][0]["reasons"], ["observation_nonfinite"])
 
+    def test_temporal_feature_contract_reports_p0_contract(self):
+        samples = [_temporal_sample()]
+        tensors = _temporal_tensors()
+        config = _temporal_feature_contract_config()
+
+        report = train_entry._temporal_feature_contract_report(config, samples, tensors)
+
+        self.assertEqual(report["status"], "pass")
+        self.assertEqual(report["dimensions"]["source_body_count"], 2)
+        self.assertEqual(report["dimensions"]["source_body_token_dim"], 3)
+        self.assertEqual(report["dimensions"]["model_robot_state_dim"], 0)
+        self.assertEqual(report["dimensions"]["robot_state_tensor_dim"], 5)
+        self.assertEqual(report["output_contract"]["model_output_mode"], "residual_prev_action")
+        self.assertFalse(report["actor_uid_used_as_input"])
+        self.assertEqual(len(report["digest"]), 64)
+
+    def test_temporal_feature_contract_rejects_target_only_condition_key(self):
+        samples = [_temporal_sample()]
+        tensors = _temporal_tensors()
+        config = _temporal_feature_contract_config()
+        config["feature_contract"]["condition_sample_keys"].append("future_target_joints")
+
+        with self.assertRaises(SystemExit) as raised:
+            train_entry._temporal_feature_contract_report(config, samples, tensors)
+
+        self.assertIn("future_target_joints", str(raised.exception))
+
 
 def _write_policy_audit(
     path: Path,
@@ -891,13 +934,129 @@ def _preset_switch_config(policy_preset: str) -> dict:
                     "source_body_token_dim": 15,
                     "source_skeleton_dim": 120,
                     "morphology_dim": 13,
-                    "robot_state_dim": 94,
+                    "robot_state_dim": 0,
+                    "output_mode": "residual_prev_action",
                     "output": "g1_joint_position_future_window",
                 },
-                "loss": {"temporal_diffusion_policy": 1.0},
+                "loss": {
+                    "temporal_diffusion_policy": 1.0,
+                    "denoise": 1.0,
+                    "x0_reconstruction": 0.25,
+                    "velocity": 0.1,
+                    "acceleration": 0.05,
+                    "jerk": 0.0,
+                    "delta_smoothness": 0.05,
+                    "joint_jump": 0.02,
+                    "joint_jump_velocity": 20.0,
+                    "joint_limit": 0.0,
+                },
             },
         },
     }
+
+
+def _temporal_sample() -> dict:
+    return {
+        "sample_id": "s1",
+        "actor_uid": "A001",
+        "observation": [0.0],
+        "source_body_tokens": [
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [[1.1, 0.0, 0.0], [0.0, 1.1, 0.0]],
+        ],
+        "source_skeleton": [1.0, 2.0, 3.0, 4.0],
+        "morphology": [1.7, 70.0],
+        "robot_state": [0.0, 0.0, 0.0, 0.0, 0.0],
+        "prev_target_joints": [0.0, 0.1],
+        "target_joints": [0.1, 0.2],
+        "future_target_joints": [[0.1, 0.2], [0.2, 0.4]],
+        "target_frame_indices": [10, 15],
+    }
+
+
+def _temporal_feature_contract_config() -> dict:
+    return {
+        "data": {"target_format": "bones_sonic_joint_pos_future_window"},
+        "model": {
+            "output": "g1_joint_position_future_window",
+            "output_mode": "residual_prev_action",
+            "robot_state_dim": 0,
+        },
+        "evaluation": {
+            "metrics": [
+                "joint_rmse",
+                "joint_velocity_rmse",
+                "predicted_minus_target_joint_jump_rate",
+                "max_joint_abs_error",
+            ]
+        },
+        "feature_contract": {
+            "enabled": True,
+            "enforce": True,
+            "condition_sample_keys": [
+                "source_body_tokens",
+                "source_skeleton",
+                "morphology",
+                "prev_target_joints",
+            ],
+            "forbid_condition_sample_keys": [
+                "target_joints",
+                "future_target_joints",
+                "target_frame",
+                "target_frame_indices",
+                "target_g1_path",
+                "actor_uid",
+            ],
+            "robot_state_policy": "disabled",
+            "expected": {
+                "target_horizon_frames": 2,
+                "source_body_count": 2,
+                "source_body_token_dim": 3,
+                "source_skeleton_dim": 4,
+                "morphology_dim": 2,
+                "robot_state_dim": 0,
+                "action_dim": 2,
+            },
+            "required_eval_metrics": [
+                "joint_rmse",
+                "joint_velocity_rmse",
+                "predicted_minus_target_joint_jump_rate",
+                "max_joint_abs_error",
+            ],
+        },
+    }
+
+
+def _temporal_tensors() -> dict:
+    return {
+        "source_body_tokens": _FakeTemporalTensor((1, 2, 2, 3)),
+        "source_skeleton": _FakeTemporalTensor((1, 4)),
+        "morphology": _FakeTemporalTensor((1, 2)),
+        "robot_state": _FakeTemporalTensor((1, 5)),
+        "prev_action": _FakeTemporalTensor((1, 2)),
+        "target_action": _FakeTemporalTensor((1, 2, 2)),
+    }
+
+
+class _FakeTemporalTensor:
+    def __init__(self, shape: tuple[int, ...], abs_sum: float = 0.0):
+        self.shape = shape
+        self._abs_sum = abs_sum
+
+    def abs(self):
+        return self
+
+    def sum(self):
+        return self
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def __float__(self):
+        return float(self._abs_sum)
 
 
 class _FakeTensor:

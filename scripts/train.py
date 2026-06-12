@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 from dataclasses import replace
+import hashlib
 import html
 import json
 import os
@@ -822,8 +823,10 @@ def _train_temporal_diffusion_jsonl(
     )
     if not samples:
         raise SystemExit(f"all temporal samples contain non-finite values: {samples_jsonl}")
+    feature_contract = _temporal_feature_contract_report(config, samples, tensors)
     if rank == 0:
         print(f"sample_filter={json.dumps(sample_filter, sort_keys=True)}")
+        print(f"feature_contract={json.dumps(feature_contract, sort_keys=True)}")
 
     seed = int(_nested_get(config, ("experiment", "seed"), 17))
     torch.manual_seed(seed)
@@ -984,6 +987,7 @@ def _train_temporal_diffusion_jsonl(
         },
         loss_config=_loss_config(config),
         evaluation_config=_evaluation_config(config, run_name="train_offline_eval").to_dict(),
+        feature_contract=feature_contract,
         distributed_runtime=_runtime_report(runtime),
         resume_checkpoint=str(resume_checkpoint) if resume_checkpoint is not None else "",
         sample_filter=sample_filter,
@@ -1030,7 +1034,8 @@ def _training_loss(
         weight = float(_loss_config(config).get("diffusion_policy", 1.0))
         return weight * _unwrap_model(model).diffusion_loss(observation, target)
     if family == "temporal_diffusion_policy":
-        weight = float(_loss_config(config).get("temporal_diffusion_policy", 1.0))
+        loss_cfg = _loss_config(config)
+        weight = float(loss_cfg.get("temporal_diffusion_policy", 1.0))
         return weight * _unwrap_model(model).diffusion_loss(
             observation["source_body_tokens"],
             target,
@@ -1038,6 +1043,7 @@ def _training_loss(
             morphology=observation.get("morphology"),
             robot_state=observation.get("robot_state"),
             prev_action=observation.get("prev_action"),
+            loss_config=loss_cfg,
         )
     if family == "token_transformer":
         unwrapped = _unwrap_model(model)
@@ -1276,6 +1282,139 @@ def _temporal_condition_tensors(torch, samples: list[dict[str, Any]]) -> dict[st
         key: torch.tensor(value, dtype=torch.float32)
         for key, value in rows.items()
     }
+
+
+def _feature_contract_config(config: dict[str, Any]) -> dict[str, Any]:
+    payload = config.get("feature_contract", {})
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _temporal_feature_contract_report(
+    config: dict[str, Any],
+    samples: list[dict[str, Any]],
+    tensors: dict[str, Any],
+) -> dict[str, Any]:
+    cfg = _feature_contract_config(config)
+    enabled = bool(cfg.get("enabled", False))
+    if not enabled:
+        return {"enabled": False}
+    model_cfg = config.get("model", {}) if isinstance(config.get("model", {}), dict) else {}
+    evaluation_cfg = (
+        config.get("evaluation", {}) if isinstance(config.get("evaluation", {}), dict) else {}
+    )
+    metrics = evaluation_cfg.get("metrics", ())
+    if isinstance(metrics, str):
+        metric_names = [metrics]
+    else:
+        metric_names = [str(metric) for metric in metrics]
+    model_robot_state_dim = int(model_cfg.get("robot_state_dim", tensors["robot_state"].shape[1]))
+    condition_keys = cfg.get("condition_sample_keys")
+    if not isinstance(condition_keys, list):
+        condition_keys = [
+            "source_body_tokens",
+            "source_skeleton",
+            "morphology",
+            "prev_target_joints",
+        ]
+        if model_robot_state_dim > 0:
+            condition_keys.append("robot_state")
+    condition_keys = [str(key) for key in condition_keys]
+    forbidden_keys = cfg.get(
+        "forbid_condition_sample_keys",
+        [
+            "target_joints",
+            "future_target_joints",
+            "target_frame",
+            "target_frame_indices",
+            "target_g1_path",
+            "actor_uid",
+        ],
+    )
+    forbidden_keys = (
+        [str(key) for key in forbidden_keys] if isinstance(forbidden_keys, list) else []
+    )
+    dimensions = {
+        "sample_count": len(samples),
+        "source_body_count": int(tensors["source_body_tokens"].shape[2]),
+        "source_body_token_dim": int(tensors["source_body_tokens"].shape[3]),
+        "target_horizon_frames": int(tensors["target_action"].shape[1]),
+        "action_dim": int(tensors["target_action"].shape[2]),
+        "source_skeleton_dim": int(tensors["source_skeleton"].shape[1]),
+        "morphology_dim": int(tensors["morphology"].shape[1]),
+        "robot_state_tensor_dim": int(tensors["robot_state"].shape[1]),
+        "model_robot_state_dim": model_robot_state_dim,
+    }
+    violations = []
+    forbidden_condition_keys = sorted(set(condition_keys) & set(forbidden_keys))
+    if forbidden_condition_keys:
+        violations.append(
+            "condition_sample_keys include target-only or identity keys: "
+            + ", ".join(forbidden_condition_keys)
+        )
+    expected = cfg.get("expected", {})
+    if isinstance(expected, dict):
+        for key, expected_value in expected.items():
+            actual_key = "model_robot_state_dim" if key == "robot_state_dim" else str(key)
+            actual_value = dimensions.get(actual_key)
+            if actual_value is None:
+                continue
+            try:
+                expected_int = int(expected_value)
+            except (TypeError, ValueError):
+                continue
+            if int(actual_value) != expected_int:
+                violations.append(f"{key} expected {expected_int}, got {actual_value}")
+    robot_state_policy = str(cfg.get("robot_state_policy", "allow_zero"))
+    robot_state_abs_sum = float(tensors["robot_state"].abs().sum().detach().cpu())
+    robot_state_nonzero = robot_state_abs_sum > 0.0
+    if robot_state_policy in {"disabled", "none"} and model_robot_state_dim != 0:
+        violations.append("robot_state_policy=disabled requires model.robot_state_dim=0")
+    if robot_state_policy == "require_nonzero" and not robot_state_nonzero:
+        violations.append("robot_state_policy=require_nonzero but robot_state tensor is all zero")
+    required_metrics = cfg.get("required_eval_metrics", ())
+    if isinstance(required_metrics, str):
+        required_metric_names = [required_metrics]
+    elif isinstance(required_metrics, list):
+        required_metric_names = [str(metric) for metric in required_metrics]
+    else:
+        required_metric_names = []
+    missing_metrics = sorted(set(required_metric_names) - set(metric_names))
+    if missing_metrics:
+        violations.append("evaluation.metrics missing: " + ", ".join(missing_metrics))
+    output_contract = {
+        "model_output_mode": str(model_cfg.get("output_mode", "absolute")),
+        "prediction_export": "absolute_g1_joint_position_future_window",
+        "target_format": str(_nested_get(config, ("data", "target_format"), "")),
+        "model_output": str(model_cfg.get("output", "")),
+    }
+    digest_payload = {
+        "condition_sample_keys": condition_keys,
+        "dimensions": dimensions,
+        "output_contract": output_contract,
+        "required_eval_metrics": required_metric_names,
+        "robot_state_policy": robot_state_policy,
+    }
+    report = {
+        "enabled": True,
+        "name": str(cfg.get("name", "temporal_diffusion_policy_feature_eval_v1")),
+        "status": "pass" if not violations else "fail",
+        "condition_sample_keys": condition_keys,
+        "forbidden_condition_sample_keys": forbidden_keys,
+        "dimensions": dimensions,
+        "output_contract": output_contract,
+        "required_eval_metrics": required_metric_names,
+        "missing_eval_metrics": missing_metrics,
+        "robot_state_policy": robot_state_policy,
+        "robot_state_nonzero": robot_state_nonzero,
+        "actor_uid_used_as_input": "actor_uid" in condition_keys,
+        "violations": violations,
+        "digest": hashlib.sha256(
+            json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest(),
+    }
+    if violations and bool(cfg.get("enforce", True)):
+        raise SystemExit("Temporal feature contract failed: " + "; ".join(violations))
+    return report
 
 
 def _source_body_token_sequence(sample: dict[str, Any]) -> list[list[list[float]]]:
@@ -1678,6 +1817,7 @@ def _predict_temporal_diffusion_jsonl(
     )
     if not samples:
         raise SystemExit(f"all temporal samples contain non-finite values: {samples_jsonl}")
+    feature_contract = _temporal_feature_contract_report(config, samples, tensors)
     output_dir.mkdir(parents=True, exist_ok=True)
     with torch.no_grad():
         pred = _predict_tensor(
@@ -1733,6 +1873,7 @@ def _predict_temporal_diffusion_jsonl(
         },
         "loss_config": _loss_config(config),
         "evaluation_config": _evaluation_config(config, run_name="offline_eval").to_dict(),
+        "feature_contract": feature_contract,
         "sample_filter": sample_filter,
         "quality_gate": quality_gate,
         "device": str(device),
@@ -2391,6 +2532,7 @@ def _build_train_report(
     model_config: dict[str, Any] | None = None,
     loss_config: dict[str, Any] | None = None,
     evaluation_config: dict[str, Any] | None = None,
+    feature_contract: dict[str, Any] | None = None,
     distributed_runtime: dict[str, Any] | None = None,
     resume_checkpoint: str = "",
     sample_filter: dict[str, Any] | None = None,
@@ -2414,6 +2556,7 @@ def _build_train_report(
         "model_config": model_config or {},
         "loss_config": loss_config or {},
         "evaluation_config": evaluation_config or {},
+        "feature_contract": feature_contract or {"enabled": False},
         "quality_gate": quality_gate,
         "device": device,
         "world_size": world_size,

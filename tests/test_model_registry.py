@@ -111,6 +111,7 @@ class ModelRegistryTests(unittest.TestCase):
                     "morphology_dim": 2,
                     "robot_state_dim": 3,
                     "max_horizon": 4,
+                    "output_mode": "residual_prev_action",
                 }
             },
             input_dim=spec.flattened_dim(),
@@ -133,6 +134,13 @@ class ModelRegistryTests(unittest.TestCase):
             prev_action=prev_action,
             noise=torch.zeros_like(target),
             timesteps=torch.zeros(3, dtype=torch.long),
+            loss_config={
+                "denoise": 1.0,
+                "x0_reconstruction": 0.1,
+                "velocity": 0.1,
+                "acceleration": 0.1,
+                "joint_jump": 0.1,
+            },
         )
         prediction = built.model.sample(
             source_body_tokens,
@@ -145,8 +153,15 @@ class ModelRegistryTests(unittest.TestCase):
         )
 
         self.assertEqual(built.family, "temporal_diffusion_policy")
+        self.assertEqual(built.model.output_mode, "residual_prev_action")
         self.assertEqual(tuple(loss.shape), ())
         self.assertEqual(tuple(prediction.shape), (3, 2, 2))
+        target = torch.tensor([[[1.0, 2.0], [1.5, 1.0]]])
+        prev_action = torch.tensor([[0.5, 1.5]])
+        residual = built.model._to_model_action(target, prev_action)
+        reconstructed = built.model._from_model_action(residual, prev_action)
+        self.assertTrue(torch.equal(residual, torch.tensor([[[0.5, 0.5], [1.0, -0.5]]])))
+        self.assertTrue(torch.equal(reconstructed, target))
 
 
 if __name__ == "__main__":
