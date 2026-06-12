@@ -217,14 +217,18 @@ Gate:
 
 Stop condition: baseline is worse/better by concrete metrics, not subjective visual inspection alone.
 
-Current status: the earlier OnlineRetarget supervised trainer is preserved as a
-legacy scaffold and diagnostic baseline, not the active implementation lane. It
-validated config capture, DDP shape, JSONL sample refs, temporal MLP,
-Transformer, and flow-matching smoke paths, but new model features should not be
-added there. The active baseline moved to SONIC: official filtered BONES
-training runs through SONIC's `UniversalTokenModule`, shared token space, and
-G1 decoder/controller surfaces. OnlineRetarget remains responsible for registry,
-curation, split, audit, offline metric, and documentation artifacts.
+Current status: the earlier OnlineRetarget JSONL supervised trainer is preserved
+as a legacy scaffold and diagnostic baseline. The active checked-in execution
+surface is now strict supervised `soma_motionlib_kin_only`: paired SOMA
+motionlib features are loaded by `scripts/train_sonic_kin_skeleton_ae.py`, one
+config launches as one 4-GPU DDP job, and the target surface is `g1_kin` only.
+The current run matrix includes the LR-280 kin/walk data-package A-only and A+B
+configs, the LR-273/LR-284 proportional loss-on treatment, and the LR-274
+matched proportional loss-off baseline. OnlineRetarget remains responsible for
+registry, curation, split, audit, offline metric, data-package filtering,
+launcher guardrails, and documentation artifacts.
+
+Weekly walk-data outcome target: online retargeter walk should be non-jittery, non-drifting, avoid self-collision, and be at least similar to the source walk data.
 
 ## M6 - Model Design Ablations and Latency Gate
 

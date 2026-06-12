@@ -1,11 +1,33 @@
-# OnlineRetarget
+# OnlineRetarget Sonic
 
 Learning-based online retargeting from BONES-SEED SOMA human motion to Unitree G1 robot motion.
 
-The current execution surface has two active supervised SONIC/SOMA run families:
+The current checked-in execution surface is a strict supervised SONIC/SOMA
+motionlib lane. It keeps the target decoder to `g1_kin`, uses one 4-GPU DDP job
+per config, and excludes PPO, Isaac rollout, reward, and `g1_dyn` surfaces from
+the active supervised training path.
 
-- LR-185 kin-only SONIC SOMA encoder baselines: **SOMA uniform -> G1** and **SOMA proportional -> G1**. Each baseline launches as one 4-GPU run with SONIC `g1_kin` as the only active decoder. See `goal.md` and `docs/status/sonic_native_retarget_contract_2026-05-20.md`.
-- LR-177 A0 SOMA motionlib ablations: frozen Skeleton Geometry AE conditioning versus no skeleton encoder, each run on uniform and proportional SOMA topology. See `docs/status/lr177_a0_usage.md`.
+- LR-280 kin/walk data-package configs:
+  `sonic_kin_soma_motionlib_kin_walk_data_package_a_only_4gpu.json` and
+  `sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_4gpu.json`. These
+  pin the accepted paired SOMA motionlib kin/walk package digest and share the
+  LR-270 metric/eval cohort.
+- LR-273/LR-284 proportional treatment:
+  `sonic_kin_soma_motionlib_proportional_4gpu.json`, with temporal-consistency
+  and A/B command-overlap auxiliary losses enabled.
+- LR-274 matched proportional loss-off baseline:
+  `sonic_kin_soma_motionlib_proportional_loss_off_baseline_4gpu.json`.
+- LR-177 A0 SOMA motionlib ablations remain supporting evidence for frozen
+  Skeleton Geometry AE conditioning versus no skeleton encoder. See
+  `docs/status/lr177_a0_usage.md`.
+
+Weekly walk-data outcome target: online retargeter walk should be non-jittery, non-drifting, avoid self-collision, and be at least similar to the source walk data.
+
+Historical SONIC-native shared-token configs named
+`sonic_kin_only_soma_encoder_{uniform,proportional}.json` remain in the repo as
+contract and migration artifacts. They are not the default current launcher
+surface; use `docs/status/online_retarget_sonic_training_boundary_2026-05-20.md`
+for the active remote launch matrix.
 
 ## Repository Status
 
@@ -28,7 +50,34 @@ python -m pip install -e ".[dev]"
 
 The current machine does not need to have this environment active to inspect docs or run the pure-Python smoke tests.
 
+## Repo Hygiene
+
+- Treat `/home/user/data/motion_data` as read-only. Derived artifacts belong
+  under `runs/`, `outputs/`, or another explicit output root.
+- Keep formal training traceable: commit before a launch, use one config per
+  4-GPU job, and let the launcher record git SHAs and manifests.
+- Prefer explicit `CONFIG=...` values when launching. The compatibility wrapper
+  `scripts/remote_start_sonic_kin_only_soma_encoder_4gpu.sh` currently forwards
+  into the strict supervised SOMA motionlib launcher.
+- Keep historical A1/A2/B1/B2 or legacy SONIC-native evidence labeled as
+  historical when updating status docs.
+
 ## Useful Commands
+
+Run the focused local checks for the current strict supervised launch surface:
+
+```bash
+PYTHONPATH=src:. python3 -m unittest \
+  tests.test_remote_launcher_guardrails \
+  tests.test_data_package_indicator \
+  -q
+```
+
+Compile Python sources without importing optional runtime dependencies:
+
+```bash
+python3 -m compileall -q src scripts
+```
 
 Inventory the local BONES-SEED metadata without modifying data:
 
@@ -293,6 +342,32 @@ configs by changing `CONFIG`. The launcher refuses uncommitted or stale control-
 starting formal training; do not restart or modify already-running remote jobs that were launched
 from an earlier committed SHA.
 
+### Current Strict Supervised SOMA Motionlib Runs
+
+The guarded 4-GPU launcher for the current strict supervised lane is:
+
+```bash
+CONFIG=configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_only_4gpu.json \
+scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
+
+CONFIG=configs/sonic_kin_soma_motionlib_kin_walk_data_package_a_plus_b_4gpu.json \
+scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
+```
+
+For the broader proportional treatment/baseline comparison:
+
+```bash
+CONFIG=configs/sonic_kin_soma_motionlib_proportional_4gpu.json \
+scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
+
+CONFIG=configs/sonic_kin_soma_motionlib_proportional_loss_off_baseline_4gpu.json \
+scripts/remote_start_sonic_kin_soma_motionlib_4gpu.sh
+```
+
+All four configs use `training_lane=soma_motionlib_kin_only`, one 4-GPU DDP job,
+`g1_kin` targets only, committed/latest repo checks, and output roots under
+`outputs/`.
+
 Dry-run the latency benchmark contract:
 
 ```bash
@@ -332,4 +407,6 @@ body-model decoding still requires the SMPL-X dependencies; generic `.npz` files
 - `docs/architecture.md` - training and inference pipeline.
 - `docs/milestones.md` - checkable gates.
 - `docs/experiment_tracking.md` - WandB, git, DDP, and tmux rules.
+- `docs/status/online_retarget_sonic_training_boundary_2026-05-20.md` - active remote launch boundary.
+- `docs/status/lr291_repo_cleanup_2026-06-09.md` - current repo/doc cleanup note.
 - `docs/status/lr177_a0_usage.md` - LR-177 frozen-AE/no-skeleton-encoder config usage.
