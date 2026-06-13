@@ -103,14 +103,31 @@ def prediction_joint_sequence(row: Mapping[str, Any], key: str) -> np.ndarray:
     return array
 
 
-def target_joint_sequence(row: Mapping[str, Any], target_arrays: Mapping[str, np.ndarray]) -> np.ndarray:
-    if row.get("target_joints") is not None:
-        return prediction_joint_sequence(row, "target_joints")
-    if "joint_pos" not in target_arrays:
+def target_joint_sequence(
+    row: Mapping[str, Any],
+    target_arrays: Mapping[str, np.ndarray],
+    *,
+    frame_indices: np.ndarray,
+) -> np.ndarray:
+    if "joint_pos" in target_arrays:
+        array = _select_frames(
+            np.asarray(target_arrays["joint_pos"], dtype=np.float32),
+            frame_indices,
+            name="joint_pos",
+        )
+        if array.ndim != 2 or array.shape[0] <= 0 or array.shape[1] <= 0:
+            raise ValueError("target_g1_path joint_pos must be a non-empty 2D array")
+        return array
+    if row.get("target_joints") is None:
         raise ValueError("target_joints missing from row and joint_pos missing from target_g1_path NPZ")
-    array = np.asarray(target_arrays["joint_pos"], dtype=np.float32)
+    array = prediction_joint_sequence(row, "target_joints")
     if array.ndim != 2 or array.shape[0] <= 0 or array.shape[1] <= 0:
-        raise ValueError("target_g1_path joint_pos must be a non-empty 2D array")
+        raise ValueError("target_joints must be a non-empty 2D joint sequence")
+    if array.shape[0] != len(frame_indices):
+        raise ValueError(
+            "target_joints length must match target frame indices "
+            f"({array.shape[0]} vs {len(frame_indices)})"
+        )
     return array
 
 
@@ -133,6 +150,41 @@ def joint_names_from_row(row: Mapping[str, Any], joint_dim: int) -> list[str]:
     return [f"joint_{index}" for index in range(joint_dim)]
 
 
+def target_frame_indices(row: Mapping[str, Any], *, horizon: int) -> np.ndarray:
+    if horizon <= 0:
+        raise ValueError(f"horizon must be positive, got {horizon}")
+    explicit = row.get("target_frame_indices")
+    if explicit is not None:
+        if not isinstance(explicit, Sequence) or isinstance(explicit, (str, bytes)):
+            raise ValueError("target_frame_indices must be a sequence of integer frame indices")
+        indices = [_coerce_frame_index(value, key="target_frame_indices") for value in explicit]
+        if len(indices) != horizon:
+            raise ValueError(
+                "target_frame_indices length must match predicted_joints horizon "
+                f"({len(indices)} vs {horizon})"
+            )
+    else:
+        start = _coerce_frame_index(row.get("target_frame", 0), key="target_frame")
+        indices = [start + offset for offset in range(horizon)]
+    result = np.asarray(indices, dtype=np.int64)
+    if np.any(result < 0):
+        raise ValueError(f"target frame indices must be non-negative, got {indices}")
+    return result
+
+
+def _coerce_frame_index(value: Any, *, key: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must contain integer frame indices, got bool")
+    try:
+        number = int(value)
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{key} must contain integer frame indices, got {value!r}") from None
+    if not math.isfinite(numeric) or number != numeric:
+        raise ValueError(f"{key} must contain integer frame indices, got {value!r}")
+    return number
+
+
 def root_pose_from_prediction_row(
     row: Mapping[str, Any],
     *,
@@ -153,7 +205,7 @@ def root_pose_from_prediction_row(
 def root_pose_from_target_arrays(
     arrays: Mapping[str, np.ndarray],
     *,
-    frame_count: int,
+    frame_indices: np.ndarray,
     root_source: str,
     root_body_index: int,
     root_body_name: str,
@@ -163,19 +215,25 @@ def root_pose_from_target_arrays(
     source = root_source
     tried: list[str] = []
     if source == "auto":
-        for candidate in ("target_npz_root", "motionlib_root", "body_root"):
-            try:
-                return root_pose_from_target_arrays(
-                    arrays,
-                    frame_count=frame_count,
-                    root_source=candidate,
-                    root_body_index=root_body_index,
-                    root_body_name=root_body_name,
-                    root_quat_format=root_quat_format,
-                    allow_root_fixed_fallback=False,
-                )
-            except ValueError as exc:
-                tried.append(f"{candidate}: {exc}")
+        candidates = (
+            ("target_npz_root", ("root_pos", "root_quat")),
+            ("motionlib_root", ("root_trans_offset", "root_rot")),
+            ("body_root", ("body_pos_w", "body_quat_w")),
+        )
+        for candidate, required_keys in candidates:
+            missing = [key for key in required_keys if key not in arrays]
+            if missing:
+                tried.append(f"{candidate}: missing {', '.join(missing)}")
+                continue
+            return root_pose_from_target_arrays(
+                arrays,
+                frame_indices=frame_indices,
+                root_source=candidate,
+                root_body_index=root_body_index,
+                root_body_name=root_body_name,
+                root_quat_format=root_quat_format,
+                allow_root_fixed_fallback=False,
+            )
         if allow_root_fixed_fallback:
             source = "root_fixed"
         else:
@@ -188,35 +246,52 @@ def root_pose_from_target_arrays(
     if source == "target_npz_root":
         if "root_pos" not in arrays or "root_quat" not in arrays:
             raise ValueError("target_npz_root requires root_pos and root_quat keys")
-        root_pos = _as_2d_float(arrays["root_pos"], width=3, name="root_pos")[:frame_count]
-        root_quat = _quat_to_wxyz(_as_2d_float(arrays["root_quat"], width=4, name="root_quat"), root_quat_format)[
-            :frame_count
-        ]
+        root_pos = _select_frames(
+            _as_2d_float(arrays["root_pos"], width=3, name="root_pos"),
+            frame_indices,
+            name="root_pos",
+        )
+        root_quat = _quat_to_wxyz(
+            _select_frames(
+                _as_2d_float(arrays["root_quat"], width=4, name="root_quat"),
+                frame_indices,
+                name="root_quat",
+            ),
+            root_quat_format,
+        )
         semantics = {
             "root_pose_source": "target_npz_root",
             "root_pos_key": "root_pos",
             "root_quat_key": "root_quat",
             "root_quat_format": "wxyz",
             "root_fixed_fallback": False,
-            "root_semantics": "world-space root_pos/root_quat copied from target_g1_path NPZ",
+            "root_semantics": "world-space root_pos/root_quat selected from target_g1_path NPZ by target frame indices",
         }
         return root_pos, root_quat, semantics
 
     if source == "motionlib_root":
         if "root_trans_offset" not in arrays or "root_rot" not in arrays:
             raise ValueError("motionlib_root requires root_trans_offset and root_rot keys")
-        root_pos = _as_2d_float(arrays["root_trans_offset"], width=3, name="root_trans_offset")[:frame_count]
+        root_pos = _select_frames(
+            _as_2d_float(arrays["root_trans_offset"], width=3, name="root_trans_offset"),
+            frame_indices,
+            name="root_trans_offset",
+        )
         root_quat = _quat_to_wxyz(
-            _as_2d_float(arrays["root_rot"], width=4, name="root_rot"),
+            _select_frames(
+                _as_2d_float(arrays["root_rot"], width=4, name="root_rot"),
+                frame_indices,
+                name="root_rot",
+            ),
             root_quat_format,
-        )[:frame_count]
+        )
         semantics = {
             "root_pose_source": "motionlib_root",
             "root_pos_key": "root_trans_offset",
             "root_quat_key": "root_rot",
             "root_quat_format": root_quat_format,
             "root_fixed_fallback": False,
-            "root_semantics": "world-space motionlib root_trans_offset/root_rot copied from target_g1_path NPZ",
+            "root_semantics": "world-space motionlib root_trans_offset/root_rot selected from target_g1_path NPZ by target frame indices",
         }
         return root_pos, root_quat, semantics
 
@@ -231,8 +306,10 @@ def root_pose_from_target_arrays(
             raise ValueError("body_quat_w must have shape [frames, bodies, 4]")
         if root_body_index < 0 or root_body_index >= body_pos.shape[1] or root_body_index >= body_quat.shape[1]:
             raise ValueError(f"root_body_index {root_body_index} outside body_pos_w/body_quat_w body axis")
-        root_pos = body_pos[:frame_count, root_body_index, :]
-        root_quat = _quat_to_wxyz(body_quat[:frame_count, root_body_index, :], root_quat_format)
+        selected_body_pos = _select_frames(body_pos, frame_indices, name="body_pos_w")
+        selected_body_quat = _select_frames(body_quat, frame_indices, name="body_quat_w")
+        root_pos = selected_body_pos[:, root_body_index, :]
+        root_quat = _quat_to_wxyz(selected_body_quat[:, root_body_index, :], root_quat_format)
         semantics = {
             "root_pose_source": "body_root",
             "root_pos_key": f"body_pos_w[:, {root_body_index}, :]",
@@ -241,13 +318,13 @@ def root_pose_from_target_arrays(
             "root_body_name": str(root_body_name),
             "root_quat_format": root_quat_format,
             "root_fixed_fallback": False,
-            "root_semantics": "world-space G1 root body pose copied from target_g1_path body_pos_w/body_quat_w",
+            "root_semantics": "world-space G1 root body pose selected from target_g1_path body_pos_w/body_quat_w by target frame indices",
         }
         return root_pos, root_quat, semantics
 
     if source == "root_fixed":
-        root_pos = np.zeros((int(frame_count), 3), dtype=np.float32)
-        root_quat = np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (int(frame_count), 1))
+        root_pos = np.zeros((int(len(frame_indices)), 3), dtype=np.float32)
+        root_quat = np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (int(len(frame_indices)), 1))
         semantics = {
             "root_pose_source": "root_fixed",
             "root_pos_key": "",
@@ -274,13 +351,14 @@ def write_dp_motion_assets(
     allow_root_fixed_fallback: bool,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     predicted_joints = prediction_joint_sequence(row, "predicted_joints")
-    target_joints = target_joint_sequence(row, target_arrays)
-    frame_count = min(predicted_joints.shape[0], target_joints.shape[0])
+    frame_indices = target_frame_indices(row, horizon=predicted_joints.shape[0])
+    target_joints = target_joint_sequence(row, target_arrays, frame_indices=frame_indices)
+    frame_count = min(predicted_joints.shape[0], target_joints.shape[0], len(frame_indices))
     if frame_count <= 0:
         raise ValueError("cannot write zero-frame DP visual validation assets")
     target_root_pos, target_root_quat, root_semantics = root_pose_from_target_arrays(
         target_arrays,
-        frame_count=frame_count,
+        frame_indices=frame_indices[:frame_count],
         root_source=root_source,
         root_body_index=root_body_index,
         root_body_name=root_body_name,
@@ -352,6 +430,7 @@ def write_dp_motion_assets(
     bridge_metadata = {
         "schema": "lr310_dp_predictions_jsonl_to_accepted_vertical_v2",
         "target_frames": int(frame_count),
+        "target_frame_indices": [int(index) for index in frame_indices[:frame_count].tolist()],
         "predicted_joint_dim": int(predicted_joints.shape[1]),
         "target_joint_dim": int(target_joints.shape[1]),
         "root_pose": dict(root_semantics),
@@ -698,6 +777,22 @@ def _as_2d_float(value: Any, *, width: int, name: str) -> np.ndarray:
     if not np.isfinite(array).all():
         raise ValueError(f"{name} contains non-finite values")
     return array
+
+
+def _select_frames(array: np.ndarray, frame_indices: np.ndarray, *, name: str) -> np.ndarray:
+    values = np.asarray(array, dtype=np.float32)
+    if values.ndim < 1:
+        raise ValueError(f"{name} must have a frame axis")
+    indices = np.asarray(frame_indices, dtype=np.int64)
+    if indices.ndim != 1 or indices.shape[0] <= 0:
+        raise ValueError("target frame indices must be a non-empty 1D sequence")
+    if np.any(indices < 0):
+        raise ValueError(f"target frame indices for {name} must be non-negative")
+    if int(indices.max()) >= values.shape[0]:
+        raise ValueError(
+            f"target frame index {int(indices.max())} out of range for {name} with {values.shape[0]} frames"
+        )
+    return values[indices]
 
 
 def _quat_to_wxyz(quat: np.ndarray, fmt: str) -> np.ndarray:
