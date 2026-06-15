@@ -1345,6 +1345,93 @@ class SonicKinTrainTimingTests(unittest.TestCase):
         self.assertAlmostEqual(float(metrics["ab_overlap_loss_weight"]), 0.01)
         self.assertAlmostEqual(float(loss), 49.005, delta=1e-5)
 
+    def test_loss_and_metrics_can_skip_expensive_metric_materialization(self):
+        torch = sonic_train.torch
+        pred_command = torch.tensor([[0.0, 0.0, 2.0, 0.0]], dtype=torch.float32)
+        target_command = torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32)
+        pred_anchor = torch.zeros(1, 18, dtype=torch.float32)
+        target_anchor = torch.zeros(1, 18, dtype=torch.float32)
+        pred = torch.cat([pred_command, pred_anchor], dim=-1)
+        target = torch.cat([target_command, target_anchor], dim=-1)
+        stats = {
+            "target_mean": torch.zeros(pred.shape[-1], dtype=torch.float32),
+            "target_std": torch.ones(pred.shape[-1], dtype=torch.float32),
+        }
+
+        loss, metrics = sonic_train.loss_and_metrics(
+            pred,
+            target,
+            target,
+            stats,
+            4,
+            1,
+            18,
+            True,
+            1.0,
+            0.25,
+            0.5,
+            0.01,
+            collect_metrics=False,
+        )
+
+        self.assertEqual(metrics, {})
+        self.assertAlmostEqual(float(loss), 0.255)
+
+    def test_train_metric_collection_cadence_keeps_log_checkpoint_and_boundary_steps(self):
+        self.assertEqual(
+            sonic_train.train_metrics_every_steps({"training": {"train_metrics_every_steps": 20}}),
+            20,
+        )
+        self.assertEqual(
+            sonic_train.train_metrics_every_steps({"training": {"metrics_every_steps": 7}}),
+            7,
+        )
+        self.assertTrue(
+            sonic_train.should_collect_train_metrics(
+                1,
+                max_steps=100,
+                log_every=20,
+                checkpoint_every=50,
+                metrics_every=20,
+            )
+        )
+        self.assertFalse(
+            sonic_train.should_collect_train_metrics(
+                2,
+                max_steps=100,
+                log_every=20,
+                checkpoint_every=50,
+                metrics_every=20,
+            )
+        )
+        self.assertTrue(
+            sonic_train.should_collect_train_metrics(
+                20,
+                max_steps=100,
+                log_every=20,
+                checkpoint_every=50,
+                metrics_every=20,
+            )
+        )
+        self.assertTrue(
+            sonic_train.should_collect_train_metrics(
+                50,
+                max_steps=100,
+                log_every=20,
+                checkpoint_every=50,
+                metrics_every=20,
+            )
+        )
+        self.assertTrue(
+            sonic_train.should_collect_train_metrics(
+                100,
+                max_steps=100,
+                log_every=20,
+                checkpoint_every=50,
+                metrics_every=20,
+            )
+        )
+
     def test_training_batch_selection_preserves_order_when_ab_overlap_is_active(self):
         torch = sonic_train.torch
         motion = torch.arange(10, dtype=torch.float32).reshape(10, 1)

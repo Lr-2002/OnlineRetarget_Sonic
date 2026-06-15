@@ -1678,6 +1678,34 @@ def average_metric_dict(
     return {key: float(value) for key, value in zip(keys, values.detach().cpu().tolist())}
 
 
+def train_metrics_every_steps(config: Mapping[str, Any]) -> int:
+    training = config.get("training")
+    if not isinstance(training, Mapping):
+        return 1
+    raw = training.get("train_metrics_every_steps", training.get("metrics_every_steps", 1))
+    if raw in ("", None):
+        return 1
+    return max(1, int(raw))
+
+
+def should_collect_train_metrics(
+    step: int,
+    *,
+    max_steps: int,
+    log_every: int,
+    checkpoint_every: int,
+    metrics_every: int,
+) -> bool:
+    step = int(step)
+    if step <= 1 or step >= int(max_steps):
+        return True
+    if int(metrics_every) > 0 and step % int(metrics_every) == 0:
+        return True
+    if int(log_every) > 0 and step % int(log_every) == 0:
+        return True
+    return int(checkpoint_every) > 0 and step % int(checkpoint_every) == 0
+
+
 def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     updated = copy.deepcopy(config)
     if args.max_steps is not None:
@@ -3650,6 +3678,8 @@ def loss_and_metrics(
     ab_overlap_weight: float = 0.0,
     ab_overlap_batch_offset: int = 1,
     ab_overlap_horizon_frames: int | None = None,
+    *,
+    collect_metrics: bool = True,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     pred_command = pred_norm[:, :command_dim]
     target_command = target_norm[:, :command_dim]
@@ -3690,6 +3720,9 @@ def loss_and_metrics(
             overlap_horizon_frames=ab_overlap_horizon_frames,
         )
         loss = loss + ab_overlap_weight * ab_overlap_loss
+
+    if not collect_metrics:
+        return loss, {}
 
     with torch.no_grad():
         pred_raw = pred_norm * stats["target_std"] + stats["target_mean"]
@@ -6661,6 +6694,7 @@ def main() -> None:
         log_every = int(config["training"]["log_every"])
         validate_every = int(config["training"]["validate_every"])
         checkpoint_every = int(config["training"]["checkpoint_every"])
+        metrics_every = train_metrics_every_steps(config)
         keep_last = int(config["training"]["keep_last_checkpoints"])
         grad_clip = float(config["training"]["grad_clip_norm"])
         command_weight = float(config["training"].get("command_loss_weight", 1.0))
@@ -6735,6 +6769,13 @@ def main() -> None:
                 optimizer.zero_grad(set_to_none=True)
                 with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
                     pred_n = model(motion_n, skeleton_n)
+                    collect_metrics = should_collect_train_metrics(
+                        step + 1,
+                        max_steps=max_steps,
+                        log_every=log_every,
+                        checkpoint_every=checkpoint_every,
+                        metrics_every=metrics_every,
+                    )
                     loss, metrics = loss_and_metrics(
                         pred_n,
                         target_n,
@@ -6751,15 +6792,17 @@ def main() -> None:
                         ab_overlap_weight,
                         ab_overlap_batch_offset,
                         ab_overlap_horizon_frames,
+                        collect_metrics=collect_metrics,
                     )
                 loss.backward()
                 if grad_clip > 0:
                     nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
                 step += 1
-                metrics = average_metric_dict(metrics, runtime, device)
-                latest_train_metrics = {f"train/{key}": float(value) for key, value in metrics.items()}
-                recent.append(metrics)
+                if metrics:
+                    metrics = average_metric_dict(metrics, runtime, device)
+                    latest_train_metrics = {f"train/{key}": float(value) for key, value in metrics.items()}
+                    recent.append(metrics)
 
                 if is_main and (step % log_every == 0 or step == 1):
                     elapsed = time.perf_counter() - start

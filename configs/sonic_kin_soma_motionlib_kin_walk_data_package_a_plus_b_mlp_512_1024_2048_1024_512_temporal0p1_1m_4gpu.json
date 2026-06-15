@@ -118,6 +118,7 @@
     "precision": "bf16",
     "num_workers": 2,
     "log_every": 20,
+    "train_metrics_every_steps": 20,
     "validate_every": 200,
     "validation_batches": 16,
     "checkpoint_every": 500,
