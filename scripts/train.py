@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 from dataclasses import replace
 import hashlib
 import html
+import inspect
 import json
 import os
 from pathlib import Path
@@ -164,7 +166,7 @@ def main() -> None:
         raise SystemExit(
             "Training requires the conda environment from environment.yml with torch installed."
         ) from exc
-    runtime = _setup_torch_runtime(torch, rank=rank, world_size=world_size)
+    runtime = _setup_torch_runtime(torch, config=config, rank=rank, world_size=world_size)
 
     if not samples_jsonl:
         raise SystemExit(
@@ -547,25 +549,37 @@ def _infer_source_body_count(spec: ObservationSpec, input_dim: int) -> int | Non
     return source_dim // denom
 
 
-def _setup_torch_runtime(torch, *, rank: int, world_size: int) -> dict[str, Any]:
+def _setup_torch_runtime(
+    torch,
+    *,
+    config: dict[str, Any] | None = None,
+    rank: int,
+    world_size: int,
+) -> dict[str, Any]:
     local_rank = int(os.environ.get("LOCAL_RANK", rank))
-    distributed = world_size > 1
+    ddp_enabled = _train_ddp_enabled(config or {})
+    launch_world_size = int(world_size)
+    distributed = launch_world_size > 1 and ddp_enabled
     device_type = "cuda" if torch.cuda.is_available() else "cpu"
+    backend = _train_distributed_backend(config or {}, device_type=device_type)
     if device_type == "cuda":
-        torch.cuda.set_device(local_rank if distributed else 0)
-        device = torch.device("cuda", local_rank if distributed else 0)
+        device_index = local_rank if launch_world_size > 1 else 0
+        torch.cuda.set_device(device_index)
+        device = torch.device("cuda", device_index)
     else:
         device = torch.device("cpu")
     if distributed and not torch.distributed.is_initialized():
-        backend = "nccl" if device_type == "cuda" else "gloo"
         torch.distributed.init_process_group(backend=backend)
     return {
         "distributed": distributed,
         "rank": rank,
-        "world_size": world_size,
+        "world_size": launch_world_size,
         "local_rank": local_rank,
         "device": device,
         "device_type": device_type,
+        "distributed_backend": backend if distributed else "",
+        "ddp_enabled": ddp_enabled,
+        "sample_sharded": launch_world_size > 1,
     }
 
 
@@ -577,11 +591,428 @@ def _cleanup_torch_runtime(torch, runtime: dict[str, Any]) -> None:
 def _runtime_report(runtime: dict[str, Any]) -> dict[str, Any]:
     return {
         "distributed": bool(runtime.get("distributed")),
+        "ddp_enabled": bool(runtime.get("ddp_enabled", runtime.get("distributed"))),
+        "sample_sharded": bool(runtime.get("sample_sharded", runtime.get("distributed"))),
         "rank": int(runtime.get("rank", 0)),
         "world_size": int(runtime.get("world_size", 1)),
         "local_rank": int(runtime.get("local_rank", 0)),
         "device_type": str(runtime.get("device_type", "cpu")),
+        "distributed_backend": str(runtime.get("distributed_backend", "")),
     }
+
+
+def _train_section(config: dict[str, Any]) -> dict[str, Any]:
+    payload = config.get("train", {})
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _train_ddp_enabled(config: dict[str, Any]) -> bool:
+    env_override = os.environ.get("ONLINE_RETARGET_DDP")
+    if env_override is not None:
+        return _bool_value(env_override, default=True)
+    return _bool_value(_train_section(config).get("ddp", True), default=True)
+
+
+def _train_distributed_backend(config: dict[str, Any], *, device_type: str) -> str:
+    for env_name in ("ONLINE_RETARGET_DISTRIBUTED_BACKEND", "ONLINE_RETARGET_DDP_BACKEND"):
+        env_override = os.environ.get(env_name)
+        if env_override:
+            return env_override.strip()
+    train_cfg = _train_section(config)
+    ddp_cfg = _ddp_options_section(config)
+    backend = (
+        ddp_cfg.get("backend")
+        or train_cfg.get("distributed_backend")
+        or train_cfg.get("ddp_backend")
+    )
+    if backend:
+        return str(backend)
+    return "nccl" if device_type == "cuda" else "gloo"
+
+
+def _bool_value(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
+
+
+def _ddp_options_section(config: dict[str, Any]) -> dict[str, Any]:
+    train_cfg = _train_section(config)
+    for key in ("ddp_options", "ddp_kwargs", "distributed"):
+        payload = train_cfg.get(key, {})
+        if isinstance(payload, dict):
+            return dict(payload)
+    return {}
+
+
+def _optional_bool_option(
+    options: dict[str, Any],
+    key: str,
+    env_name: str,
+) -> bool | None:
+    env_override = os.environ.get(env_name)
+    if env_override is not None:
+        return _bool_value(env_override, default=False)
+    if key in options:
+        return _bool_value(options.get(key), default=False)
+    return None
+
+
+def _optional_float_option(
+    options: dict[str, Any],
+    key: str,
+    env_name: str,
+) -> float | None:
+    env_override = os.environ.get(env_name)
+    value = env_override if env_override is not None else options.get(key)
+    if value is None:
+        return None
+    return float(value)
+
+
+def _supported_ddp_kwargs(torch) -> set[str]:
+    try:
+        return set(inspect.signature(torch.nn.parallel.DistributedDataParallel).parameters)
+    except (TypeError, ValueError, AttributeError):
+        return set()
+
+
+def _ddp_constructor_kwargs(
+    torch,
+    config: dict[str, Any],
+    runtime: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    options = _ddp_options_section(config)
+    device_type = str(runtime.get("device_type", "cpu"))
+    broadcast_buffers = _optional_bool_option(
+        options,
+        "broadcast_buffers",
+        "ONLINE_RETARGET_DDP_BROADCAST_BUFFERS",
+    )
+    kwargs: dict[str, Any] = {}
+    if broadcast_buffers is not None:
+        kwargs["broadcast_buffers"] = broadcast_buffers
+    if device_type == "cuda":
+        local_rank = int(runtime.get("local_rank", 0))
+        kwargs["device_ids"] = [local_rank]
+        kwargs["output_device"] = local_rank
+
+    optional_bools = (
+        ("find_unused_parameters", "ONLINE_RETARGET_DDP_FIND_UNUSED_PARAMETERS"),
+        ("static_graph", "ONLINE_RETARGET_DDP_STATIC_GRAPH"),
+        ("gradient_as_bucket_view", "ONLINE_RETARGET_DDP_GRADIENT_AS_BUCKET_VIEW"),
+        ("init_sync", "ONLINE_RETARGET_DDP_INIT_SYNC"),
+    )
+    for key, env_name in optional_bools:
+        value = _optional_bool_option(options, key, env_name)
+        if value is not None:
+            kwargs[key] = value
+    bucket_cap_mb = _optional_float_option(
+        options,
+        "bucket_cap_mb",
+        "ONLINE_RETARGET_DDP_BUCKET_CAP_MB",
+    )
+    if bucket_cap_mb is not None:
+        kwargs["bucket_cap_mb"] = bucket_cap_mb
+
+    supported = _supported_ddp_kwargs(torch)
+    unsupported = []
+    if supported:
+        for key in list(kwargs):
+            if key not in supported:
+                unsupported.append(key)
+                kwargs.pop(key)
+    elif "init_sync" in kwargs:
+        unsupported.append("init_sync")
+        kwargs.pop("init_sync")
+
+    report = {
+        "enabled": bool(runtime.get("distributed")),
+        "backend": str(runtime.get("distributed_backend", "")),
+        "kwargs": _jsonable_ddp_kwargs(kwargs),
+        "unsupported_kwargs": unsupported,
+    }
+    return kwargs, report
+
+
+def _jsonable_ddp_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    serializable = {}
+    for key, value in kwargs.items():
+        if isinstance(value, (bool, int, float, str)) or value is None:
+            serializable[key] = value
+        elif isinstance(value, (list, tuple)):
+            serializable[key] = list(value)
+        else:
+            serializable[key] = str(value)
+    return serializable
+
+
+def _train_dataloader_kwargs(
+    config: dict[str, Any],
+    runtime: dict[str, Any],
+    *,
+    dataset_length: int,
+    batch_size: int,
+    sampler=None,
+    shuffle: bool = True,
+    force_single_process: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    train_cfg = _train_section(config)
+    loader_cfg = train_cfg.get("dataloader", train_cfg.get("data_loader", {}))
+    loader_cfg = dict(loader_cfg) if isinstance(loader_cfg, dict) else {}
+    device_type = str(runtime.get("device_type", "cpu"))
+    requested_workers = max(0, int(loader_cfg.get("num_workers", 0)))
+    num_workers = 0 if force_single_process else requested_workers
+    effective_batch_size = min(max(1, int(batch_size)), max(1, int(dataset_length)))
+    pin_memory_default = device_type == "cuda"
+    pin_memory = bool(loader_cfg.get("pin_memory", pin_memory_default))
+    if force_single_process:
+        pin_memory = False
+    drop_last = bool(loader_cfg.get("drop_last", False))
+    shuffle_enabled = bool(loader_cfg.get("shuffle", shuffle)) and sampler is None
+    persistent_requested = bool(loader_cfg.get("persistent_workers", False))
+    persistent_workers = persistent_requested and num_workers > 0
+    prefetch_factor = loader_cfg.get("prefetch_factor", None)
+    if prefetch_factor is not None:
+        prefetch_factor = max(1, int(prefetch_factor))
+
+    kwargs: dict[str, Any] = {
+        "batch_size": effective_batch_size,
+        "sampler": sampler,
+        "shuffle": shuffle_enabled,
+        "pin_memory": pin_memory,
+        "drop_last": drop_last,
+        "num_workers": num_workers,
+    }
+    if num_workers > 0:
+        kwargs["persistent_workers"] = persistent_workers
+        if prefetch_factor is not None:
+            kwargs["prefetch_factor"] = prefetch_factor
+
+    report = {
+        "batch_size": effective_batch_size,
+        "requested_batch_size": int(batch_size),
+        "dataset_length": int(dataset_length),
+        "sampler": type(sampler).__name__ if sampler is not None else "none",
+        "shuffle": shuffle_enabled,
+        "pin_memory": pin_memory,
+        "drop_last": drop_last,
+        "num_workers": num_workers,
+        "requested_num_workers": requested_workers,
+        "persistent_workers": persistent_workers,
+        "requested_persistent_workers": persistent_requested,
+        "prefetch_factor": prefetch_factor if num_workers > 0 else None,
+        "force_single_process": bool(force_single_process),
+    }
+    if force_single_process and requested_workers > 0:
+        report["forced_single_process_reason"] = "materialized_tensors_preloaded_to_device"
+    return kwargs, report
+
+
+def _temporal_feed_config(
+    config: dict[str, Any],
+    runtime: dict[str, Any],
+) -> dict[str, Any]:
+    train_cfg = _train_section(config)
+    feed_cfg = train_cfg.get("batch_to_device", train_cfg.get("feeding", {}))
+    feed_cfg = dict(feed_cfg) if isinstance(feed_cfg, dict) else {}
+    device_type = str(runtime.get("device_type", "cpu"))
+    non_blocking = bool(feed_cfg.get("non_blocking", device_type == "cuda"))
+    preload_requested = bool(feed_cfg.get("preload_tensors", False))
+    pin_requested = bool(feed_cfg.get("pin_materialized_tensors", False))
+    preload_active = preload_requested and device_type == "cuda"
+    pin_active = pin_requested and device_type == "cuda" and not preload_active
+    report = {
+        "non_blocking": non_blocking,
+        "preload_tensors": preload_active,
+        "preload_tensors_requested": preload_requested,
+        "pin_materialized_tensors": pin_active,
+        "pin_materialized_tensors_requested": pin_requested,
+    }
+    if preload_requested and not preload_active:
+        report["preload_tensors_skip_reason"] = f"device_type={device_type}"
+    if pin_requested and not pin_active:
+        reason = "preload_tensors_enabled" if preload_active else f"device_type={device_type}"
+        report["pin_materialized_tensors_skip_reason"] = reason
+    return report
+
+
+def _prepare_temporal_tensors_for_training(
+    tensors: dict[str, Any],
+    *,
+    device,
+    feed: dict[str, Any],
+) -> dict[str, Any]:
+    prepared = tensors
+    if feed.get("pin_materialized_tensors"):
+        prepared = {key: value.pin_memory() for key, value in prepared.items()}
+    if feed.get("preload_tensors"):
+        non_blocking = bool(feed.get("non_blocking", True))
+        prepared = {
+            key: value.to(device, non_blocking=non_blocking)
+            for key, value in prepared.items()
+        }
+    return prepared
+
+
+def _forward_microbatch_config(
+    config: dict[str, Any],
+    *,
+    logical_batch_size: int,
+) -> dict[str, Any]:
+    train_cfg = _train_section(config)
+    requested = train_cfg.get(
+        "forward_microbatch_size",
+        train_cfg.get("microbatch_size", 0),
+    )
+    requested_size = max(0, int(requested or 0))
+    logical_size = max(1, int(logical_batch_size))
+    enabled = 0 < requested_size < logical_size
+    return {
+        "enabled": enabled,
+        "requested_size": requested_size,
+        "size": requested_size if enabled else logical_size,
+        "logical_batch_size": logical_size,
+    }
+
+
+def _checkpointing_config(config: dict[str, Any]) -> dict[str, Any]:
+    train_cfg = _train_section(config)
+    checkpoint_cfg = train_cfg.get("checkpoint", train_cfg.get("checkpointing", {}))
+    checkpoint_cfg = dict(checkpoint_cfg) if isinstance(checkpoint_cfg, dict) else {}
+    every_steps = checkpoint_cfg.get(
+        "every_steps",
+        train_cfg.get("checkpoint_every_steps", train_cfg.get("checkpoint_every", 0)),
+    )
+    keep_last = checkpoint_cfg.get(
+        "keep_last",
+        train_cfg.get("keep_last_checkpoints", train_cfg.get("checkpoint_keep_last", 0)),
+    )
+    dir_name = str(checkpoint_cfg.get("dir", train_cfg.get("checkpoint_dir", "checkpoints")))
+    every_steps = max(0, int(every_steps or 0))
+    keep_last = max(0, int(keep_last or 0))
+    return {
+        "enabled": every_steps > 0,
+        "every_steps": every_steps,
+        "keep_last": keep_last,
+        "dir": dir_name,
+        "latest_manifest": str(checkpoint_cfg.get("latest_manifest", "latest_checkpoint.json")),
+    }
+
+
+def _should_save_periodic_checkpoint(
+    step: int,
+    total_steps: int,
+    checkpointing: dict[str, Any],
+) -> bool:
+    every_steps = int(checkpointing.get("every_steps", 0))
+    return every_steps > 0 and step > 0 and step < total_steps and step % every_steps == 0
+
+
+def _resume_training_position(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"resumed": False, "step": 0, "epoch": 0}
+    has_position = "step" in payload or "epoch" in payload
+    return {
+        "resumed": bool(has_position),
+        "step": _nonnegative_int(payload.get("step", 0), name="checkpoint step"),
+        "epoch": _nonnegative_int(payload.get("epoch", 0), name="checkpoint epoch"),
+    }
+
+
+def _nonnegative_int(value: Any, *, name: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer, got {value!r}") from exc
+    if parsed < 0:
+        raise ValueError(f"{name} must be non-negative, got {parsed}")
+    return parsed
+
+
+def _save_periodic_training_checkpoint(
+    torch,
+    *,
+    output_dir: Path,
+    model,
+    optimizer,
+    step: int,
+    epoch: int,
+    loss: float,
+    checkpointing: dict[str, Any],
+    sample_loader: dict[str, Any],
+    data_loader: dict[str, Any],
+    feed: dict[str, Any],
+    runtime: dict[str, Any],
+) -> Path:
+    checkpoint_dir = output_dir / str(checkpointing.get("dir", "checkpoints"))
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint = checkpoint_dir / f"step_{step:08d}.pt"
+    tmp_checkpoint = checkpoint.with_suffix(checkpoint.suffix + ".tmp")
+    payload = {
+        "model_state_dict": _unwrap_model(model).state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "step": int(step),
+        "epoch": int(epoch),
+        "loss": float(loss),
+        "sample_loader": sample_loader,
+        "data_loader": data_loader,
+        "batch_to_device": feed,
+        "distributed_runtime": _runtime_report(runtime),
+        "git_sha": _git_sha(),
+        "git_dirty": _git_dirty(),
+    }
+    torch.save(payload, tmp_checkpoint)
+    tmp_checkpoint.replace(checkpoint)
+    _write_latest_checkpoint_manifest(
+        output_dir,
+        checkpoint=checkpoint,
+        step=step,
+        loss=loss,
+        checkpointing=checkpointing,
+    )
+    _prune_periodic_checkpoints(checkpoint_dir, keep_last=int(checkpointing.get("keep_last", 0)))
+    return checkpoint
+
+
+def _write_latest_checkpoint_manifest(
+    output_dir: Path,
+    *,
+    checkpoint: Path,
+    step: int,
+    loss: float,
+    checkpointing: dict[str, Any],
+) -> None:
+    manifest_path = output_dir / str(
+        checkpointing.get("latest_manifest", "latest_checkpoint.json")
+    )
+    manifest = {
+        "checkpoint": str(checkpoint),
+        "step": int(step),
+        "loss": float(loss),
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _prune_periodic_checkpoints(checkpoint_dir: Path, *, keep_last: int) -> None:
+    if keep_last <= 0:
+        return
+    checkpoints = sorted(checkpoint_dir.glob("step_*.pt"))
+    for checkpoint in checkpoints[:-keep_last]:
+        checkpoint.unlink(missing_ok=True)
 
 
 def _train_jsonl(
@@ -601,8 +1032,8 @@ def _train_jsonl(
 ) -> None:
     from online_retarget.models.registry import build_model
 
-    sample_rank = rank if runtime["distributed"] else 0
-    sample_world_size = world_size if runtime["distributed"] else 1
+    sample_rank = rank if runtime["sample_sharded"] else 0
+    sample_world_size = world_size if runtime["sample_sharded"] else 1
     samples, sample_loader = _load_supervised_samples_with_report(
         samples_jsonl,
         rank=sample_rank,
@@ -689,13 +1120,15 @@ def _train_jsonl(
     steps = min(max_steps, max_steps if max_steps > 0 else 1)
     dataset = torch.utils.data.TensorDataset(x, y, prev_y)
     sampler = None
-    loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=min(batch_size, len(dataset)),
+    loader_kwargs, data_loader = _train_dataloader_kwargs(
+        config,
+        runtime,
+        dataset_length=len(dataset),
+        batch_size=batch_size,
         sampler=sampler,
         shuffle=sampler is None,
-        pin_memory=runtime["device_type"] == "cuda",
     )
+    loader = torch.utils.data.DataLoader(dataset, **loader_kwargs)
     step = 0
     epoch = 0
     while step < steps:
@@ -794,6 +1227,8 @@ def _train_jsonl(
         resume_checkpoint=str(resume_checkpoint) if resume_checkpoint is not None else "",
         sample_filter=sample_filter,
         sample_loader=sample_loader,
+        data_loader=data_loader,
+        checkpointing=_checkpointing_config(config),
     )
     torch.save(
         {
@@ -853,11 +1288,45 @@ def _train_temporal_diffusion_jsonl(
         raise SystemExit(f"all temporal samples contain non-finite values: {samples_jsonl}")
     feature_contract = _temporal_feature_contract_report(config, samples, tensors)
     if rank == 0:
-        print(f"sample_filter={json.dumps(sample_filter, sort_keys=True)}")
-        print(f"feature_contract={json.dumps(feature_contract, sort_keys=True)}")
+        print(f"sample_filter={json.dumps(sample_filter, sort_keys=True)}", flush=True)
+        print(f"feature_contract={json.dumps(feature_contract, sort_keys=True)}", flush=True)
 
     seed = int(_nested_get(config, ("experiment", "seed"), 17))
     torch.manual_seed(seed)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_every = max(1, int(_nested_get(config, ("train", "log_every"), 100)))
+    steps = min(max_steps, max_steps if max_steps > 0 else 1)
+    feed = _temporal_feed_config(config, runtime)
+    checkpointing = _checkpointing_config(config)
+    sampler = None
+    loader_kwargs, data_loader = _train_dataloader_kwargs(
+        config,
+        runtime,
+        dataset_length=len(samples),
+        batch_size=batch_size,
+        sampler=None,
+        shuffle=True,
+        force_single_process=bool(feed.get("preload_tensors", False)),
+    )
+    data_loader["ddp_shard_strategy"] = (
+        "jsonl_nonempty_row_index_mod_world_size"
+        if sample_loader.get("sharded")
+        else "none"
+    )
+    microbatching = _forward_microbatch_config(
+        config,
+        logical_batch_size=int(loader_kwargs["batch_size"]),
+    )
+    _print_temporal_pre_cuda_diagnostics(
+        rank=rank,
+        runtime=runtime,
+        tensors=tensors,
+        feed=feed,
+        data_loader=data_loader,
+        microbatching=microbatching,
+        checkpointing=checkpointing,
+    )
+    ddp_kwargs, ddp_report = _ddp_constructor_kwargs(torch, config, runtime)
     model_build = build_model(
         config,
         input_dim=input_dim,
@@ -865,18 +1334,51 @@ def _train_temporal_diffusion_jsonl(
         observation_spec=observation_spec,
     )
     model = model_build.model.to(runtime["device"])
+    _print_temporal_ddp_diagnostics(
+        rank=rank,
+        stage="post_model_to",
+        runtime=runtime,
+        model=model,
+        tensors=tensors,
+        ddp=ddp_report,
+    )
+    resume_payload = None
+    resume_position = {"resumed": False, "step": 0, "epoch": 0}
     if resume_checkpoint is not None:
-        payload = torch.load(resume_checkpoint, map_location=runtime["device"])
-        state_dict = payload.get("model_state_dict") if isinstance(payload, dict) else None
+        resume_payload = torch.load(resume_checkpoint, map_location=runtime["device"])
+        state_dict = (
+            resume_payload.get("model_state_dict") if isinstance(resume_payload, dict) else None
+        )
         if state_dict is None:
             raise SystemExit(f"checkpoint lacks model_state_dict: {resume_checkpoint}")
         model.load_state_dict(state_dict)
+        try:
+            resume_position = _resume_training_position(resume_payload)
+        except ValueError as exc:
+            raise SystemExit(
+                f"invalid checkpoint training position: {resume_checkpoint}: {exc}"
+            ) from exc
     if runtime["distributed"]:
-        model = torch.nn.parallel.DistributedDataParallel(
-            model,
-            device_ids=[runtime["local_rank"]] if runtime["device_type"] == "cuda" else None,
+        _print_temporal_ddp_diagnostics(
+            rank=rank,
+            stage="pre_ddp_wrap",
+            runtime=runtime,
+            model=model,
+            tensors=tensors,
+            ddp=ddp_report,
+        )
+        model = torch.nn.parallel.DistributedDataParallel(model, **ddp_kwargs)
+        _print_temporal_ddp_diagnostics(
+            rank=rank,
+            stage="post_ddp_wrap",
+            runtime=runtime,
+            model=_unwrap_model(model),
+            tensors=tensors,
+            ddp=ddp_report,
         )
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    if isinstance(resume_payload, dict) and resume_payload.get("optimizer_state_dict"):
+        optimizer.load_state_dict(resume_payload["optimizer_state_dict"])
     wandb_run = _init_wandb(
         config=config,
         quality_gate=quality_gate,
@@ -884,43 +1386,161 @@ def _train_temporal_diffusion_jsonl(
         enabled=rank == 0,
     )
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    log_every = max(1, int(_nested_get(config, ("train", "log_every"), 100)))
-    steps = min(max_steps, max_steps if max_steps > 0 else 1)
-    dataset = torch.utils.data.TensorDataset(*_temporal_training_dataset_tensors(tensors))
-    sampler = None
-    loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=min(batch_size, len(dataset)),
-        sampler=sampler,
-        shuffle=sampler is None,
-        pin_memory=runtime["device_type"] == "cuda",
+    tensors = _prepare_temporal_tensors_for_training(
+        tensors,
+        device=runtime["device"],
+        feed=feed,
     )
-    step = 0
-    epoch = 0
+    dataset = torch.utils.data.TensorDataset(*_temporal_training_dataset_tensors(tensors))
+    if rank == 0:
+        print(f"batch_to_device={json.dumps(feed, sort_keys=True)}", flush=True)
+        print(f"data_loader={json.dumps(data_loader, sort_keys=True)}", flush=True)
+        print(f"forward_microbatch={json.dumps(microbatching, sort_keys=True)}", flush=True)
+        print(f"checkpointing={json.dumps(checkpointing, sort_keys=True)}", flush=True)
+        print(f"ddp={json.dumps(ddp_report, sort_keys=True)}", flush=True)
+        if resume_position["resumed"]:
+            print(f"resume_position={json.dumps(resume_position, sort_keys=True)}", flush=True)
+    loader = torch.utils.data.DataLoader(dataset, **loader_kwargs)
+    step = int(resume_position["step"])
+    epoch = int(resume_position["epoch"])
+    first_train_step = step + 1
     while step < steps:
         if sampler is not None:
             sampler.set_epoch(epoch)
         for batch in loader:
             step += 1
-            condition = _temporal_batch_to_device(batch, runtime["device"])
-            batch_y = condition.pop("target_action")
-            loss = _training_loss(
-                torch,
-                model,
-                model_build.family,
-                condition,
-                batch_y,
-                config,
-                prev_target=condition.get("prev_action"),
-            )
+            if step == first_train_step:
+                _print_temporal_ddp_diagnostics(
+                    rank=rank,
+                    stage="first_batch_cpu",
+                    runtime=runtime,
+                    batch=batch,
+                    ddp=ddp_report,
+                )
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+            loss_value = 0.0
+            microbatches = list(
+                _iter_temporal_microbatches(
+                    batch,
+                    int(microbatching["size"]),
+                )
+            )
+            for micro_index, (microbatch, microbatch_count, logical_batch_count) in enumerate(
+                microbatches
+            ):
+                is_last_microbatch = micro_index == len(microbatches) - 1
+                sync_context = (
+                    model.no_sync()
+                    if (
+                        runtime["distributed"]
+                        and hasattr(model, "no_sync")
+                        and not is_last_microbatch
+                    )
+                    else contextlib.nullcontext()
+                )
+                with sync_context:
+                    if step == first_train_step:
+                        _print_temporal_ddp_diagnostics(
+                            rank=rank,
+                            stage="first_microbatch_to_device_begin",
+                            runtime=runtime,
+                            batch=microbatch,
+                            ddp=ddp_report,
+                            microbatching={
+                                **microbatching,
+                                "microbatch_index": micro_index,
+                                "microbatch_count": microbatch_count,
+                                "sync": is_last_microbatch,
+                            },
+                        )
+                    condition = _temporal_batch_to_device(
+                        microbatch,
+                        runtime["device"],
+                        non_blocking=bool(feed.get("non_blocking", True)),
+                    )
+                    if step == first_train_step:
+                        _print_temporal_ddp_diagnostics(
+                            rank=rank,
+                            stage="first_microbatch_forward_begin",
+                            runtime=runtime,
+                            condition=condition,
+                            ddp=ddp_report,
+                            microbatching={
+                                **microbatching,
+                                "microbatch_index": micro_index,
+                                "microbatch_count": microbatch_count,
+                                "sync": is_last_microbatch,
+                            },
+                        )
+                    batch_y = condition.pop("target_action")
+                    loss = _training_loss(
+                        torch,
+                        model,
+                        model_build.family,
+                        condition,
+                        batch_y,
+                        config,
+                        prev_target=condition.get("prev_action"),
+                    )
+                    loss_scale = float(microbatch_count) / float(logical_batch_count)
+                    if step == first_train_step:
+                        _print_temporal_ddp_diagnostics(
+                            rank=rank,
+                            stage="first_microbatch_backward_begin",
+                            runtime=runtime,
+                            ddp=ddp_report,
+                            microbatching={
+                                **microbatching,
+                                "microbatch_index": micro_index,
+                                "microbatch_count": microbatch_count,
+                                "sync": is_last_microbatch,
+                            },
+                        )
+                    (loss * loss_scale).backward()
+                    if step == first_train_step:
+                        _print_temporal_ddp_diagnostics(
+                            rank=rank,
+                            stage="first_microbatch_backward_done",
+                            runtime=runtime,
+                            ddp=ddp_report,
+                            microbatching={
+                                **microbatching,
+                                "microbatch_index": micro_index,
+                                "microbatch_count": microbatch_count,
+                                "sync": is_last_microbatch,
+                            },
+                        )
+                    loss_value += float(loss.detach().cpu()) * loss_scale
             optimizer.step()
             if rank == 0 and (step == 1 or step == steps or step % log_every == 0):
-                step_log = {"step": step, "loss": float(loss.detach().cpu())}
+                step_log = {"step": step, "loss": loss_value}
                 print(json.dumps(step_log, sort_keys=True))
                 _wandb_log(wandb_run, step_log, step=step)
+            if rank == 0 and _should_save_periodic_checkpoint(step, steps, checkpointing):
+                periodic_checkpoint = _save_periodic_training_checkpoint(
+                    torch,
+                    output_dir=output_dir,
+                    model=model,
+                    optimizer=optimizer,
+                    step=step,
+                    epoch=epoch,
+                    loss=loss_value,
+                    checkpointing=checkpointing,
+                    sample_loader=sample_loader,
+                    data_loader=data_loader,
+                    feed=feed,
+                    runtime=runtime,
+                )
+                print(
+                    json.dumps(
+                        {
+                            "checkpoint": str(periodic_checkpoint),
+                            "checkpoint_reason": "periodic",
+                            "step": step,
+                        },
+                        sort_keys=True,
+                    )
+                )
             if step >= steps:
                 break
         epoch += 1
@@ -1004,6 +1624,11 @@ def _train_temporal_diffusion_jsonl(
         resume_checkpoint=str(resume_checkpoint) if resume_checkpoint is not None else "",
         sample_filter=sample_filter,
         sample_loader=sample_loader,
+        data_loader=data_loader,
+        batch_to_device=feed,
+        forward_microbatch=microbatching,
+        ddp=ddp_report,
+        checkpointing=checkpointing,
     )
     torch.save(
         {
@@ -1570,10 +2195,159 @@ def _filter_finite_temporal_tensors(
     return filtered_samples, filtered_tensors, report
 
 
-def _temporal_batch_to_device(batch, device) -> dict[str, Any]:
+def _temporal_batch_to_device(batch, device, *, non_blocking: bool = True) -> dict[str, Any]:
     return {
-        key: value.to(device, non_blocking=True)
+        key: value.to(device, non_blocking=non_blocking)
         for key, value in zip(TEMPORAL_BATCH_KEYS, batch)
+    }
+
+
+def _iter_temporal_microbatches(batch, microbatch_size: int):
+    logical_batch_count = int(batch[0].shape[0])
+    if logical_batch_count <= 0:
+        raise ValueError("temporal batch must be non-empty")
+    chunk_size = logical_batch_count
+    if microbatch_size > 0:
+        chunk_size = min(int(microbatch_size), logical_batch_count)
+    for start in range(0, logical_batch_count, chunk_size):
+        end = min(start + chunk_size, logical_batch_count)
+        yield tuple(value[start:end] for value in batch), end - start, logical_batch_count
+
+
+def _print_temporal_pre_cuda_diagnostics(
+    *,
+    rank: int,
+    runtime: dict[str, Any],
+    tensors: dict[str, Any],
+    feed: dict[str, Any],
+    data_loader: dict[str, Any],
+    microbatching: dict[str, Any],
+    checkpointing: dict[str, Any],
+) -> None:
+    tensor_shapes = {key: [int(dim) for dim in value.shape] for key, value in tensors.items()}
+    print(
+        " ".join(
+            (
+                f"rank={rank}",
+                f"data_loader.num_workers={data_loader.get('num_workers')}",
+                f"data_loader.pin_memory={str(data_loader.get('pin_memory')).lower()}",
+            )
+        ),
+        flush=True,
+    )
+    print(
+        " ".join(
+            (
+                f"rank={rank}",
+                f"forward_microbatch enabled={str(microbatching.get('enabled')).lower()}",
+                f"size={microbatching.get('size')}",
+                f"logical_batch_size={microbatching.get('logical_batch_size')}",
+            )
+        ),
+        flush=True,
+    )
+    print(
+        "pre_cuda_train_state="
+        + json.dumps(
+            {
+                "rank": rank,
+                "runtime": _runtime_report(runtime),
+                "tensor_shapes": tensor_shapes,
+                "batch_to_device": feed,
+                "data_loader": data_loader,
+                "forward_microbatch": microbatching,
+                "checkpointing": checkpointing,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+
+def _print_temporal_ddp_diagnostics(
+    *,
+    rank: int,
+    stage: str,
+    runtime: dict[str, Any],
+    model=None,
+    tensors: dict[str, Any] | None = None,
+    batch=None,
+    condition: dict[str, Any] | None = None,
+    ddp: dict[str, Any] | None = None,
+    microbatching: dict[str, Any] | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "rank": int(rank),
+        "stage": str(stage),
+        "runtime": _runtime_report(runtime),
+    }
+    if model is not None:
+        payload["model"] = _module_tensor_report(model)
+    if tensors is not None:
+        payload["tensor_shapes"] = _tensor_collection_report(tensors)
+    if batch is not None:
+        payload["batch_shapes"] = _temporal_batch_report(batch)
+    if condition is not None:
+        payload["condition_shapes"] = _tensor_collection_report(condition)
+    if ddp is not None:
+        payload["ddp"] = ddp
+    if microbatching is not None:
+        payload["forward_microbatch"] = microbatching
+    print("temporal_ddp_state=" + json.dumps(payload, sort_keys=True), flush=True)
+
+
+def _tensor_collection_report(values: dict[str, Any]) -> dict[str, Any]:
+    return {key: _tensor_report(value) for key, value in values.items()}
+
+
+def _temporal_batch_report(batch) -> dict[str, Any]:
+    return {
+        key: _tensor_report(value)
+        for key, value in zip(TEMPORAL_BATCH_KEYS, batch)
+    }
+
+
+def _tensor_report(value) -> dict[str, Any]:
+    shape = getattr(value, "shape", ())
+    return {
+        "shape": [int(dim) for dim in shape],
+        "dtype": str(getattr(value, "dtype", "")),
+        "device": str(getattr(value, "device", "")),
+    }
+
+
+def _module_tensor_report(model) -> dict[str, Any]:
+    named_parameters = list(model.named_parameters())
+    named_buffers = list(model.named_buffers())
+    signature = hashlib.sha256()
+    trainable_numel = 0
+    frozen_numel = 0
+    parameter_numel = 0
+    buffer_numel = 0
+    for name, parameter in named_parameters:
+        numel = int(parameter.numel())
+        requires_grad = bool(getattr(parameter, "requires_grad", False))
+        parameter_numel += numel
+        trainable_numel += numel if requires_grad else 0
+        frozen_numel += 0 if requires_grad else numel
+        signature.update(
+            f"param:{name}:{tuple(int(dim) for dim in parameter.shape)}:{requires_grad};".encode()
+        )
+    for name, buffer in named_buffers:
+        numel = int(buffer.numel())
+        buffer_numel += numel
+        signature.update(
+            f"buffer:{name}:{tuple(int(dim) for dim in buffer.shape)};".encode()
+        )
+    return {
+        "module_type": type(model).__name__,
+        "parameter_count": len(named_parameters),
+        "buffer_count": len(named_buffers),
+        "parameter_numel": parameter_numel,
+        "trainable_parameter_numel": trainable_numel,
+        "frozen_parameter_numel": frozen_numel,
+        "buffer_numel": buffer_numel,
+        "tensor_signature_sha256": signature.hexdigest(),
     }
 
 
@@ -2631,6 +3405,11 @@ def _build_train_report(
     resume_checkpoint: str = "",
     sample_filter: dict[str, Any] | None = None,
     sample_loader: dict[str, Any] | None = None,
+    data_loader: dict[str, Any] | None = None,
+    batch_to_device: dict[str, Any] | None = None,
+    forward_microbatch: dict[str, Any] | None = None,
+    ddp: dict[str, Any] | None = None,
+    checkpointing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "samples_jsonl": str(samples_jsonl),
@@ -2665,6 +3444,11 @@ def _build_train_report(
             "sharded": False,
             "materialized_count": sample_count,
         },
+        "data_loader": data_loader or {},
+        "batch_to_device": batch_to_device or {},
+        "forward_microbatch": forward_microbatch or {"enabled": False},
+        "ddp": ddp or {"enabled": False},
+        "checkpointing": checkpointing or {"enabled": False},
         "sample_filter": sample_filter
         or {
             "input_count": sample_count,

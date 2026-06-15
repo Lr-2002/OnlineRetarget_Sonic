@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import math
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -953,6 +954,323 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(condition["fps"].name, "fps")
         self.assertEqual(condition["target_action"].name, "target_action")
 
+    def test_temporal_batch_to_device_uses_configured_non_blocking_flag(self):
+        batch = tuple(_FakeDeviceTensor(key) for key in train_entry.TEMPORAL_BATCH_KEYS)
+
+        train_entry._temporal_batch_to_device(batch, device="cuda:0", non_blocking=False)
+
+        for tensor in batch:
+            self.assertEqual(tensor.to_calls, [{"device": "cuda:0", "non_blocking": False}])
+
+    def test_train_dataloader_kwargs_exposes_worker_and_prefetch_knobs(self):
+        kwargs, report = train_entry._train_dataloader_kwargs(
+            {
+                "train": {
+                    "dataloader": {
+                        "num_workers": 4,
+                        "prefetch_factor": 3,
+                        "persistent_workers": True,
+                        "pin_memory": True,
+                        "drop_last": True,
+                    }
+                }
+            },
+            {"device_type": "cuda"},
+            dataset_length=1000,
+            batch_size=128,
+        )
+
+        self.assertEqual(kwargs["batch_size"], 128)
+        self.assertEqual(kwargs["num_workers"], 4)
+        self.assertEqual(kwargs["prefetch_factor"], 3)
+        self.assertTrue(kwargs["persistent_workers"])
+        self.assertTrue(kwargs["pin_memory"])
+        self.assertTrue(kwargs["drop_last"])
+        self.assertEqual(report["requested_num_workers"], 4)
+        self.assertEqual(report["prefetch_factor"], 3)
+
+    def test_train_dataloader_kwargs_forces_single_process_for_preloaded_tensors(self):
+        kwargs, report = train_entry._train_dataloader_kwargs(
+            {
+                "train": {
+                    "dataloader": {
+                        "num_workers": 4,
+                        "prefetch_factor": 2,
+                        "persistent_workers": True,
+                        "pin_memory": True,
+                    }
+                }
+            },
+            {"device_type": "cuda"},
+            dataset_length=64,
+            batch_size=256,
+            force_single_process=True,
+        )
+
+        self.assertEqual(kwargs["batch_size"], 64)
+        self.assertEqual(kwargs["num_workers"], 0)
+        self.assertFalse(kwargs["pin_memory"])
+        self.assertNotIn("prefetch_factor", kwargs)
+        self.assertEqual(
+            report["forced_single_process_reason"],
+            "materialized_tensors_preloaded_to_device",
+        )
+
+    def test_setup_runtime_can_disable_ddp_but_keep_rank_sharding(self):
+        torch = _FakeRuntimeTorch(cuda_available=True)
+
+        runtime = train_entry._setup_torch_runtime(
+            torch,
+            config={"train": {"ddp": False}},
+            rank=1,
+            world_size=2,
+        )
+
+        self.assertFalse(runtime["distributed"])
+        self.assertFalse(runtime["ddp_enabled"])
+        self.assertTrue(runtime["sample_sharded"])
+        self.assertEqual(runtime["world_size"], 2)
+        self.assertEqual(torch.cuda.set_devices, [1])
+        self.assertEqual(torch.distributed.init_backends, [])
+
+    def test_ddp_constructor_kwargs_are_configurable_for_cuda_runtime(self):
+        kwargs, report = train_entry._ddp_constructor_kwargs(
+            _FakeDDPTorch,
+            {
+                "train": {
+                    "ddp_options": {
+                        "broadcast_buffers": False,
+                        "find_unused_parameters": True,
+                        "static_graph": False,
+                        "gradient_as_bucket_view": True,
+                        "init_sync": False,
+                        "bucket_cap_mb": 8,
+                    }
+                }
+            },
+            {
+                "distributed": True,
+                "distributed_backend": "nccl",
+                "device_type": "cuda",
+                "local_rank": 1,
+            },
+        )
+
+        self.assertEqual(kwargs["device_ids"], [1])
+        self.assertEqual(kwargs["output_device"], 1)
+        self.assertFalse(kwargs["broadcast_buffers"])
+        self.assertTrue(kwargs["find_unused_parameters"])
+        self.assertFalse(kwargs["static_graph"])
+        self.assertTrue(kwargs["gradient_as_bucket_view"])
+        self.assertFalse(kwargs["init_sync"])
+        self.assertEqual(kwargs["bucket_cap_mb"], 8.0)
+        self.assertEqual(report["backend"], "nccl")
+        self.assertEqual(report["unsupported_kwargs"], [])
+
+    def test_ddp_constructor_kwargs_preserve_torch_defaults_without_overrides(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            kwargs, report = train_entry._ddp_constructor_kwargs(
+                _FakeDDPTorch,
+                {},
+                {
+                    "distributed": True,
+                    "distributed_backend": "nccl",
+                    "device_type": "cuda",
+                    "local_rank": 0,
+                },
+            )
+
+        self.assertEqual(kwargs, {"device_ids": [0], "output_device": 0})
+        self.assertEqual(report["kwargs"], {"device_ids": [0], "output_device": 0})
+        self.assertNotIn("broadcast_buffers", kwargs)
+        self.assertNotIn("find_unused_parameters", kwargs)
+        self.assertNotIn("static_graph", kwargs)
+        self.assertNotIn("gradient_as_bucket_view", kwargs)
+        self.assertNotIn("bucket_cap_mb", kwargs)
+        self.assertNotIn("init_sync", kwargs)
+
+    def test_forward_microbatch_config_splits_large_temporal_batch(self):
+        report = train_entry._forward_microbatch_config(
+            {"train": {"forward_microbatch_size": 8192}},
+            logical_batch_size=32768,
+        )
+
+        self.assertTrue(report["enabled"])
+        self.assertEqual(report["requested_size"], 8192)
+        self.assertEqual(report["size"], 8192)
+        self.assertEqual(report["logical_batch_size"], 32768)
+
+    def test_temporal_microbatches_slice_logical_batch_before_device_transfer(self):
+        batch = tuple(_FakeSliceTensor(key, 32768) for key in train_entry.TEMPORAL_BATCH_KEYS)
+
+        chunks = list(train_entry._iter_temporal_microbatches(batch, 8192))
+
+        self.assertEqual([count for _chunk, count, _total in chunks], [8192, 8192, 8192, 8192])
+        self.assertEqual({total for _chunk, _count, total in chunks}, {32768})
+        self.assertEqual(
+            batch[0].slices,
+            [(0, 8192), (8192, 16384), (16384, 24576), (24576, 32768)],
+        )
+        first_condition = train_entry._temporal_batch_to_device(
+            chunks[0][0],
+            device="cuda:0",
+            non_blocking=True,
+        )
+        self.assertEqual(first_condition["source_body_tokens"].shape[0], 8192)
+        self.assertEqual(
+            first_condition["source_body_tokens"].to_calls,
+            [{"device": "cuda:0", "non_blocking": True}],
+        )
+
+    def test_temporal_pre_cuda_diagnostics_print_before_model_device_transfer(self):
+        stream = io.StringIO()
+
+        with contextlib.redirect_stdout(stream):
+            train_entry._print_temporal_pre_cuda_diagnostics(
+                rank=1,
+                runtime={
+                    "distributed": False,
+                    "ddp_enabled": False,
+                    "sample_sharded": True,
+                    "rank": 1,
+                    "world_size": 2,
+                    "local_rank": 1,
+                    "device_type": "cuda",
+                },
+                tensors=_temporal_tensors(),
+                feed={"non_blocking": True},
+                data_loader={"num_workers": 0, "pin_memory": True},
+                microbatching={
+                    "enabled": True,
+                    "size": 8192,
+                    "logical_batch_size": 32768,
+                },
+                checkpointing={"enabled": True, "every_steps": 100},
+            )
+
+        output = stream.getvalue()
+        self.assertIn("rank=1 data_loader.num_workers=0", output)
+        self.assertIn(
+            "rank=1 forward_microbatch enabled=true size=8192 logical_batch_size=32768",
+            output,
+        )
+        self.assertIn('"sample_sharded": true', output)
+
+    def test_temporal_ddp_diagnostics_include_model_signature(self):
+        stream = io.StringIO()
+
+        with contextlib.redirect_stdout(stream):
+            train_entry._print_temporal_ddp_diagnostics(
+                rank=0,
+                stage="pre_ddp_wrap",
+                runtime={
+                    "distributed": True,
+                    "ddp_enabled": True,
+                    "sample_sharded": True,
+                    "rank": 0,
+                    "world_size": 2,
+                    "local_rank": 0,
+                    "device_type": "cuda",
+                    "distributed_backend": "nccl",
+                },
+                model=_FakeModule(),
+                ddp={
+                    "enabled": True,
+                    "backend": "nccl",
+                    "kwargs": {"broadcast_buffers": False},
+                    "unsupported_kwargs": [],
+                },
+            )
+
+        payload = json.loads(stream.getvalue().split("=", 1)[1])
+        self.assertEqual(payload["stage"], "pre_ddp_wrap")
+        self.assertTrue(payload["runtime"]["distributed"])
+        self.assertEqual(payload["ddp"]["kwargs"]["broadcast_buffers"], False)
+        self.assertEqual(payload["model"]["parameter_count"], 1)
+        self.assertEqual(payload["model"]["buffer_count"], 1)
+        self.assertEqual(len(payload["model"]["tensor_signature_sha256"]), 64)
+
+    def test_periodic_training_checkpoint_writes_latest_and_prunes_old_steps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            checkpointing = {
+                "dir": "checkpoints",
+                "keep_last": 2,
+                "latest_manifest": "latest_checkpoint.json",
+            }
+            for step in (10, 20, 30):
+                train_entry._save_periodic_training_checkpoint(
+                    _FakeTorchIO(),
+                    output_dir=output_dir,
+                    model=_FakeStateful("model"),
+                    optimizer=_FakeStateful("optimizer"),
+                    step=step,
+                    epoch=1,
+                    loss=0.5,
+                    checkpointing=checkpointing,
+                    sample_loader={"materialized_count": 16},
+                    data_loader={"num_workers": 2},
+                    feed={"non_blocking": True},
+                    runtime={"device_type": "cuda", "rank": 0, "world_size": 1},
+                )
+
+            checkpoint_dir = output_dir / "checkpoints"
+            self.assertFalse((checkpoint_dir / "step_00000010.pt").exists())
+            self.assertTrue((checkpoint_dir / "step_00000020.pt").exists())
+            self.assertTrue((checkpoint_dir / "step_00000030.pt").exists())
+            latest = json.loads((output_dir / "latest_checkpoint.json").read_text())
+            self.assertEqual(latest["step"], 30)
+            self.assertEqual(latest["checkpoint"], str(checkpoint_dir / "step_00000030.pt"))
+
+    def test_temporal_resume_position_advances_periodic_checkpoint_from_saved_step(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            checkpoint_dir = output_dir / "checkpoints"
+            checkpoint_dir.mkdir()
+            saved_checkpoint = checkpoint_dir / "step_00010000.pt"
+            saved_checkpoint.write_text("existing checkpoint\n", encoding="utf-8")
+            checkpointing = {
+                "dir": "checkpoints",
+                "every_steps": 100,
+                "keep_last": 2,
+                "latest_manifest": "latest_checkpoint.json",
+            }
+
+            resume = train_entry._resume_training_position({"step": 10000, "epoch": 7})
+
+            self.assertTrue(resume["resumed"])
+            self.assertEqual(resume["step"], 10000)
+            self.assertEqual(resume["epoch"], 7)
+            self.assertEqual(resume["step"] + 1, 10001)
+            self.assertFalse(
+                train_entry._should_save_periodic_checkpoint(10001, 10200, checkpointing)
+            )
+            self.assertTrue(
+                train_entry._should_save_periodic_checkpoint(10100, 10200, checkpointing)
+            )
+
+            train_entry._save_periodic_training_checkpoint(
+                _FakeTorchIO(),
+                output_dir=output_dir,
+                model=_FakeStateful("model"),
+                optimizer=_FakeStateful("optimizer"),
+                step=10100,
+                epoch=resume["epoch"],
+                loss=0.25,
+                checkpointing=checkpointing,
+                sample_loader={"materialized_count": 16},
+                data_loader={"num_workers": 2},
+                feed={"non_blocking": True},
+                runtime={"device_type": "cuda", "rank": 0, "world_size": 1},
+            )
+
+            self.assertEqual(saved_checkpoint.read_text(encoding="utf-8"), "existing checkpoint\n")
+            advanced_checkpoint = checkpoint_dir / "step_00010100.pt"
+            self.assertTrue(advanced_checkpoint.exists())
+            latest = json.loads((output_dir / "latest_checkpoint.json").read_text())
+            self.assertEqual(latest["step"], 10100)
+            self.assertEqual(latest["checkpoint"], str(advanced_checkpoint))
+
 
 def _write_policy_audit(
     path: Path,
@@ -1177,9 +1495,114 @@ class _FakeTemporalTensor:
 class _FakeDeviceTensor:
     def __init__(self, name: str):
         self.name = name
+        self.to_calls = []
 
     def to(self, device, non_blocking=False):
+        self.to_calls.append({"device": device, "non_blocking": non_blocking})
         return self
+
+
+class _FakeSliceTensor(_FakeDeviceTensor):
+    def __init__(self, name: str, rows: int):
+        super().__init__(name)
+        self.shape = (rows,)
+        self.slices = []
+
+    def __getitem__(self, item):
+        if not isinstance(item, slice):
+            raise AssertionError(f"expected slice, got {item!r}")
+        start, stop, step = item.indices(self.shape[0])
+        if step != 1:
+            raise AssertionError(f"expected contiguous slice, got step {step}")
+        self.slices.append((start, stop))
+        return _FakeSliceTensor(f"{self.name}[{start}:{stop}]", max(0, stop - start))
+
+
+class _FakeTorchIO:
+    def save(self, payload, path):
+        path.write_text(json.dumps({"step": payload["step"], "loss": payload["loss"]}) + "\n")
+
+
+class _FakeStateful:
+    def __init__(self, name: str):
+        self.name = name
+
+    def state_dict(self):
+        return {"name": self.name}
+
+
+class _FakeRuntimeTorch:
+    def __init__(self, *, cuda_available: bool):
+        self.cuda = _FakeRuntimeCuda(cuda_available=cuda_available)
+        self.distributed = _FakeRuntimeDistributed()
+
+    @staticmethod
+    def device(*args):
+        return args
+
+
+class _FakeRuntimeCuda:
+    def __init__(self, *, cuda_available: bool):
+        self._available = cuda_available
+        self.set_devices = []
+
+    def is_available(self):
+        return self._available
+
+    def set_device(self, index):
+        self.set_devices.append(index)
+
+
+class _FakeRuntimeDistributed:
+    def __init__(self):
+        self.init_backends = []
+
+    @staticmethod
+    def is_initialized():
+        return False
+
+    def init_process_group(self, *, backend):
+        self.init_backends.append(backend)
+
+
+class _FakeDDPTorch:
+    class nn:
+        class parallel:
+            class DistributedDataParallel:
+                def __init__(
+                    self,
+                    module,
+                    *,
+                    device_ids=None,
+                    output_device=None,
+                    broadcast_buffers=True,
+                    find_unused_parameters=False,
+                    static_graph=False,
+                    gradient_as_bucket_view=False,
+                    init_sync=True,
+                    bucket_cap_mb=None,
+                ):
+                    self.module = module
+
+
+class _FakeModule:
+    def named_parameters(self):
+        return [("weight", _FakeNamedTensor((2, 3), requires_grad=True))]
+
+    def named_buffers(self):
+        return [("running", _FakeNamedTensor((3,), requires_grad=False))]
+
+
+class _FakeNamedTensor:
+    def __init__(self, shape, *, requires_grad: bool):
+        self.shape = shape
+        self.requires_grad = requires_grad
+
+    def numel(self):
+        total = 1
+        for value in self.shape:
+            total *= value
+        return total
 
 
 class _FakeTensor:
