@@ -1042,8 +1042,17 @@ def _train_jsonl(
     if not samples:
         raise SystemExit(f"no supervised samples found in {samples_jsonl}")
     if rank == 0:
-        print(f"sample_loader={json.dumps(sample_loader, sort_keys=True)}")
-    if _configured_model_family(config) == "temporal_diffusion_policy":
+        print(f"sample_loader={json.dumps(sample_loader, sort_keys=True)}", flush=True)
+    model_family = _configured_model_family(config)
+    if model_family == "temporal_diffusion_policy":
+        _print_temporal_startup_stage(
+            rank=rank,
+            stage="sample_loader_done",
+            runtime=runtime,
+            sample_loader=sample_loader,
+            sample_count=len(samples),
+            samples_jsonl=samples_jsonl,
+        )
         _train_temporal_diffusion_jsonl(
             torch=torch,
             config=config,
@@ -1270,34 +1279,153 @@ def _train_temporal_diffusion_jsonl(
 ) -> None:
     from online_retarget.models.registry import build_model
 
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="temporal_entry",
+        runtime=runtime,
+        sample_count=len(samples),
+        samples_jsonl=samples_jsonl,
+        output_dir=output_dir,
+        resume_checkpoint=resume_checkpoint,
+        max_steps=max_steps,
+        batch_size=batch_size,
+    )
     input_dim = len(samples[0]["observation"])
     target_shape = _target_action_shape(samples[0])
     action_horizon, action_dim = target_shape
-    observation_spec = _observation_spec_from_config_and_manifest(
-        config,
-        _load_sample_manifest(samples_jsonl),
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="shape_infer_done",
+        runtime=runtime,
+        input_dim=input_dim,
+        action_horizon=action_horizon,
+        action_dim=action_dim,
+    )
+    manifest_path = samples_jsonl.parent / "manifest.json"
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="manifest_load_begin",
+        runtime=runtime,
+        manifest=manifest_path,
+    )
+    sample_manifest = _load_sample_manifest(samples_jsonl)
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="manifest_load_done",
+        runtime=runtime,
+        manifest=manifest_path,
+        manifest_loaded=bool(sample_manifest),
+    )
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="observation_spec_begin",
+        runtime=runtime,
         input_dim=input_dim,
     )
+    observation_spec = _observation_spec_from_config_and_manifest(
+        config,
+        sample_manifest,
+        input_dim=input_dim,
+    )
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="observation_spec_done",
+        runtime=runtime,
+        flattened_dim=observation_spec.flattened_dim(),
+        history_frames=observation_spec.history_frames,
+        source_body_count=observation_spec.source_body_count,
+    )
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="tensorize_begin",
+        runtime=runtime,
+        sample_count=len(samples),
+    )
     tensors = _temporal_condition_tensors(torch, samples)
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="tensorize_done",
+        runtime=runtime,
+        tensor_shapes=_tensor_collection_report(tensors),
+    )
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="finite_filter_begin",
+        runtime=runtime,
+        sample_count=len(samples),
+    )
     samples, tensors, sample_filter = _filter_finite_temporal_tensors(
         torch,
         samples=samples,
         tensors=tensors,
     )
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="finite_filter_done",
+        runtime=runtime,
+        sample_filter=sample_filter,
+        sample_count=len(samples),
+        tensor_shapes=_tensor_collection_report(tensors),
+    )
     if not samples:
         raise SystemExit(f"all temporal samples contain non-finite values: {samples_jsonl}")
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="feature_contract_begin",
+        runtime=runtime,
+        sample_count=len(samples),
+    )
     feature_contract = _temporal_feature_contract_report(config, samples, tensors)
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="feature_contract_done",
+        runtime=runtime,
+        feature_contract=feature_contract,
+    )
     if rank == 0:
         print(f"sample_filter={json.dumps(sample_filter, sort_keys=True)}", flush=True)
         print(f"feature_contract={json.dumps(feature_contract, sort_keys=True)}", flush=True)
 
     seed = int(_nested_get(config, ("experiment", "seed"), 17))
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="manual_seed_begin",
+        runtime=runtime,
+        seed=seed,
+    )
     torch.manual_seed(seed)
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="manual_seed_done",
+        runtime=runtime,
+        seed=seed,
+    )
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="output_dir_mkdir_begin",
+        runtime=runtime,
+        output_dir=output_dir,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="output_dir_mkdir_done",
+        runtime=runtime,
+        output_dir=output_dir,
+    )
     log_every = max(1, int(_nested_get(config, ("train", "log_every"), 100)))
     steps = min(max_steps, max_steps if max_steps > 0 else 1)
     feed = _temporal_feed_config(config, runtime)
     checkpointing = _checkpointing_config(config)
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="train_config_done",
+        runtime=runtime,
+        log_every=log_every,
+        steps=steps,
+        feed=feed,
+        checkpointing=checkpointing,
+    )
     sampler = None
     loader_kwargs, data_loader = _train_dataloader_kwargs(
         config,
@@ -1326,14 +1454,51 @@ def _train_temporal_diffusion_jsonl(
         microbatching=microbatching,
         checkpointing=checkpointing,
     )
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="ddp_kwargs_begin",
+        runtime=runtime,
+    )
     ddp_kwargs, ddp_report = _ddp_constructor_kwargs(torch, config, runtime)
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="ddp_kwargs_done",
+        runtime=runtime,
+        ddp=ddp_report,
+    )
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="model_build_begin",
+        runtime=runtime,
+        input_dim=input_dim,
+        output_dim=action_dim,
+    )
     model_build = build_model(
         config,
         input_dim=input_dim,
         output_dim=action_dim,
         observation_spec=observation_spec,
     )
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="model_build_done",
+        runtime=runtime,
+        model_family=model_build.family,
+        model_config=model_build.config,
+    )
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="model_to_device_begin",
+        runtime=runtime,
+        device=runtime["device"],
+    )
     model = model_build.model.to(runtime["device"])
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="model_to_device_done",
+        runtime=runtime,
+        model=_module_tensor_report(model),
+    )
     _print_temporal_ddp_diagnostics(
         rank=rank,
         stage="post_model_to",
@@ -1345,20 +1510,65 @@ def _train_temporal_diffusion_jsonl(
     resume_payload = None
     resume_position = {"resumed": False, "step": 0, "epoch": 0}
     if resume_checkpoint is not None:
+        _print_temporal_startup_stage(
+            rank=rank,
+            stage="checkpoint_load_begin",
+            runtime=runtime,
+            checkpoint=resume_checkpoint,
+            map_location=runtime["device"],
+        )
         resume_payload = torch.load(resume_checkpoint, map_location=runtime["device"])
+        _print_temporal_startup_stage(
+            rank=rank,
+            stage="checkpoint_load_done",
+            runtime=runtime,
+            checkpoint=resume_checkpoint,
+            payload_type=type(resume_payload).__name__,
+            payload_keys=(
+                sorted(str(key) for key in resume_payload)
+                if isinstance(resume_payload, dict)
+                else []
+            ),
+        )
         state_dict = (
             resume_payload.get("model_state_dict") if isinstance(resume_payload, dict) else None
         )
         if state_dict is None:
             raise SystemExit(f"checkpoint lacks model_state_dict: {resume_checkpoint}")
+        _print_temporal_startup_stage(
+            rank=rank,
+            stage="checkpoint_model_state_load_begin",
+            runtime=runtime,
+            checkpoint=resume_checkpoint,
+            state_dict_entries=len(state_dict),
+        )
         model.load_state_dict(state_dict)
+        _print_temporal_startup_stage(
+            rank=rank,
+            stage="checkpoint_model_state_load_done",
+            runtime=runtime,
+            checkpoint=resume_checkpoint,
+            state_dict_entries=len(state_dict),
+        )
         try:
             resume_position = _resume_training_position(resume_payload)
         except ValueError as exc:
             raise SystemExit(
                 f"invalid checkpoint training position: {resume_checkpoint}: {exc}"
             ) from exc
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="resume_position",
+        runtime=runtime,
+        resume_position=resume_position,
+    )
     if runtime["distributed"]:
+        _print_temporal_startup_stage(
+            rank=rank,
+            stage="ddp_wrap_begin",
+            runtime=runtime,
+            ddp=ddp_report,
+        )
         _print_temporal_ddp_diagnostics(
             rank=rank,
             stage="pre_ddp_wrap",
@@ -1368,6 +1578,12 @@ def _train_temporal_diffusion_jsonl(
             ddp=ddp_report,
         )
         model = torch.nn.parallel.DistributedDataParallel(model, **ddp_kwargs)
+        _print_temporal_startup_stage(
+            rank=rank,
+            stage="ddp_wrap_done",
+            runtime=runtime,
+            ddp=ddp_report,
+        )
         _print_temporal_ddp_diagnostics(
             rank=rank,
             stage="post_ddp_wrap",
@@ -1376,22 +1592,82 @@ def _train_temporal_diffusion_jsonl(
             tensors=tensors,
             ddp=ddp_report,
         )
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="optimizer_init_begin",
+        runtime=runtime,
+    )
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="optimizer_init_done",
+        runtime=runtime,
+        learning_rate=learning_rate,
+    )
     if isinstance(resume_payload, dict) and resume_payload.get("optimizer_state_dict"):
+        _print_temporal_startup_stage(
+            rank=rank,
+            stage="optimizer_state_load_begin",
+            runtime=runtime,
+        )
         optimizer.load_state_dict(resume_payload["optimizer_state_dict"])
+        _print_temporal_startup_stage(
+            rank=rank,
+            stage="optimizer_state_load_done",
+            runtime=runtime,
+        )
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="wandb_init_begin",
+        runtime=runtime,
+        enabled=rank == 0,
+        wandb_mode=_nested_get(config, ("tracking", "wandb_mode"), ""),
+    )
     wandb_run = _init_wandb(
         config=config,
         quality_gate=quality_gate,
         output_dir=output_dir,
         enabled=rank == 0,
     )
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="wandb_init_done",
+        runtime=runtime,
+        enabled=rank == 0,
+        run_present=wandb_run is not None,
+        run_id=getattr(wandb_run, "id", "") if wandb_run is not None else "",
+        run_url=getattr(wandb_run, "url", "") if wandb_run is not None else "",
+    )
 
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="training_tensors_prepare_begin",
+        runtime=runtime,
+        feed=feed,
+    )
     tensors = _prepare_temporal_tensors_for_training(
         tensors,
         device=runtime["device"],
         feed=feed,
     )
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="training_tensors_prepare_done",
+        runtime=runtime,
+        tensor_shapes=_tensor_collection_report(tensors),
+    )
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="dataset_build_begin",
+        runtime=runtime,
+    )
     dataset = torch.utils.data.TensorDataset(*_temporal_training_dataset_tensors(tensors))
+    _print_temporal_startup_stage(
+        rank=rank,
+        stage="dataset_build_done",
+        runtime=runtime,
+        dataset_length=len(dataset),
+    )
     if rank == 0:
         print(f"batch_to_device={json.dumps(feed, sort_keys=True)}", flush=True)
         print(f"data_loader={json.dumps(data_loader, sort_keys=True)}", flush=True)
@@ -2262,6 +2538,51 @@ def _print_temporal_pre_cuda_diagnostics(
         ),
         flush=True,
     )
+
+
+def _print_temporal_startup_stage(
+    *,
+    rank: int,
+    stage: str,
+    runtime: dict[str, Any],
+    **fields: Any,
+) -> None:
+    payload: dict[str, Any] = {
+        "rank": int(rank),
+        "stage": str(stage),
+        "pid": os.getpid(),
+        "ppid": os.getppid(),
+        "runtime": _runtime_report(runtime),
+        "device": str(runtime.get("device", "")),
+        "env": {
+            key: os.environ.get(key, "")
+            for key in (
+                "RANK",
+                "LOCAL_RANK",
+                "WORLD_SIZE",
+                "CUDA_VISIBLE_DEVICES",
+                "ONLINE_RETARGET_DDP",
+                "WANDB_MODE",
+            )
+        },
+    }
+    for key, value in fields.items():
+        payload[str(key)] = _jsonable_log_value(value)
+    print("temporal_startup_state=" + json.dumps(payload, sort_keys=True), flush=True)
+
+
+def _jsonable_log_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _jsonable_log_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable_log_value(item) for item in value]
+    if hasattr(value, "shape") and hasattr(value, "dtype"):
+        return _tensor_report(value)
+    return str(value)
 
 
 def _print_temporal_ddp_diagnostics(
