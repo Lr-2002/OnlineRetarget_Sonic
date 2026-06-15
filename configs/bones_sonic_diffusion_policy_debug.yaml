@@ -158,6 +158,18 @@ train:
   ddp: true
   log_every: 20
   eval_every: 200
+  checkpoint_every_steps: 100
+  keep_last_checkpoints: 3
+  dataloader:
+    num_workers: 2
+    prefetch_factor: 2
+    persistent_workers: true
+    pin_memory: true
+    drop_last: false
+  batch_to_device:
+    non_blocking: true
+    preload_tensors: false
+    pin_materialized_tensors: false
 
 evaluation:
   metrics:

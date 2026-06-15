@@ -953,6 +953,100 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(condition["fps"].name, "fps")
         self.assertEqual(condition["target_action"].name, "target_action")
 
+    def test_temporal_batch_to_device_uses_configured_non_blocking_flag(self):
+        batch = tuple(_FakeDeviceTensor(key) for key in train_entry.TEMPORAL_BATCH_KEYS)
+
+        train_entry._temporal_batch_to_device(batch, device="cuda:0", non_blocking=False)
+
+        for tensor in batch:
+            self.assertEqual(tensor.to_calls, [{"device": "cuda:0", "non_blocking": False}])
+
+    def test_train_dataloader_kwargs_exposes_worker_and_prefetch_knobs(self):
+        kwargs, report = train_entry._train_dataloader_kwargs(
+            {
+                "train": {
+                    "dataloader": {
+                        "num_workers": 4,
+                        "prefetch_factor": 3,
+                        "persistent_workers": True,
+                        "pin_memory": True,
+                        "drop_last": True,
+                    }
+                }
+            },
+            {"device_type": "cuda"},
+            dataset_length=1000,
+            batch_size=128,
+        )
+
+        self.assertEqual(kwargs["batch_size"], 128)
+        self.assertEqual(kwargs["num_workers"], 4)
+        self.assertEqual(kwargs["prefetch_factor"], 3)
+        self.assertTrue(kwargs["persistent_workers"])
+        self.assertTrue(kwargs["pin_memory"])
+        self.assertTrue(kwargs["drop_last"])
+        self.assertEqual(report["requested_num_workers"], 4)
+        self.assertEqual(report["prefetch_factor"], 3)
+
+    def test_train_dataloader_kwargs_forces_single_process_for_preloaded_tensors(self):
+        kwargs, report = train_entry._train_dataloader_kwargs(
+            {
+                "train": {
+                    "dataloader": {
+                        "num_workers": 4,
+                        "prefetch_factor": 2,
+                        "persistent_workers": True,
+                        "pin_memory": True,
+                    }
+                }
+            },
+            {"device_type": "cuda"},
+            dataset_length=64,
+            batch_size=256,
+            force_single_process=True,
+        )
+
+        self.assertEqual(kwargs["batch_size"], 64)
+        self.assertEqual(kwargs["num_workers"], 0)
+        self.assertFalse(kwargs["pin_memory"])
+        self.assertNotIn("prefetch_factor", kwargs)
+        self.assertEqual(
+            report["forced_single_process_reason"],
+            "materialized_tensors_preloaded_to_device",
+        )
+
+    def test_periodic_training_checkpoint_writes_latest_and_prunes_old_steps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            checkpointing = {
+                "dir": "checkpoints",
+                "keep_last": 2,
+                "latest_manifest": "latest_checkpoint.json",
+            }
+            for step in (10, 20, 30):
+                train_entry._save_periodic_training_checkpoint(
+                    _FakeTorchIO(),
+                    output_dir=output_dir,
+                    model=_FakeStateful("model"),
+                    optimizer=_FakeStateful("optimizer"),
+                    step=step,
+                    epoch=1,
+                    loss=0.5,
+                    checkpointing=checkpointing,
+                    sample_loader={"materialized_count": 16},
+                    data_loader={"num_workers": 2},
+                    feed={"non_blocking": True},
+                    runtime={"device_type": "cuda", "rank": 0, "world_size": 1},
+                )
+
+            checkpoint_dir = output_dir / "checkpoints"
+            self.assertFalse((checkpoint_dir / "step_00000010.pt").exists())
+            self.assertTrue((checkpoint_dir / "step_00000020.pt").exists())
+            self.assertTrue((checkpoint_dir / "step_00000030.pt").exists())
+            latest = json.loads((output_dir / "latest_checkpoint.json").read_text())
+            self.assertEqual(latest["step"], 30)
+            self.assertEqual(latest["checkpoint"], str(checkpoint_dir / "step_00000030.pt"))
+
 
 def _write_policy_audit(
     path: Path,
@@ -1177,9 +1271,24 @@ class _FakeTemporalTensor:
 class _FakeDeviceTensor:
     def __init__(self, name: str):
         self.name = name
+        self.to_calls = []
 
     def to(self, device, non_blocking=False):
+        self.to_calls.append({"device": device, "non_blocking": non_blocking})
         return self
+
+
+class _FakeTorchIO:
+    def save(self, payload, path):
+        path.write_text(json.dumps({"step": payload["step"], "loss": payload["loss"]}) + "\n")
+
+
+class _FakeStateful:
+    def __init__(self, name: str):
+        self.name = name
+
+    def state_dict(self):
+        return {"name": self.name}
 
 
 class _FakeTensor:
