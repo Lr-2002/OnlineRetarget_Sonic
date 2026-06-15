@@ -699,9 +699,9 @@ def _ddp_constructor_kwargs(
         "broadcast_buffers",
         "ONLINE_RETARGET_DDP_BROADCAST_BUFFERS",
     )
-    kwargs: dict[str, Any] = {
-        "broadcast_buffers": False if broadcast_buffers is None else broadcast_buffers,
-    }
+    kwargs: dict[str, Any] = {}
+    if broadcast_buffers is not None:
+        kwargs["broadcast_buffers"] = broadcast_buffers
     if device_type == "cuda":
         local_rank = int(runtime.get("local_rank", 0))
         kwargs["device_ids"] = [local_rank]

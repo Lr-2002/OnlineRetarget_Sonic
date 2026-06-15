@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import math
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -1065,6 +1066,28 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(kwargs["bucket_cap_mb"], 8.0)
         self.assertEqual(report["backend"], "nccl")
         self.assertEqual(report["unsupported_kwargs"], [])
+
+    def test_ddp_constructor_kwargs_preserve_torch_defaults_without_overrides(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            kwargs, report = train_entry._ddp_constructor_kwargs(
+                _FakeDDPTorch,
+                {},
+                {
+                    "distributed": True,
+                    "distributed_backend": "nccl",
+                    "device_type": "cuda",
+                    "local_rank": 0,
+                },
+            )
+
+        self.assertEqual(kwargs, {"device_ids": [0], "output_device": 0})
+        self.assertEqual(report["kwargs"], {"device_ids": [0], "output_device": 0})
+        self.assertNotIn("broadcast_buffers", kwargs)
+        self.assertNotIn("find_unused_parameters", kwargs)
+        self.assertNotIn("static_graph", kwargs)
+        self.assertNotIn("gradient_as_bucket_view", kwargs)
+        self.assertNotIn("bucket_cap_mb", kwargs)
+        self.assertNotIn("init_sync", kwargs)
 
     def test_forward_microbatch_config_splits_large_temporal_batch(self):
         report = train_entry._forward_microbatch_config(
