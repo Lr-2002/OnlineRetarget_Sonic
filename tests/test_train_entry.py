@@ -1190,6 +1190,53 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(payload["model"]["buffer_count"], 1)
         self.assertEqual(len(payload["model"]["tensor_signature_sha256"]), 64)
 
+    def test_temporal_startup_stage_prints_rank_local_json_marker(self):
+        stream = io.StringIO()
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "RANK": "1",
+                "LOCAL_RANK": "1",
+                "WORLD_SIZE": "4",
+                "CUDA_VISIBLE_DEVICES": "4,5,6,7",
+                "ONLINE_RETARGET_DDP": "1",
+                "WANDB_MODE": "offline",
+            },
+            clear=True,
+        ):
+            with contextlib.redirect_stdout(stream):
+                train_entry._print_temporal_startup_stage(
+                    rank=1,
+                    stage="checkpoint_load_begin",
+                    runtime={
+                        "distributed": True,
+                        "ddp_enabled": True,
+                        "sample_sharded": True,
+                        "rank": 1,
+                        "world_size": 4,
+                        "local_rank": 1,
+                        "device_type": "cuda",
+                        "device": "cuda:1",
+                        "distributed_backend": "nccl",
+                    },
+                    checkpoint=Path("/tmp/checkpoints/step_00000300.pt"),
+                    tensor=_FakeReportTensor((2, 3), dtype="float32", device="cpu"),
+                )
+
+        output = stream.getvalue().strip()
+        self.assertTrue(output.startswith("temporal_startup_state="))
+        payload = json.loads(output.split("=", 1)[1])
+        self.assertEqual(payload["rank"], 1)
+        self.assertEqual(payload["stage"], "checkpoint_load_begin")
+        self.assertEqual(payload["runtime"]["world_size"], 4)
+        self.assertEqual(payload["device"], "cuda:1")
+        self.assertEqual(payload["env"]["CUDA_VISIBLE_DEVICES"], "4,5,6,7")
+        self.assertEqual(payload["checkpoint"], "/tmp/checkpoints/step_00000300.pt")
+        self.assertEqual(payload["tensor"]["shape"], [2, 3])
+        self.assertIn("pid", payload)
+        self.assertIn("ppid", payload)
+
     def test_periodic_training_checkpoint_writes_latest_and_prunes_old_steps(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
@@ -1620,6 +1667,13 @@ class _FakeTensor:
 
     def __rmul__(self, other):
         return self
+
+
+class _FakeReportTensor:
+    def __init__(self, shape: tuple[int, ...], *, dtype: str, device: str):
+        self.shape = shape
+        self.dtype = dtype
+        self.device = device
 
 
 class _FakeBoolVector:
