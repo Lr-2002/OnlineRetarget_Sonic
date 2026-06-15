@@ -157,6 +157,13 @@ train:
   forward_microbatch_size: 8192
   precision: fp32
   ddp: false
+  ddp_options:
+    backend: nccl
+    broadcast_buffers: false
+    find_unused_parameters: true
+    static_graph: false
+    gradient_as_bucket_view: false
+    init_sync: false
   log_every: 20
   eval_every: 200
   checkpoint_every_steps: 100

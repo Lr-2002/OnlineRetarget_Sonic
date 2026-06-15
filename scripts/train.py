@@ -9,6 +9,7 @@ import csv
 from dataclasses import replace
 import hashlib
 import html
+import inspect
 import json
 import os
 from pathlib import Path
@@ -560,6 +561,7 @@ def _setup_torch_runtime(
     launch_world_size = int(world_size)
     distributed = launch_world_size > 1 and ddp_enabled
     device_type = "cuda" if torch.cuda.is_available() else "cpu"
+    backend = _train_distributed_backend(config or {}, device_type=device_type)
     if device_type == "cuda":
         device_index = local_rank if launch_world_size > 1 else 0
         torch.cuda.set_device(device_index)
@@ -567,7 +569,6 @@ def _setup_torch_runtime(
     else:
         device = torch.device("cpu")
     if distributed and not torch.distributed.is_initialized():
-        backend = "nccl" if device_type == "cuda" else "gloo"
         torch.distributed.init_process_group(backend=backend)
     return {
         "distributed": distributed,
@@ -576,6 +577,7 @@ def _setup_torch_runtime(
         "local_rank": local_rank,
         "device": device,
         "device_type": device_type,
+        "distributed_backend": backend if distributed else "",
         "ddp_enabled": ddp_enabled,
         "sample_sharded": launch_world_size > 1,
     }
@@ -595,6 +597,7 @@ def _runtime_report(runtime: dict[str, Any]) -> dict[str, Any]:
         "world_size": int(runtime.get("world_size", 1)),
         "local_rank": int(runtime.get("local_rank", 0)),
         "device_type": str(runtime.get("device_type", "cpu")),
+        "distributed_backend": str(runtime.get("distributed_backend", "")),
     }
 
 
@@ -608,6 +611,23 @@ def _train_ddp_enabled(config: dict[str, Any]) -> bool:
     if env_override is not None:
         return _bool_value(env_override, default=True)
     return _bool_value(_train_section(config).get("ddp", True), default=True)
+
+
+def _train_distributed_backend(config: dict[str, Any], *, device_type: str) -> str:
+    for env_name in ("ONLINE_RETARGET_DISTRIBUTED_BACKEND", "ONLINE_RETARGET_DDP_BACKEND"):
+        env_override = os.environ.get(env_name)
+        if env_override:
+            return env_override.strip()
+    train_cfg = _train_section(config)
+    ddp_cfg = _ddp_options_section(config)
+    backend = (
+        ddp_cfg.get("backend")
+        or train_cfg.get("distributed_backend")
+        or train_cfg.get("ddp_backend")
+    )
+    if backend:
+        return str(backend)
+    return "nccl" if device_type == "cuda" else "gloo"
 
 
 def _bool_value(value: Any, *, default: bool) -> bool:
@@ -624,6 +644,117 @@ def _bool_value(value: Any, *, default: bool) -> bool:
         if normalized in {"0", "false", "no", "n", "off"}:
             return False
     return default
+
+
+def _ddp_options_section(config: dict[str, Any]) -> dict[str, Any]:
+    train_cfg = _train_section(config)
+    for key in ("ddp_options", "ddp_kwargs", "distributed"):
+        payload = train_cfg.get(key, {})
+        if isinstance(payload, dict):
+            return dict(payload)
+    return {}
+
+
+def _optional_bool_option(
+    options: dict[str, Any],
+    key: str,
+    env_name: str,
+) -> bool | None:
+    env_override = os.environ.get(env_name)
+    if env_override is not None:
+        return _bool_value(env_override, default=False)
+    if key in options:
+        return _bool_value(options.get(key), default=False)
+    return None
+
+
+def _optional_float_option(
+    options: dict[str, Any],
+    key: str,
+    env_name: str,
+) -> float | None:
+    env_override = os.environ.get(env_name)
+    value = env_override if env_override is not None else options.get(key)
+    if value is None:
+        return None
+    return float(value)
+
+
+def _supported_ddp_kwargs(torch) -> set[str]:
+    try:
+        return set(inspect.signature(torch.nn.parallel.DistributedDataParallel).parameters)
+    except (TypeError, ValueError, AttributeError):
+        return set()
+
+
+def _ddp_constructor_kwargs(
+    torch,
+    config: dict[str, Any],
+    runtime: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    options = _ddp_options_section(config)
+    device_type = str(runtime.get("device_type", "cpu"))
+    broadcast_buffers = _optional_bool_option(
+        options,
+        "broadcast_buffers",
+        "ONLINE_RETARGET_DDP_BROADCAST_BUFFERS",
+    )
+    kwargs: dict[str, Any] = {
+        "broadcast_buffers": False if broadcast_buffers is None else broadcast_buffers,
+    }
+    if device_type == "cuda":
+        local_rank = int(runtime.get("local_rank", 0))
+        kwargs["device_ids"] = [local_rank]
+        kwargs["output_device"] = local_rank
+
+    optional_bools = (
+        ("find_unused_parameters", "ONLINE_RETARGET_DDP_FIND_UNUSED_PARAMETERS"),
+        ("static_graph", "ONLINE_RETARGET_DDP_STATIC_GRAPH"),
+        ("gradient_as_bucket_view", "ONLINE_RETARGET_DDP_GRADIENT_AS_BUCKET_VIEW"),
+        ("init_sync", "ONLINE_RETARGET_DDP_INIT_SYNC"),
+    )
+    for key, env_name in optional_bools:
+        value = _optional_bool_option(options, key, env_name)
+        if value is not None:
+            kwargs[key] = value
+    bucket_cap_mb = _optional_float_option(
+        options,
+        "bucket_cap_mb",
+        "ONLINE_RETARGET_DDP_BUCKET_CAP_MB",
+    )
+    if bucket_cap_mb is not None:
+        kwargs["bucket_cap_mb"] = bucket_cap_mb
+
+    supported = _supported_ddp_kwargs(torch)
+    unsupported = []
+    if supported:
+        for key in list(kwargs):
+            if key not in supported:
+                unsupported.append(key)
+                kwargs.pop(key)
+    elif "init_sync" in kwargs:
+        unsupported.append("init_sync")
+        kwargs.pop("init_sync")
+
+    report = {
+        "enabled": bool(runtime.get("distributed")),
+        "backend": str(runtime.get("distributed_backend", "")),
+        "kwargs": _jsonable_ddp_kwargs(kwargs),
+        "unsupported_kwargs": unsupported,
+    }
+    return kwargs, report
+
+
+def _jsonable_ddp_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    serializable = {}
+    for key, value in kwargs.items():
+        if isinstance(value, (bool, int, float, str)) or value is None:
+            serializable[key] = value
+        elif isinstance(value, (list, tuple)):
+            serializable[key] = list(value)
+        else:
+            serializable[key] = str(value)
+    return serializable
 
 
 def _train_dataloader_kwargs(
@@ -1195,6 +1326,7 @@ def _train_temporal_diffusion_jsonl(
         microbatching=microbatching,
         checkpointing=checkpointing,
     )
+    ddp_kwargs, ddp_report = _ddp_constructor_kwargs(torch, config, runtime)
     model_build = build_model(
         config,
         input_dim=input_dim,
@@ -1202,6 +1334,14 @@ def _train_temporal_diffusion_jsonl(
         observation_spec=observation_spec,
     )
     model = model_build.model.to(runtime["device"])
+    _print_temporal_ddp_diagnostics(
+        rank=rank,
+        stage="post_model_to",
+        runtime=runtime,
+        model=model,
+        tensors=tensors,
+        ddp=ddp_report,
+    )
     resume_payload = None
     resume_position = {"resumed": False, "step": 0, "epoch": 0}
     if resume_checkpoint is not None:
@@ -1219,9 +1359,22 @@ def _train_temporal_diffusion_jsonl(
                 f"invalid checkpoint training position: {resume_checkpoint}: {exc}"
             ) from exc
     if runtime["distributed"]:
-        model = torch.nn.parallel.DistributedDataParallel(
-            model,
-            device_ids=[runtime["local_rank"]] if runtime["device_type"] == "cuda" else None,
+        _print_temporal_ddp_diagnostics(
+            rank=rank,
+            stage="pre_ddp_wrap",
+            runtime=runtime,
+            model=model,
+            tensors=tensors,
+            ddp=ddp_report,
+        )
+        model = torch.nn.parallel.DistributedDataParallel(model, **ddp_kwargs)
+        _print_temporal_ddp_diagnostics(
+            rank=rank,
+            stage="post_ddp_wrap",
+            runtime=runtime,
+            model=_unwrap_model(model),
+            tensors=tensors,
+            ddp=ddp_report,
         )
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     if isinstance(resume_payload, dict) and resume_payload.get("optimizer_state_dict"):
@@ -1244,16 +1397,26 @@ def _train_temporal_diffusion_jsonl(
         print(f"data_loader={json.dumps(data_loader, sort_keys=True)}", flush=True)
         print(f"forward_microbatch={json.dumps(microbatching, sort_keys=True)}", flush=True)
         print(f"checkpointing={json.dumps(checkpointing, sort_keys=True)}", flush=True)
+        print(f"ddp={json.dumps(ddp_report, sort_keys=True)}", flush=True)
         if resume_position["resumed"]:
             print(f"resume_position={json.dumps(resume_position, sort_keys=True)}", flush=True)
     loader = torch.utils.data.DataLoader(dataset, **loader_kwargs)
     step = int(resume_position["step"])
     epoch = int(resume_position["epoch"])
+    first_train_step = step + 1
     while step < steps:
         if sampler is not None:
             sampler.set_epoch(epoch)
         for batch in loader:
             step += 1
+            if step == first_train_step:
+                _print_temporal_ddp_diagnostics(
+                    rank=rank,
+                    stage="first_batch_cpu",
+                    runtime=runtime,
+                    batch=batch,
+                    ddp=ddp_report,
+                )
             optimizer.zero_grad(set_to_none=True)
             loss_value = 0.0
             microbatches = list(
@@ -1276,11 +1439,39 @@ def _train_temporal_diffusion_jsonl(
                     else contextlib.nullcontext()
                 )
                 with sync_context:
+                    if step == first_train_step:
+                        _print_temporal_ddp_diagnostics(
+                            rank=rank,
+                            stage="first_microbatch_to_device_begin",
+                            runtime=runtime,
+                            batch=microbatch,
+                            ddp=ddp_report,
+                            microbatching={
+                                **microbatching,
+                                "microbatch_index": micro_index,
+                                "microbatch_count": microbatch_count,
+                                "sync": is_last_microbatch,
+                            },
+                        )
                     condition = _temporal_batch_to_device(
                         microbatch,
                         runtime["device"],
                         non_blocking=bool(feed.get("non_blocking", True)),
                     )
+                    if step == first_train_step:
+                        _print_temporal_ddp_diagnostics(
+                            rank=rank,
+                            stage="first_microbatch_forward_begin",
+                            runtime=runtime,
+                            condition=condition,
+                            ddp=ddp_report,
+                            microbatching={
+                                **microbatching,
+                                "microbatch_index": micro_index,
+                                "microbatch_count": microbatch_count,
+                                "sync": is_last_microbatch,
+                            },
+                        )
                     batch_y = condition.pop("target_action")
                     loss = _training_loss(
                         torch,
@@ -1292,7 +1483,33 @@ def _train_temporal_diffusion_jsonl(
                         prev_target=condition.get("prev_action"),
                     )
                     loss_scale = float(microbatch_count) / float(logical_batch_count)
+                    if step == first_train_step:
+                        _print_temporal_ddp_diagnostics(
+                            rank=rank,
+                            stage="first_microbatch_backward_begin",
+                            runtime=runtime,
+                            ddp=ddp_report,
+                            microbatching={
+                                **microbatching,
+                                "microbatch_index": micro_index,
+                                "microbatch_count": microbatch_count,
+                                "sync": is_last_microbatch,
+                            },
+                        )
                     (loss * loss_scale).backward()
+                    if step == first_train_step:
+                        _print_temporal_ddp_diagnostics(
+                            rank=rank,
+                            stage="first_microbatch_backward_done",
+                            runtime=runtime,
+                            ddp=ddp_report,
+                            microbatching={
+                                **microbatching,
+                                "microbatch_index": micro_index,
+                                "microbatch_count": microbatch_count,
+                                "sync": is_last_microbatch,
+                            },
+                        )
                     loss_value += float(loss.detach().cpu()) * loss_scale
             optimizer.step()
             if rank == 0 and (step == 1 or step == steps or step % log_every == 0):
@@ -1410,6 +1627,7 @@ def _train_temporal_diffusion_jsonl(
         data_loader=data_loader,
         batch_to_device=feed,
         forward_microbatch=microbatching,
+        ddp=ddp_report,
         checkpointing=checkpointing,
     )
     torch.save(
@@ -2044,6 +2262,93 @@ def _print_temporal_pre_cuda_diagnostics(
         ),
         flush=True,
     )
+
+
+def _print_temporal_ddp_diagnostics(
+    *,
+    rank: int,
+    stage: str,
+    runtime: dict[str, Any],
+    model=None,
+    tensors: dict[str, Any] | None = None,
+    batch=None,
+    condition: dict[str, Any] | None = None,
+    ddp: dict[str, Any] | None = None,
+    microbatching: dict[str, Any] | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "rank": int(rank),
+        "stage": str(stage),
+        "runtime": _runtime_report(runtime),
+    }
+    if model is not None:
+        payload["model"] = _module_tensor_report(model)
+    if tensors is not None:
+        payload["tensor_shapes"] = _tensor_collection_report(tensors)
+    if batch is not None:
+        payload["batch_shapes"] = _temporal_batch_report(batch)
+    if condition is not None:
+        payload["condition_shapes"] = _tensor_collection_report(condition)
+    if ddp is not None:
+        payload["ddp"] = ddp
+    if microbatching is not None:
+        payload["forward_microbatch"] = microbatching
+    print("temporal_ddp_state=" + json.dumps(payload, sort_keys=True), flush=True)
+
+
+def _tensor_collection_report(values: dict[str, Any]) -> dict[str, Any]:
+    return {key: _tensor_report(value) for key, value in values.items()}
+
+
+def _temporal_batch_report(batch) -> dict[str, Any]:
+    return {
+        key: _tensor_report(value)
+        for key, value in zip(TEMPORAL_BATCH_KEYS, batch)
+    }
+
+
+def _tensor_report(value) -> dict[str, Any]:
+    shape = getattr(value, "shape", ())
+    return {
+        "shape": [int(dim) for dim in shape],
+        "dtype": str(getattr(value, "dtype", "")),
+        "device": str(getattr(value, "device", "")),
+    }
+
+
+def _module_tensor_report(model) -> dict[str, Any]:
+    named_parameters = list(model.named_parameters())
+    named_buffers = list(model.named_buffers())
+    signature = hashlib.sha256()
+    trainable_numel = 0
+    frozen_numel = 0
+    parameter_numel = 0
+    buffer_numel = 0
+    for name, parameter in named_parameters:
+        numel = int(parameter.numel())
+        requires_grad = bool(getattr(parameter, "requires_grad", False))
+        parameter_numel += numel
+        trainable_numel += numel if requires_grad else 0
+        frozen_numel += 0 if requires_grad else numel
+        signature.update(
+            f"param:{name}:{tuple(int(dim) for dim in parameter.shape)}:{requires_grad};".encode()
+        )
+    for name, buffer in named_buffers:
+        numel = int(buffer.numel())
+        buffer_numel += numel
+        signature.update(
+            f"buffer:{name}:{tuple(int(dim) for dim in buffer.shape)};".encode()
+        )
+    return {
+        "module_type": type(model).__name__,
+        "parameter_count": len(named_parameters),
+        "buffer_count": len(named_buffers),
+        "parameter_numel": parameter_numel,
+        "trainable_parameter_numel": trainable_numel,
+        "frozen_parameter_numel": frozen_numel,
+        "buffer_numel": buffer_numel,
+        "tensor_signature_sha256": signature.hexdigest(),
+    }
 
 
 def _temporal_training_dataset_tensors(tensors: dict[str, Any]) -> tuple[Any, ...]:
@@ -3103,6 +3408,7 @@ def _build_train_report(
     data_loader: dict[str, Any] | None = None,
     batch_to_device: dict[str, Any] | None = None,
     forward_microbatch: dict[str, Any] | None = None,
+    ddp: dict[str, Any] | None = None,
     checkpointing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
@@ -3141,6 +3447,7 @@ def _build_train_report(
         "data_loader": data_loader or {},
         "batch_to_device": batch_to_device or {},
         "forward_microbatch": forward_microbatch or {"enabled": False},
+        "ddp": ddp or {"enabled": False},
         "checkpointing": checkpointing or {"enabled": False},
         "sample_filter": sample_filter
         or {

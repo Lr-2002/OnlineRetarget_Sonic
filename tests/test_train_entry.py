@@ -1032,6 +1032,40 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(torch.cuda.set_devices, [1])
         self.assertEqual(torch.distributed.init_backends, [])
 
+    def test_ddp_constructor_kwargs_are_configurable_for_cuda_runtime(self):
+        kwargs, report = train_entry._ddp_constructor_kwargs(
+            _FakeDDPTorch,
+            {
+                "train": {
+                    "ddp_options": {
+                        "broadcast_buffers": False,
+                        "find_unused_parameters": True,
+                        "static_graph": False,
+                        "gradient_as_bucket_view": True,
+                        "init_sync": False,
+                        "bucket_cap_mb": 8,
+                    }
+                }
+            },
+            {
+                "distributed": True,
+                "distributed_backend": "nccl",
+                "device_type": "cuda",
+                "local_rank": 1,
+            },
+        )
+
+        self.assertEqual(kwargs["device_ids"], [1])
+        self.assertEqual(kwargs["output_device"], 1)
+        self.assertFalse(kwargs["broadcast_buffers"])
+        self.assertTrue(kwargs["find_unused_parameters"])
+        self.assertFalse(kwargs["static_graph"])
+        self.assertTrue(kwargs["gradient_as_bucket_view"])
+        self.assertFalse(kwargs["init_sync"])
+        self.assertEqual(kwargs["bucket_cap_mb"], 8.0)
+        self.assertEqual(report["backend"], "nccl")
+        self.assertEqual(report["unsupported_kwargs"], [])
+
     def test_forward_microbatch_config_splits_large_temporal_batch(self):
         report = train_entry._forward_microbatch_config(
             {"train": {"forward_microbatch_size": 8192}},
@@ -1098,6 +1132,40 @@ class TrainEntryTests(unittest.TestCase):
             output,
         )
         self.assertIn('"sample_sharded": true', output)
+
+    def test_temporal_ddp_diagnostics_include_model_signature(self):
+        stream = io.StringIO()
+
+        with contextlib.redirect_stdout(stream):
+            train_entry._print_temporal_ddp_diagnostics(
+                rank=0,
+                stage="pre_ddp_wrap",
+                runtime={
+                    "distributed": True,
+                    "ddp_enabled": True,
+                    "sample_sharded": True,
+                    "rank": 0,
+                    "world_size": 2,
+                    "local_rank": 0,
+                    "device_type": "cuda",
+                    "distributed_backend": "nccl",
+                },
+                model=_FakeModule(),
+                ddp={
+                    "enabled": True,
+                    "backend": "nccl",
+                    "kwargs": {"broadcast_buffers": False},
+                    "unsupported_kwargs": [],
+                },
+            )
+
+        payload = json.loads(stream.getvalue().split("=", 1)[1])
+        self.assertEqual(payload["stage"], "pre_ddp_wrap")
+        self.assertTrue(payload["runtime"]["distributed"])
+        self.assertEqual(payload["ddp"]["kwargs"]["broadcast_buffers"], False)
+        self.assertEqual(payload["model"]["parameter_count"], 1)
+        self.assertEqual(payload["model"]["buffer_count"], 1)
+        self.assertEqual(len(payload["model"]["tensor_signature_sha256"]), 64)
 
     def test_periodic_training_checkpoint_writes_latest_and_prunes_old_steps(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1472,6 +1540,46 @@ class _FakeRuntimeDistributed:
 
     def init_process_group(self, *, backend):
         self.init_backends.append(backend)
+
+
+class _FakeDDPTorch:
+    class nn:
+        class parallel:
+            class DistributedDataParallel:
+                def __init__(
+                    self,
+                    module,
+                    *,
+                    device_ids=None,
+                    output_device=None,
+                    broadcast_buffers=True,
+                    find_unused_parameters=False,
+                    static_graph=False,
+                    gradient_as_bucket_view=False,
+                    init_sync=True,
+                    bucket_cap_mb=None,
+                ):
+                    self.module = module
+
+
+class _FakeModule:
+    def named_parameters(self):
+        return [("weight", _FakeNamedTensor((2, 3), requires_grad=True))]
+
+    def named_buffers(self):
+        return [("running", _FakeNamedTensor((3,), requires_grad=False))]
+
+
+class _FakeNamedTensor:
+    def __init__(self, shape, *, requires_grad: bool):
+        self.shape = shape
+        self.requires_grad = requires_grad
+
+    def numel(self):
+        total = 1
+        for value in self.shape:
+            total *= value
+        return total
 
 
 class _FakeTensor:
