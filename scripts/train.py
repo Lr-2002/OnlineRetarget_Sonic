@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import time
 from typing import Any
 
 try:
@@ -1341,11 +1342,25 @@ def _train_temporal_diffusion_jsonl(
         runtime=runtime,
         sample_count=len(samples),
     )
-    tensors = _temporal_condition_tensors(torch, samples)
+    tensorize_started_at = time.monotonic()
+
+    def _tensorize_progress(stage: str, **fields: Any) -> None:
+        progress_fields = dict(fields)
+        progress_fields.setdefault("elapsed_seconds", round(time.monotonic() - tensorize_started_at, 3))
+        _print_temporal_startup_stage(
+            rank=rank,
+            stage=f"tensorize_{stage}",
+            runtime=runtime,
+            sample_count=len(samples),
+            **progress_fields,
+        )
+
+    tensors = _temporal_condition_tensors(torch, samples, progress=_tensorize_progress)
     _print_temporal_startup_stage(
         rank=rank,
         stage="tensorize_done",
         runtime=runtime,
+        elapsed_seconds=round(time.monotonic() - tensorize_started_at, 3),
         tensor_shapes=_tensor_collection_report(tensors),
     )
     _print_temporal_startup_stage(
@@ -2154,15 +2169,31 @@ def _target_action_shape(sample: dict[str, Any]) -> tuple[int, int]:
     return len(sequence), len(sequence[0])
 
 
-def _temporal_condition_tensors(torch, samples: list[dict[str, Any]]) -> dict[str, Any]:
+def _temporal_condition_tensors(torch, samples: list[dict[str, Any]], *, progress=None) -> dict[str, Any]:
     if not samples:
         raise ValueError("samples must be non-empty")
+    started_at = time.monotonic()
+
+    def _progress(stage: str, **fields: Any) -> None:
+        if progress is None:
+            return
+        progress(stage, elapsed_seconds=round(time.monotonic() - started_at, 3), **fields)
+
     first_target_shape = _target_action_shape(samples[0])
     source_body_tokens = _source_body_token_sequence(samples[0])
     source_skeleton_dim = len(_source_skeleton_vector(samples[0], source_body_tokens))
     morphology_dim = len(_morphology_condition_vector(samples[0]))
     robot_state_dim = len(_robot_state_vector(samples[0]))
     action_dim = first_target_shape[1]
+    _progress(
+        "shape_infer_done",
+        total_count=len(samples),
+        target_horizon=first_target_shape[0],
+        action_dim=action_dim,
+        source_skeleton_dim=source_skeleton_dim,
+        morphology_dim=morphology_dim,
+        robot_state_dim=robot_state_dim,
+    )
     rows = {
         "source_body_tokens": [],
         "source_skeleton": [],
@@ -2172,6 +2203,8 @@ def _temporal_condition_tensors(torch, samples: list[dict[str, Any]]) -> dict[st
         "fps": [],
         "target_action": [],
     }
+    progress_interval = max(1, min(8192, len(samples)))
+    _progress("rows_begin", total_count=len(samples), progress_interval=progress_interval)
     for index, sample in enumerate(samples):
         target_action = _target_action_sequence(sample)
         shape = (len(target_action), len(target_action[0]) if target_action else 0)
@@ -2195,10 +2228,18 @@ def _temporal_condition_tensors(torch, samples: list[dict[str, Any]]) -> dict[st
         rows["prev_action"].append(_pad_or_trim(_prev_action_vector(sample), action_dim))
         rows["fps"].append(float(sample.get("fps", 30.0)))
         rows["target_action"].append(target_action)
-    return {
-        key: torch.tensor(value, dtype=torch.float32)
-        for key, value in rows.items()
-    }
+        processed_count = index + 1
+        if processed_count == len(samples) or processed_count % progress_interval == 0:
+            _progress("rows_progress", processed_count=processed_count, total_count=len(samples))
+    _progress("rows_done", total_count=len(samples))
+
+    tensors: dict[str, Any] = {}
+    for key, value in rows.items():
+        _progress("tensor_convert_begin", key=key, row_count=len(value))
+        tensors[key] = torch.tensor(value, dtype=torch.float32)
+        _progress("tensor_convert_key_done", key=key, tensor=_tensor_report(tensors[key]))
+    _progress("tensor_convert_done", keys=list(tensors.keys()))
+    return tensors
 
 
 def _feature_contract_config(config: dict[str, Any]) -> dict[str, Any]:

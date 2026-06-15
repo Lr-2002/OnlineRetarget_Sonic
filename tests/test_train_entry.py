@@ -944,6 +944,49 @@ class TrainEntryTests(unittest.TestCase):
         self.assertIn("actual temporal condition source fields", str(raised.exception))
         self.assertIn("target_frame_indices", str(raised.exception))
 
+    def test_temporal_condition_tensors_emits_tensorization_progress(self):
+        samples = [_temporal_sample(), {**_temporal_sample(), "sample_id": "s2"}]
+        events = []
+
+        tensors = train_entry._temporal_condition_tensors(
+            _FakeTensorizeTorch,
+            samples,
+            progress=lambda stage, **fields: events.append({"stage": stage, **fields}),
+        )
+
+        self.assertEqual(
+            [event["stage"] for event in events],
+            [
+                "shape_infer_done",
+                "rows_begin",
+                "rows_progress",
+                "rows_done",
+                "tensor_convert_begin",
+                "tensor_convert_key_done",
+                "tensor_convert_begin",
+                "tensor_convert_key_done",
+                "tensor_convert_begin",
+                "tensor_convert_key_done",
+                "tensor_convert_begin",
+                "tensor_convert_key_done",
+                "tensor_convert_begin",
+                "tensor_convert_key_done",
+                "tensor_convert_begin",
+                "tensor_convert_key_done",
+                "tensor_convert_begin",
+                "tensor_convert_key_done",
+                "tensor_convert_done",
+            ],
+        )
+        self.assertEqual(events[0]["total_count"], 2)
+        self.assertEqual(events[0]["target_horizon"], 2)
+        self.assertEqual(events[2]["processed_count"], 2)
+        converted = [event for event in events if event["stage"] == "tensor_convert_key_done"]
+        self.assertEqual([event["key"] for event in converted], list(train_entry.TEMPORAL_BATCH_KEYS))
+        self.assertEqual(converted[0]["tensor"]["shape"], [2, 2, 2, 3])
+        self.assertEqual(tensors["target_action"].shape, (2, 2, 2))
+        self.assertTrue(all("elapsed_seconds" in event for event in events))
+
     def test_temporal_training_dataset_keeps_fps_before_target_action(self):
         tensors = {key: _FakeDeviceTensor(key) for key in train_entry.TEMPORAL_BATCH_KEYS}
 
@@ -1537,6 +1580,23 @@ class _FakeTemporalTensor:
 
     def __float__(self):
         return float(self._abs_sum)
+
+
+class _FakeTensorizeTorch:
+    float32 = "float32"
+
+    @staticmethod
+    def tensor(value, dtype=None):
+        return _FakeReportTensor(_nested_shape(value), dtype=str(dtype), device="cpu")
+
+
+def _nested_shape(value) -> tuple[int, ...]:
+    shape = []
+    cursor = value
+    while isinstance(cursor, list):
+        shape.append(len(cursor))
+        cursor = cursor[0] if cursor else []
+    return tuple(shape)
 
 
 class _FakeDeviceTensor:
