@@ -730,6 +730,27 @@ def _should_save_periodic_checkpoint(
     return every_steps > 0 and step > 0 and step < total_steps and step % every_steps == 0
 
 
+def _resume_training_position(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"resumed": False, "step": 0, "epoch": 0}
+    has_position = "step" in payload or "epoch" in payload
+    return {
+        "resumed": bool(has_position),
+        "step": _nonnegative_int(payload.get("step", 0), name="checkpoint step"),
+        "epoch": _nonnegative_int(payload.get("epoch", 0), name="checkpoint epoch"),
+    }
+
+
+def _nonnegative_int(value: Any, *, name: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer, got {value!r}") from exc
+    if parsed < 0:
+        raise ValueError(f"{name} must be non-negative, got {parsed}")
+    return parsed
+
+
 def _save_periodic_training_checkpoint(
     torch,
     *,
@@ -1091,6 +1112,7 @@ def _train_temporal_diffusion_jsonl(
     )
     model = model_build.model.to(runtime["device"])
     resume_payload = None
+    resume_position = {"resumed": False, "step": 0, "epoch": 0}
     if resume_checkpoint is not None:
         resume_payload = torch.load(resume_checkpoint, map_location=runtime["device"])
         state_dict = (
@@ -1099,6 +1121,12 @@ def _train_temporal_diffusion_jsonl(
         if state_dict is None:
             raise SystemExit(f"checkpoint lacks model_state_dict: {resume_checkpoint}")
         model.load_state_dict(state_dict)
+        try:
+            resume_position = _resume_training_position(resume_payload)
+        except ValueError as exc:
+            raise SystemExit(
+                f"invalid checkpoint training position: {resume_checkpoint}: {exc}"
+            ) from exc
     if runtime["distributed"]:
         model = torch.nn.parallel.DistributedDataParallel(
             model,
@@ -1144,9 +1172,11 @@ def _train_temporal_diffusion_jsonl(
         print(f"batch_to_device={json.dumps(feed, sort_keys=True)}")
         print(f"data_loader={json.dumps(data_loader, sort_keys=True)}")
         print(f"checkpointing={json.dumps(checkpointing, sort_keys=True)}")
+        if resume_position["resumed"]:
+            print(f"resume_position={json.dumps(resume_position, sort_keys=True)}")
     loader = torch.utils.data.DataLoader(dataset, **loader_kwargs)
-    step = 0
-    epoch = 0
+    step = int(resume_position["step"])
+    epoch = int(resume_position["epoch"])
     while step < steps:
         if sampler is not None:
             sampler.set_epoch(epoch)

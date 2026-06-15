@@ -1047,6 +1047,55 @@ class TrainEntryTests(unittest.TestCase):
             self.assertEqual(latest["step"], 30)
             self.assertEqual(latest["checkpoint"], str(checkpoint_dir / "step_00000030.pt"))
 
+    def test_temporal_resume_position_advances_periodic_checkpoint_from_saved_step(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            checkpoint_dir = output_dir / "checkpoints"
+            checkpoint_dir.mkdir()
+            saved_checkpoint = checkpoint_dir / "step_00010000.pt"
+            saved_checkpoint.write_text("existing checkpoint\n", encoding="utf-8")
+            checkpointing = {
+                "dir": "checkpoints",
+                "every_steps": 100,
+                "keep_last": 2,
+                "latest_manifest": "latest_checkpoint.json",
+            }
+
+            resume = train_entry._resume_training_position({"step": 10000, "epoch": 7})
+
+            self.assertTrue(resume["resumed"])
+            self.assertEqual(resume["step"], 10000)
+            self.assertEqual(resume["epoch"], 7)
+            self.assertEqual(resume["step"] + 1, 10001)
+            self.assertFalse(
+                train_entry._should_save_periodic_checkpoint(10001, 10200, checkpointing)
+            )
+            self.assertTrue(
+                train_entry._should_save_periodic_checkpoint(10100, 10200, checkpointing)
+            )
+
+            train_entry._save_periodic_training_checkpoint(
+                _FakeTorchIO(),
+                output_dir=output_dir,
+                model=_FakeStateful("model"),
+                optimizer=_FakeStateful("optimizer"),
+                step=10100,
+                epoch=resume["epoch"],
+                loss=0.25,
+                checkpointing=checkpointing,
+                sample_loader={"materialized_count": 16},
+                data_loader={"num_workers": 2},
+                feed={"non_blocking": True},
+                runtime={"device_type": "cuda", "rank": 0, "world_size": 1},
+            )
+
+            self.assertEqual(saved_checkpoint.read_text(encoding="utf-8"), "existing checkpoint\n")
+            advanced_checkpoint = checkpoint_dir / "step_00010100.pt"
+            self.assertTrue(advanced_checkpoint.exists())
+            latest = json.loads((output_dir / "latest_checkpoint.json").read_text())
+            self.assertEqual(latest["step"], 10100)
+            self.assertEqual(latest["checkpoint"], str(advanced_checkpoint))
+
 
 def _write_policy_audit(
     path: Path,
