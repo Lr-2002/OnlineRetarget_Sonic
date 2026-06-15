@@ -58,6 +58,15 @@ TEMPORAL_BATCH_KEYS = (
     "fps",
     "target_action",
 )
+TEMPORAL_STEP_PROFILER_PHASES = (
+    "dataloader_next",
+    "cpu_batch_materialize_or_cache",
+    "h2d_to_device",
+    "forward",
+    "backward",
+    "optimizer",
+    "logging_checkpoint",
+)
 
 
 def main() -> None:
@@ -911,6 +920,215 @@ def _checkpointing_config(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _step_profiler_config(config: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+    train_cfg = _train_section(config)
+    profiler_cfg = train_cfg.get("step_profiler", train_cfg.get("profiler", {}))
+    profiler_cfg = dict(profiler_cfg) if isinstance(profiler_cfg, dict) else {}
+    enabled = _bool_value(profiler_cfg.get("enabled", False), default=False)
+    active_steps = max(
+        0,
+        int(profiler_cfg.get("active_steps", profiler_cfg.get("steps", 0)) or 0),
+    )
+    warmup_steps = max(0, int(profiler_cfg.get("warmup_steps", 0) or 0))
+    sync_requested = profiler_cfg.get("synchronize_cuda", None)
+    if sync_requested is None:
+        synchronize_cuda = enabled and str(runtime.get("device_type", "cpu")) == "cuda"
+    else:
+        synchronize_cuda = _bool_value(sync_requested, default=False)
+    return {
+        "enabled": enabled,
+        "active_steps": active_steps,
+        "warmup_steps": warmup_steps,
+        "synchronize_cuda": synchronize_cuda,
+        "summary_filename": str(
+            profiler_cfg.get("summary_filename", "step_profiler_rank{rank}.json")
+        ),
+    }
+
+
+def _init_temporal_step_profiler(config: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+    payload = _step_profiler_config(config, runtime)
+    return {
+        **payload,
+        "seen_steps": 0,
+        "recorded_steps": 0,
+        "recorded_step_numbers": [],
+        "phase_samples": {
+            **{phase: [] for phase in TEMPORAL_STEP_PROFILER_PHASES},
+            "step_total": [],
+        },
+    }
+
+
+def _begin_temporal_step_profile(step_profiler: dict[str, Any], step: int) -> dict[str, float] | None:
+    if not step_profiler.get("enabled", False):
+        return None
+    step_profiler["seen_steps"] += 1
+    if step_profiler["seen_steps"] <= int(step_profiler.get("warmup_steps", 0)):
+        return None
+    active_steps = int(step_profiler.get("active_steps", 0))
+    if active_steps > 0 and int(step_profiler.get("recorded_steps", 0)) >= active_steps:
+        return None
+    step_profiler["recorded_steps"] += 1
+    step_profiler["recorded_step_numbers"].append(int(step))
+    return {}
+
+
+def _temporal_step_profiler_sync(torch, runtime: dict[str, Any], step_profiler: dict[str, Any]) -> None:
+    if not step_profiler.get("synchronize_cuda", False):
+        return
+    cuda = getattr(torch, "cuda", None)
+    if cuda is None or not hasattr(cuda, "synchronize"):
+        return
+    device = runtime.get("device", None)
+    try:
+        if device is None:
+            cuda.synchronize()
+        else:
+            cuda.synchronize(device)
+    except TypeError:
+        cuda.synchronize()
+
+
+@contextlib.contextmanager
+def _temporal_step_profile_phase(
+    step_profiler: dict[str, Any],
+    step_timings: dict[str, float] | None,
+    *,
+    phase: str,
+    torch,
+    runtime: dict[str, Any],
+):
+    if step_timings is None:
+        yield
+        return
+    _temporal_step_profiler_sync(torch, runtime, step_profiler)
+    started_at = time.perf_counter()
+    try:
+        yield
+    finally:
+        _temporal_step_profiler_sync(torch, runtime, step_profiler)
+        step_timings[phase] = step_timings.get(phase, 0.0) + (time.perf_counter() - started_at)
+
+
+def _finish_temporal_step_profile(
+    step_profiler: dict[str, Any],
+    step_timings: dict[str, float] | None,
+) -> None:
+    if step_timings is None:
+        return
+    phase_samples = step_profiler.get("phase_samples", {})
+    total_seconds = 0.0
+    for phase in TEMPORAL_STEP_PROFILER_PHASES:
+        elapsed_seconds = float(step_timings.get(phase, 0.0))
+        phase_samples[phase].append(elapsed_seconds)
+        total_seconds += elapsed_seconds
+    phase_samples["step_total"].append(total_seconds)
+
+
+def _step_profiler_percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = max(0.0, min(100.0, float(percentile))) / 100.0 * (len(ordered) - 1)
+    lower_index = int(position)
+    upper_index = min(lower_index + 1, len(ordered) - 1)
+    if lower_index == upper_index:
+        return ordered[lower_index]
+    weight = position - lower_index
+    lower = ordered[lower_index]
+    upper = ordered[upper_index]
+    return lower + (upper - lower) * weight
+
+
+def _step_profiler_phase_summary(
+    values: list[float],
+    *,
+    total_seconds: float,
+    share_override: float | None = None,
+) -> dict[str, Any]:
+    total_value = sum(float(value) for value in values)
+    count = len(values)
+    mean_seconds = total_value / count if count else 0.0
+    share_percent = 0.0
+    if share_override is not None:
+        share_percent = float(share_override)
+    elif total_seconds > 0.0:
+        share_percent = total_value / total_seconds * 100.0
+    return {
+        "count": count,
+        "mean_ms": round(mean_seconds * 1000.0, 3),
+        "p50_ms": round(_step_profiler_percentile(values, 50.0) * 1000.0, 3),
+        "p95_ms": round(_step_profiler_percentile(values, 95.0) * 1000.0, 3),
+        "share_percent": round(share_percent, 3),
+    }
+
+
+def _temporal_step_profiler_summary(step_profiler: dict[str, Any]) -> dict[str, Any]:
+    summary = {
+        "enabled": bool(step_profiler.get("enabled", False)),
+        "active_steps": int(step_profiler.get("active_steps", 0)),
+        "warmup_steps": int(step_profiler.get("warmup_steps", 0)),
+        "synchronize_cuda": bool(step_profiler.get("synchronize_cuda", False)),
+        "seen_steps": int(step_profiler.get("seen_steps", 0)),
+        "recorded_steps": int(step_profiler.get("recorded_steps", 0)),
+        "first_profiled_step": None,
+        "last_profiled_step": None,
+        "phases": {},
+        "step_total": _step_profiler_phase_summary([], total_seconds=0.0, share_override=0.0),
+    }
+    recorded_step_numbers = step_profiler.get("recorded_step_numbers", [])
+    if recorded_step_numbers:
+        summary["first_profiled_step"] = int(recorded_step_numbers[0])
+        summary["last_profiled_step"] = int(recorded_step_numbers[-1])
+    if not summary["enabled"]:
+        return summary
+    phase_samples = step_profiler.get("phase_samples", {})
+    step_totals = list(phase_samples.get("step_total", []))
+    total_seconds = sum(float(value) for value in step_totals)
+    summary["step_total"] = _step_profiler_phase_summary(
+        step_totals,
+        total_seconds=total_seconds,
+        share_override=100.0 if step_totals else 0.0,
+    )
+    summary["phases"] = {
+        phase: _step_profiler_phase_summary(
+            list(phase_samples.get(phase, [])),
+            total_seconds=total_seconds,
+        )
+        for phase in TEMPORAL_STEP_PROFILER_PHASES
+    }
+    return summary
+
+
+def _step_profiler_summary_path(
+    output_dir: Path,
+    *,
+    rank: int,
+    step_profiler: dict[str, Any],
+) -> Path:
+    filename = str(step_profiler.get("summary_filename", "step_profiler_rank{rank}.json"))
+    return output_dir / filename.format(rank=int(rank))
+
+
+def _emit_temporal_step_profiler_summary(
+    *,
+    output_dir: Path,
+    rank: int,
+    step_profiler: dict[str, Any],
+) -> dict[str, Any]:
+    summary = _temporal_step_profiler_summary(step_profiler)
+    if not summary["enabled"]:
+        return summary
+    summary_path = _step_profiler_summary_path(output_dir, rank=rank, step_profiler=step_profiler)
+    summary["summary_path"] = str(summary_path)
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print("step_profiler_summary=" + json.dumps(summary, sort_keys=True), flush=True)
+    return summary
+
+
 def _should_save_periodic_checkpoint(
     step: int,
     total_steps: int,
@@ -1432,6 +1650,7 @@ def _train_temporal_diffusion_jsonl(
     steps = min(max_steps, max_steps if max_steps > 0 else 1)
     feed = _temporal_feed_config(config, runtime)
     checkpointing = _checkpointing_config(config)
+    step_profiler = _init_temporal_step_profiler(config, runtime)
     _print_temporal_startup_stage(
         rank=rank,
         stage="train_config_done",
@@ -1440,6 +1659,11 @@ def _train_temporal_diffusion_jsonl(
         steps=steps,
         feed=feed,
         checkpointing=checkpointing,
+        step_profiler={
+            key: value
+            for key, value in step_profiler.items()
+            if key in ("enabled", "active_steps", "warmup_steps", "synchronize_cuda", "summary_filename")
+        },
     )
     sampler = None
     loader_kwargs, data_loader = _train_dataloader_kwargs(
@@ -1698,8 +1922,18 @@ def _train_temporal_diffusion_jsonl(
     while step < steps:
         if sampler is not None:
             sampler.set_epoch(epoch)
-        for batch in loader:
+        loader_iter = iter(loader)
+        while True:
+            fetch_started_at = time.perf_counter()
+            try:
+                batch = next(loader_iter)
+            except StopIteration:
+                break
+            fetch_elapsed_seconds = time.perf_counter() - fetch_started_at
             step += 1
+            step_timings = _begin_temporal_step_profile(step_profiler, step)
+            if step_timings is not None:
+                step_timings["dataloader_next"] = fetch_elapsed_seconds
             if step == first_train_step:
                 _print_temporal_ddp_diagnostics(
                     rank=rank,
@@ -1710,12 +1944,19 @@ def _train_temporal_diffusion_jsonl(
                 )
             optimizer.zero_grad(set_to_none=True)
             loss_value = 0.0
-            microbatches = list(
-                _iter_temporal_microbatches(
-                    batch,
-                    int(microbatching["size"]),
+            with _temporal_step_profile_phase(
+                step_profiler,
+                step_timings,
+                phase="cpu_batch_materialize_or_cache",
+                torch=torch,
+                runtime=runtime,
+            ):
+                microbatches = list(
+                    _iter_temporal_microbatches(
+                        batch,
+                        int(microbatching["size"]),
+                    )
                 )
-            )
             for micro_index, (microbatch, microbatch_count, logical_batch_count) in enumerate(
                 microbatches
             ):
@@ -1744,11 +1985,18 @@ def _train_temporal_diffusion_jsonl(
                                 "sync": is_last_microbatch,
                             },
                         )
-                    condition = _temporal_batch_to_device(
-                        microbatch,
-                        runtime["device"],
-                        non_blocking=bool(feed.get("non_blocking", True)),
-                    )
+                    with _temporal_step_profile_phase(
+                        step_profiler,
+                        step_timings,
+                        phase="h2d_to_device",
+                        torch=torch,
+                        runtime=runtime,
+                    ):
+                        condition = _temporal_batch_to_device(
+                            microbatch,
+                            runtime["device"],
+                            non_blocking=bool(feed.get("non_blocking", True)),
+                        )
                     if step == first_train_step:
                         _print_temporal_ddp_diagnostics(
                             rank=rank,
@@ -1763,17 +2011,24 @@ def _train_temporal_diffusion_jsonl(
                                 "sync": is_last_microbatch,
                             },
                         )
-                    batch_y = condition.pop("target_action")
-                    loss = _training_loss(
-                        torch,
-                        model,
-                        model_build.family,
-                        condition,
-                        batch_y,
-                        config,
-                        prev_target=condition.get("prev_action"),
-                    )
-                    loss_scale = float(microbatch_count) / float(logical_batch_count)
+                    with _temporal_step_profile_phase(
+                        step_profiler,
+                        step_timings,
+                        phase="forward",
+                        torch=torch,
+                        runtime=runtime,
+                    ):
+                        batch_y = condition.pop("target_action")
+                        loss = _training_loss(
+                            torch,
+                            model,
+                            model_build.family,
+                            condition,
+                            batch_y,
+                            config,
+                            prev_target=condition.get("prev_action"),
+                        )
+                        loss_scale = float(microbatch_count) / float(logical_batch_count)
                     if step == first_train_step:
                         _print_temporal_ddp_diagnostics(
                             rank=rank,
@@ -1787,7 +2042,14 @@ def _train_temporal_diffusion_jsonl(
                                 "sync": is_last_microbatch,
                             },
                         )
-                    (loss * loss_scale).backward()
+                    with _temporal_step_profile_phase(
+                        step_profiler,
+                        step_timings,
+                        phase="backward",
+                        torch=torch,
+                        runtime=runtime,
+                    ):
+                        (loss * loss_scale).backward()
                     if step == first_train_step:
                         _print_temporal_ddp_diagnostics(
                             rank=rank,
@@ -1802,40 +2064,60 @@ def _train_temporal_diffusion_jsonl(
                             },
                         )
                     loss_value += float(loss.detach().cpu()) * loss_scale
-            optimizer.step()
-            if rank == 0 and (step == 1 or step == steps or step % log_every == 0):
-                step_log = {"step": step, "loss": loss_value}
-                print(json.dumps(step_log, sort_keys=True))
-                _wandb_log(wandb_run, step_log, step=step)
-            if rank == 0 and _should_save_periodic_checkpoint(step, steps, checkpointing):
-                periodic_checkpoint = _save_periodic_training_checkpoint(
-                    torch,
-                    output_dir=output_dir,
-                    model=model,
-                    optimizer=optimizer,
-                    step=step,
-                    epoch=epoch,
-                    loss=loss_value,
-                    checkpointing=checkpointing,
-                    sample_loader=sample_loader,
-                    data_loader=data_loader,
-                    feed=feed,
-                    runtime=runtime,
-                )
-                print(
-                    json.dumps(
-                        {
-                            "checkpoint": str(periodic_checkpoint),
-                            "checkpoint_reason": "periodic",
-                            "step": step,
-                        },
-                        sort_keys=True,
+            with _temporal_step_profile_phase(
+                step_profiler,
+                step_timings,
+                phase="optimizer",
+                torch=torch,
+                runtime=runtime,
+            ):
+                optimizer.step()
+            with _temporal_step_profile_phase(
+                step_profiler,
+                step_timings,
+                phase="logging_checkpoint",
+                torch=torch,
+                runtime=runtime,
+            ):
+                if rank == 0 and (step == 1 or step == steps or step % log_every == 0):
+                    step_log = {"step": step, "loss": loss_value}
+                    print(json.dumps(step_log, sort_keys=True))
+                    _wandb_log(wandb_run, step_log, step=step)
+                if rank == 0 and _should_save_periodic_checkpoint(step, steps, checkpointing):
+                    periodic_checkpoint = _save_periodic_training_checkpoint(
+                        torch,
+                        output_dir=output_dir,
+                        model=model,
+                        optimizer=optimizer,
+                        step=step,
+                        epoch=epoch,
+                        loss=loss_value,
+                        checkpointing=checkpointing,
+                        sample_loader=sample_loader,
+                        data_loader=data_loader,
+                        feed=feed,
+                        runtime=runtime,
                     )
-                )
+                    print(
+                        json.dumps(
+                            {
+                                "checkpoint": str(periodic_checkpoint),
+                                "checkpoint_reason": "periodic",
+                                "step": step,
+                            },
+                            sort_keys=True,
+                        )
+                    )
+            _finish_temporal_step_profile(step_profiler, step_timings)
             if step >= steps:
                 break
         epoch += 1
 
+    step_profiler_summary = _emit_temporal_step_profiler_summary(
+        output_dir=output_dir,
+        rank=rank,
+        step_profiler=step_profiler,
+    )
     if runtime["distributed"]:
         torch.distributed.barrier()
     if rank != 0:
@@ -1920,6 +2202,7 @@ def _train_temporal_diffusion_jsonl(
         forward_microbatch=microbatching,
         ddp=ddp_report,
         checkpointing=checkpointing,
+        step_profiler=step_profiler_summary,
     )
     torch.save(
         {
@@ -3772,6 +4055,7 @@ def _build_train_report(
     forward_microbatch: dict[str, Any] | None = None,
     ddp: dict[str, Any] | None = None,
     checkpointing: dict[str, Any] | None = None,
+    step_profiler: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "samples_jsonl": str(samples_jsonl),
@@ -3811,6 +4095,7 @@ def _build_train_report(
         "forward_microbatch": forward_microbatch or {"enabled": False},
         "ddp": ddp or {"enabled": False},
         "checkpointing": checkpointing or {"enabled": False},
+        "step_profiler": step_profiler or {"enabled": False},
         "sample_filter": sample_filter
         or {
             "input_count": sample_count,

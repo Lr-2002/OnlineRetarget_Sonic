@@ -287,6 +287,7 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(report["quality_gate"]["policy_id"], "policy")
         self.assertEqual(report["resume_checkpoint"], "runs/train/prev/checkpoint.pt")
         self.assertFalse(report["wandb"]["enabled"])
+        self.assertFalse(report["step_profiler"]["enabled"])
 
     def test_visualization_artifacts_write_traceable_preview(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1058,6 +1059,106 @@ class TrainEntryTests(unittest.TestCase):
             report["forced_single_process_reason"],
             "materialized_tensors_preloaded_to_device",
         )
+
+    def test_step_profiler_config_defaults_cuda_sync_when_enabled(self):
+        report = train_entry._step_profiler_config(
+            {"train": {"step_profiler": {"enabled": True, "active_steps": 300, "warmup_steps": 10}}},
+            {"device_type": "cuda"},
+        )
+
+        self.assertTrue(report["enabled"])
+        self.assertEqual(report["active_steps"], 300)
+        self.assertEqual(report["warmup_steps"], 10)
+        self.assertTrue(report["synchronize_cuda"])
+        self.assertEqual(report["summary_filename"], "step_profiler_rank{rank}.json")
+
+    def test_temporal_step_profiler_summary_reports_percentiles_and_share(self):
+        profiler = train_entry._init_temporal_step_profiler(
+            {"train": {"step_profiler": {"enabled": True, "warmup_steps": 1, "active_steps": 2}}},
+            {"device_type": "cuda"},
+        )
+
+        skipped = train_entry._begin_temporal_step_profile(profiler, 101)
+        self.assertIsNone(skipped)
+        first = train_entry._begin_temporal_step_profile(profiler, 102)
+        second = train_entry._begin_temporal_step_profile(profiler, 103)
+        ignored = train_entry._begin_temporal_step_profile(profiler, 104)
+        self.assertEqual(first, {})
+        self.assertEqual(second, {})
+        self.assertIsNone(ignored)
+
+        train_entry._finish_temporal_step_profile(
+            profiler,
+            {
+                "dataloader_next": 0.01,
+                "cpu_batch_materialize_or_cache": 0.03,
+                "h2d_to_device": 0.02,
+                "forward": 0.04,
+                "backward": 0.05,
+                "optimizer": 0.01,
+                "logging_checkpoint": 0.0,
+            },
+        )
+        train_entry._finish_temporal_step_profile(
+            profiler,
+            {
+                "dataloader_next": 0.03,
+                "cpu_batch_materialize_or_cache": 0.01,
+                "h2d_to_device": 0.02,
+                "forward": 0.02,
+                "backward": 0.01,
+                "optimizer": 0.01,
+                "logging_checkpoint": 0.0,
+            },
+        )
+
+        summary = train_entry._temporal_step_profiler_summary(profiler)
+
+        self.assertEqual(summary["recorded_steps"], 2)
+        self.assertEqual(summary["first_profiled_step"], 102)
+        self.assertEqual(summary["last_profiled_step"], 103)
+        self.assertAlmostEqual(summary["phases"]["dataloader_next"]["mean_ms"], 20.0)
+        self.assertAlmostEqual(summary["phases"]["dataloader_next"]["p50_ms"], 20.0)
+        self.assertAlmostEqual(summary["phases"]["dataloader_next"]["p95_ms"], 29.0)
+        self.assertAlmostEqual(summary["phases"]["forward"]["share_percent"], 23.077, places=3)
+        self.assertAlmostEqual(summary["step_total"]["mean_ms"], 130.0)
+        self.assertAlmostEqual(summary["step_total"]["share_percent"], 100.0)
+
+    def test_emit_temporal_step_profiler_summary_writes_json_artifact(self):
+        profiler = train_entry._init_temporal_step_profiler(
+            {"train": {"step_profiler": {"enabled": True, "active_steps": 1}}},
+            {"device_type": "cpu"},
+        )
+        train_entry._begin_temporal_step_profile(profiler, 11)
+        train_entry._finish_temporal_step_profile(
+            profiler,
+            {
+                "dataloader_next": 0.01,
+                "cpu_batch_materialize_or_cache": 0.02,
+                "h2d_to_device": 0.03,
+                "forward": 0.04,
+                "backward": 0.05,
+                "optimizer": 0.01,
+                "logging_checkpoint": 0.01,
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                summary = train_entry._emit_temporal_step_profiler_summary(
+                    output_dir=Path(tmp),
+                    rank=3,
+                    step_profiler=profiler,
+                )
+
+            summary_path = Path(tmp) / "step_profiler_rank3.json"
+            self.assertEqual(summary["summary_path"], str(summary_path))
+            self.assertTrue(summary_path.exists())
+            payload = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["recorded_steps"], 1)
+            self.assertEqual(payload["summary_path"], str(summary_path))
+            self.assertIn("step_profiler_summary=", stream.getvalue())
 
     def test_setup_runtime_can_disable_ddp_but_keep_rank_sharding(self):
         torch = _FakeRuntimeTorch(cuda_available=True)
