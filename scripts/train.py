@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 from dataclasses import replace
 import hashlib
@@ -697,6 +698,27 @@ def _prepare_temporal_tensors_for_training(
     return prepared
 
 
+def _forward_microbatch_config(
+    config: dict[str, Any],
+    *,
+    logical_batch_size: int,
+) -> dict[str, Any]:
+    train_cfg = _train_section(config)
+    requested = train_cfg.get(
+        "forward_microbatch_size",
+        train_cfg.get("microbatch_size", 0),
+    )
+    requested_size = max(0, int(requested or 0))
+    logical_size = max(1, int(logical_batch_size))
+    enabled = 0 < requested_size < logical_size
+    return {
+        "enabled": enabled,
+        "requested_size": requested_size,
+        "size": requested_size if enabled else logical_size,
+        "logical_batch_size": logical_size,
+    }
+
+
 def _checkpointing_config(config: dict[str, Any]) -> dict[str, Any]:
     train_cfg = _train_section(config)
     checkpoint_cfg = train_cfg.get("checkpoint", train_cfg.get("checkpointing", {}))
@@ -1168,9 +1190,14 @@ def _train_temporal_diffusion_jsonl(
         if sample_loader.get("sharded")
         else "none"
     )
+    microbatching = _forward_microbatch_config(
+        config,
+        logical_batch_size=int(loader_kwargs["batch_size"]),
+    )
     if rank == 0:
         print(f"batch_to_device={json.dumps(feed, sort_keys=True)}")
         print(f"data_loader={json.dumps(data_loader, sort_keys=True)}")
+        print(f"forward_microbatch={json.dumps(microbatching, sort_keys=True)}")
         print(f"checkpointing={json.dumps(checkpointing, sort_keys=True)}")
         if resume_position["resumed"]:
             print(f"resume_position={json.dumps(resume_position, sort_keys=True)}")
@@ -1182,25 +1209,47 @@ def _train_temporal_diffusion_jsonl(
             sampler.set_epoch(epoch)
         for batch in loader:
             step += 1
-            condition = _temporal_batch_to_device(
-                batch,
-                runtime["device"],
-                non_blocking=bool(feed.get("non_blocking", True)),
-            )
-            batch_y = condition.pop("target_action")
-            loss = _training_loss(
-                torch,
-                model,
-                model_build.family,
-                condition,
-                batch_y,
-                config,
-                prev_target=condition.get("prev_action"),
-            )
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+            loss_value = 0.0
+            microbatches = list(
+                _iter_temporal_microbatches(
+                    batch,
+                    int(microbatching["size"]),
+                )
+            )
+            for micro_index, (microbatch, microbatch_count, logical_batch_count) in enumerate(
+                microbatches
+            ):
+                is_last_microbatch = micro_index == len(microbatches) - 1
+                sync_context = (
+                    model.no_sync()
+                    if (
+                        runtime["distributed"]
+                        and hasattr(model, "no_sync")
+                        and not is_last_microbatch
+                    )
+                    else contextlib.nullcontext()
+                )
+                with sync_context:
+                    condition = _temporal_batch_to_device(
+                        microbatch,
+                        runtime["device"],
+                        non_blocking=bool(feed.get("non_blocking", True)),
+                    )
+                    batch_y = condition.pop("target_action")
+                    loss = _training_loss(
+                        torch,
+                        model,
+                        model_build.family,
+                        condition,
+                        batch_y,
+                        config,
+                        prev_target=condition.get("prev_action"),
+                    )
+                    loss_scale = float(microbatch_count) / float(logical_batch_count)
+                    (loss * loss_scale).backward()
+                    loss_value += float(loss.detach().cpu()) * loss_scale
             optimizer.step()
-            loss_value = float(loss.detach().cpu())
             if rank == 0 and (step == 1 or step == steps or step % log_every == 0):
                 step_log = {"step": step, "loss": loss_value}
                 print(json.dumps(step_log, sort_keys=True))
@@ -1315,6 +1364,7 @@ def _train_temporal_diffusion_jsonl(
         sample_loader=sample_loader,
         data_loader=data_loader,
         batch_to_device=feed,
+        forward_microbatch=microbatching,
         checkpointing=checkpointing,
     )
     torch.save(
@@ -1887,6 +1937,18 @@ def _temporal_batch_to_device(batch, device, *, non_blocking: bool = True) -> di
         key: value.to(device, non_blocking=non_blocking)
         for key, value in zip(TEMPORAL_BATCH_KEYS, batch)
     }
+
+
+def _iter_temporal_microbatches(batch, microbatch_size: int):
+    logical_batch_count = int(batch[0].shape[0])
+    if logical_batch_count <= 0:
+        raise ValueError("temporal batch must be non-empty")
+    chunk_size = logical_batch_count
+    if microbatch_size > 0:
+        chunk_size = min(int(microbatch_size), logical_batch_count)
+    for start in range(0, logical_batch_count, chunk_size):
+        end = min(start + chunk_size, logical_batch_count)
+        yield tuple(value[start:end] for value in batch), end - start, logical_batch_count
 
 
 def _temporal_training_dataset_tensors(tensors: dict[str, Any]) -> tuple[Any, ...]:
@@ -2945,6 +3007,7 @@ def _build_train_report(
     sample_loader: dict[str, Any] | None = None,
     data_loader: dict[str, Any] | None = None,
     batch_to_device: dict[str, Any] | None = None,
+    forward_microbatch: dict[str, Any] | None = None,
     checkpointing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
@@ -2982,6 +3045,7 @@ def _build_train_report(
         },
         "data_loader": data_loader or {},
         "batch_to_device": batch_to_device or {},
+        "forward_microbatch": forward_microbatch or {"enabled": False},
         "checkpointing": checkpointing or {"enabled": False},
         "sample_filter": sample_filter
         or {

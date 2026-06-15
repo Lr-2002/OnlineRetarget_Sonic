@@ -154,6 +154,7 @@ train:
   batch_size: 64
   max_steps: 1000
   learning_rate: 0.0003
+  forward_microbatch_size: 8192
   precision: fp32
   ddp: true
   log_every: 20
@@ -161,9 +162,9 @@ train:
   checkpoint_every_steps: 100
   keep_last_checkpoints: 3
   dataloader:
-    num_workers: 2
+    num_workers: 0
     prefetch_factor: 2
-    persistent_workers: true
+    persistent_workers: false
     pin_memory: true
     drop_last: false
   batch_to_device:

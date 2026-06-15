@@ -1015,6 +1015,39 @@ class TrainEntryTests(unittest.TestCase):
             "materialized_tensors_preloaded_to_device",
         )
 
+    def test_forward_microbatch_config_splits_large_temporal_batch(self):
+        report = train_entry._forward_microbatch_config(
+            {"train": {"forward_microbatch_size": 8192}},
+            logical_batch_size=32768,
+        )
+
+        self.assertTrue(report["enabled"])
+        self.assertEqual(report["requested_size"], 8192)
+        self.assertEqual(report["size"], 8192)
+        self.assertEqual(report["logical_batch_size"], 32768)
+
+    def test_temporal_microbatches_slice_logical_batch_before_device_transfer(self):
+        batch = tuple(_FakeSliceTensor(key, 32768) for key in train_entry.TEMPORAL_BATCH_KEYS)
+
+        chunks = list(train_entry._iter_temporal_microbatches(batch, 8192))
+
+        self.assertEqual([count for _chunk, count, _total in chunks], [8192, 8192, 8192, 8192])
+        self.assertEqual({total for _chunk, _count, total in chunks}, {32768})
+        self.assertEqual(
+            batch[0].slices,
+            [(0, 8192), (8192, 16384), (16384, 24576), (24576, 32768)],
+        )
+        first_condition = train_entry._temporal_batch_to_device(
+            chunks[0][0],
+            device="cuda:0",
+            non_blocking=True,
+        )
+        self.assertEqual(first_condition["source_body_tokens"].shape[0], 8192)
+        self.assertEqual(
+            first_condition["source_body_tokens"].to_calls,
+            [{"device": "cuda:0", "non_blocking": True}],
+        )
+
     def test_periodic_training_checkpoint_writes_latest_and_prunes_old_steps(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
@@ -1325,6 +1358,22 @@ class _FakeDeviceTensor:
     def to(self, device, non_blocking=False):
         self.to_calls.append({"device": device, "non_blocking": non_blocking})
         return self
+
+
+class _FakeSliceTensor(_FakeDeviceTensor):
+    def __init__(self, name: str, rows: int):
+        super().__init__(name)
+        self.shape = (rows,)
+        self.slices = []
+
+    def __getitem__(self, item):
+        if not isinstance(item, slice):
+            raise AssertionError(f"expected slice, got {item!r}")
+        start, stop, step = item.indices(self.shape[0])
+        if step != 1:
+            raise AssertionError(f"expected contiguous slice, got step {step}")
+        self.slices.append((start, stop))
+        return _FakeSliceTensor(f"{self.name}[{start}:{stop}]", max(0, stop - start))
 
 
 class _FakeTorchIO:
