@@ -156,7 +156,7 @@ train:
   learning_rate: 0.0003
   forward_microbatch_size: 8192
   precision: fp32
-  ddp: true
+  ddp: false
   log_every: 20
   eval_every: 200
   checkpoint_every_steps: 100

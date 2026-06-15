@@ -165,7 +165,7 @@ def main() -> None:
         raise SystemExit(
             "Training requires the conda environment from environment.yml with torch installed."
         ) from exc
-    runtime = _setup_torch_runtime(torch, rank=rank, world_size=world_size)
+    runtime = _setup_torch_runtime(torch, config=config, rank=rank, world_size=world_size)
 
     if not samples_jsonl:
         raise SystemExit(
@@ -548,13 +548,22 @@ def _infer_source_body_count(spec: ObservationSpec, input_dim: int) -> int | Non
     return source_dim // denom
 
 
-def _setup_torch_runtime(torch, *, rank: int, world_size: int) -> dict[str, Any]:
+def _setup_torch_runtime(
+    torch,
+    *,
+    config: dict[str, Any] | None = None,
+    rank: int,
+    world_size: int,
+) -> dict[str, Any]:
     local_rank = int(os.environ.get("LOCAL_RANK", rank))
-    distributed = world_size > 1
+    ddp_enabled = _train_ddp_enabled(config or {})
+    launch_world_size = int(world_size)
+    distributed = launch_world_size > 1 and ddp_enabled
     device_type = "cuda" if torch.cuda.is_available() else "cpu"
     if device_type == "cuda":
-        torch.cuda.set_device(local_rank if distributed else 0)
-        device = torch.device("cuda", local_rank if distributed else 0)
+        device_index = local_rank if launch_world_size > 1 else 0
+        torch.cuda.set_device(device_index)
+        device = torch.device("cuda", device_index)
     else:
         device = torch.device("cpu")
     if distributed and not torch.distributed.is_initialized():
@@ -563,10 +572,12 @@ def _setup_torch_runtime(torch, *, rank: int, world_size: int) -> dict[str, Any]
     return {
         "distributed": distributed,
         "rank": rank,
-        "world_size": world_size,
+        "world_size": launch_world_size,
         "local_rank": local_rank,
         "device": device,
         "device_type": device_type,
+        "ddp_enabled": ddp_enabled,
+        "sample_sharded": launch_world_size > 1,
     }
 
 
@@ -578,6 +589,8 @@ def _cleanup_torch_runtime(torch, runtime: dict[str, Any]) -> None:
 def _runtime_report(runtime: dict[str, Any]) -> dict[str, Any]:
     return {
         "distributed": bool(runtime.get("distributed")),
+        "ddp_enabled": bool(runtime.get("ddp_enabled", runtime.get("distributed"))),
+        "sample_sharded": bool(runtime.get("sample_sharded", runtime.get("distributed"))),
         "rank": int(runtime.get("rank", 0)),
         "world_size": int(runtime.get("world_size", 1)),
         "local_rank": int(runtime.get("local_rank", 0)),
@@ -588,6 +601,29 @@ def _runtime_report(runtime: dict[str, Any]) -> dict[str, Any]:
 def _train_section(config: dict[str, Any]) -> dict[str, Any]:
     payload = config.get("train", {})
     return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _train_ddp_enabled(config: dict[str, Any]) -> bool:
+    env_override = os.environ.get("ONLINE_RETARGET_DDP")
+    if env_override is not None:
+        return _bool_value(env_override, default=True)
+    return _bool_value(_train_section(config).get("ddp", True), default=True)
+
+
+def _bool_value(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
 
 
 def _train_dataloader_kwargs(
@@ -865,8 +901,8 @@ def _train_jsonl(
 ) -> None:
     from online_retarget.models.registry import build_model
 
-    sample_rank = rank if runtime["distributed"] else 0
-    sample_world_size = world_size if runtime["distributed"] else 1
+    sample_rank = rank if runtime["sample_sharded"] else 0
+    sample_world_size = world_size if runtime["sample_sharded"] else 1
     samples, sample_loader = _load_supervised_samples_with_report(
         samples_jsonl,
         rank=sample_rank,
@@ -1121,11 +1157,44 @@ def _train_temporal_diffusion_jsonl(
         raise SystemExit(f"all temporal samples contain non-finite values: {samples_jsonl}")
     feature_contract = _temporal_feature_contract_report(config, samples, tensors)
     if rank == 0:
-        print(f"sample_filter={json.dumps(sample_filter, sort_keys=True)}")
-        print(f"feature_contract={json.dumps(feature_contract, sort_keys=True)}")
+        print(f"sample_filter={json.dumps(sample_filter, sort_keys=True)}", flush=True)
+        print(f"feature_contract={json.dumps(feature_contract, sort_keys=True)}", flush=True)
 
     seed = int(_nested_get(config, ("experiment", "seed"), 17))
     torch.manual_seed(seed)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_every = max(1, int(_nested_get(config, ("train", "log_every"), 100)))
+    steps = min(max_steps, max_steps if max_steps > 0 else 1)
+    feed = _temporal_feed_config(config, runtime)
+    checkpointing = _checkpointing_config(config)
+    sampler = None
+    loader_kwargs, data_loader = _train_dataloader_kwargs(
+        config,
+        runtime,
+        dataset_length=len(samples),
+        batch_size=batch_size,
+        sampler=None,
+        shuffle=True,
+        force_single_process=bool(feed.get("preload_tensors", False)),
+    )
+    data_loader["ddp_shard_strategy"] = (
+        "jsonl_nonempty_row_index_mod_world_size"
+        if sample_loader.get("sharded")
+        else "none"
+    )
+    microbatching = _forward_microbatch_config(
+        config,
+        logical_batch_size=int(loader_kwargs["batch_size"]),
+    )
+    _print_temporal_pre_cuda_diagnostics(
+        rank=rank,
+        runtime=runtime,
+        tensors=tensors,
+        feed=feed,
+        data_loader=data_loader,
+        microbatching=microbatching,
+        checkpointing=checkpointing,
+    )
     model_build = build_model(
         config,
         input_dim=input_dim,
@@ -1164,43 +1233,19 @@ def _train_temporal_diffusion_jsonl(
         enabled=rank == 0,
     )
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    log_every = max(1, int(_nested_get(config, ("train", "log_every"), 100)))
-    steps = min(max_steps, max_steps if max_steps > 0 else 1)
-    feed = _temporal_feed_config(config, runtime)
     tensors = _prepare_temporal_tensors_for_training(
         tensors,
         device=runtime["device"],
         feed=feed,
     )
-    checkpointing = _checkpointing_config(config)
     dataset = torch.utils.data.TensorDataset(*_temporal_training_dataset_tensors(tensors))
-    sampler = None
-    loader_kwargs, data_loader = _train_dataloader_kwargs(
-        config,
-        runtime,
-        dataset_length=len(dataset),
-        batch_size=batch_size,
-        sampler=sampler,
-        shuffle=sampler is None,
-        force_single_process=bool(feed.get("preload_tensors", False)),
-    )
-    data_loader["ddp_shard_strategy"] = (
-        "jsonl_nonempty_row_index_mod_world_size"
-        if sample_loader.get("sharded")
-        else "none"
-    )
-    microbatching = _forward_microbatch_config(
-        config,
-        logical_batch_size=int(loader_kwargs["batch_size"]),
-    )
     if rank == 0:
-        print(f"batch_to_device={json.dumps(feed, sort_keys=True)}")
-        print(f"data_loader={json.dumps(data_loader, sort_keys=True)}")
-        print(f"forward_microbatch={json.dumps(microbatching, sort_keys=True)}")
-        print(f"checkpointing={json.dumps(checkpointing, sort_keys=True)}")
+        print(f"batch_to_device={json.dumps(feed, sort_keys=True)}", flush=True)
+        print(f"data_loader={json.dumps(data_loader, sort_keys=True)}", flush=True)
+        print(f"forward_microbatch={json.dumps(microbatching, sort_keys=True)}", flush=True)
+        print(f"checkpointing={json.dumps(checkpointing, sort_keys=True)}", flush=True)
         if resume_position["resumed"]:
-            print(f"resume_position={json.dumps(resume_position, sort_keys=True)}")
+            print(f"resume_position={json.dumps(resume_position, sort_keys=True)}", flush=True)
     loader = torch.utils.data.DataLoader(dataset, **loader_kwargs)
     step = int(resume_position["step"])
     epoch = int(resume_position["epoch"])
@@ -1949,6 +1994,56 @@ def _iter_temporal_microbatches(batch, microbatch_size: int):
     for start in range(0, logical_batch_count, chunk_size):
         end = min(start + chunk_size, logical_batch_count)
         yield tuple(value[start:end] for value in batch), end - start, logical_batch_count
+
+
+def _print_temporal_pre_cuda_diagnostics(
+    *,
+    rank: int,
+    runtime: dict[str, Any],
+    tensors: dict[str, Any],
+    feed: dict[str, Any],
+    data_loader: dict[str, Any],
+    microbatching: dict[str, Any],
+    checkpointing: dict[str, Any],
+) -> None:
+    tensor_shapes = {key: [int(dim) for dim in value.shape] for key, value in tensors.items()}
+    print(
+        " ".join(
+            (
+                f"rank={rank}",
+                f"data_loader.num_workers={data_loader.get('num_workers')}",
+                f"data_loader.pin_memory={str(data_loader.get('pin_memory')).lower()}",
+            )
+        ),
+        flush=True,
+    )
+    print(
+        " ".join(
+            (
+                f"rank={rank}",
+                f"forward_microbatch enabled={str(microbatching.get('enabled')).lower()}",
+                f"size={microbatching.get('size')}",
+                f"logical_batch_size={microbatching.get('logical_batch_size')}",
+            )
+        ),
+        flush=True,
+    )
+    print(
+        "pre_cuda_train_state="
+        + json.dumps(
+            {
+                "rank": rank,
+                "runtime": _runtime_report(runtime),
+                "tensor_shapes": tensor_shapes,
+                "batch_to_device": feed,
+                "data_loader": data_loader,
+                "forward_microbatch": microbatching,
+                "checkpointing": checkpointing,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
 
 
 def _temporal_training_dataset_tensors(tensors: dict[str, Any]) -> tuple[Any, ...]:

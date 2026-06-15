@@ -1015,6 +1015,23 @@ class TrainEntryTests(unittest.TestCase):
             "materialized_tensors_preloaded_to_device",
         )
 
+    def test_setup_runtime_can_disable_ddp_but_keep_rank_sharding(self):
+        torch = _FakeRuntimeTorch(cuda_available=True)
+
+        runtime = train_entry._setup_torch_runtime(
+            torch,
+            config={"train": {"ddp": False}},
+            rank=1,
+            world_size=2,
+        )
+
+        self.assertFalse(runtime["distributed"])
+        self.assertFalse(runtime["ddp_enabled"])
+        self.assertTrue(runtime["sample_sharded"])
+        self.assertEqual(runtime["world_size"], 2)
+        self.assertEqual(torch.cuda.set_devices, [1])
+        self.assertEqual(torch.distributed.init_backends, [])
+
     def test_forward_microbatch_config_splits_large_temporal_batch(self):
         report = train_entry._forward_microbatch_config(
             {"train": {"forward_microbatch_size": 8192}},
@@ -1047,6 +1064,40 @@ class TrainEntryTests(unittest.TestCase):
             first_condition["source_body_tokens"].to_calls,
             [{"device": "cuda:0", "non_blocking": True}],
         )
+
+    def test_temporal_pre_cuda_diagnostics_print_before_model_device_transfer(self):
+        stream = io.StringIO()
+
+        with contextlib.redirect_stdout(stream):
+            train_entry._print_temporal_pre_cuda_diagnostics(
+                rank=1,
+                runtime={
+                    "distributed": False,
+                    "ddp_enabled": False,
+                    "sample_sharded": True,
+                    "rank": 1,
+                    "world_size": 2,
+                    "local_rank": 1,
+                    "device_type": "cuda",
+                },
+                tensors=_temporal_tensors(),
+                feed={"non_blocking": True},
+                data_loader={"num_workers": 0, "pin_memory": True},
+                microbatching={
+                    "enabled": True,
+                    "size": 8192,
+                    "logical_batch_size": 32768,
+                },
+                checkpointing={"enabled": True, "every_steps": 100},
+            )
+
+        output = stream.getvalue()
+        self.assertIn("rank=1 data_loader.num_workers=0", output)
+        self.assertIn(
+            "rank=1 forward_microbatch enabled=true size=8192 logical_batch_size=32768",
+            output,
+        )
+        self.assertIn('"sample_sharded": true', output)
 
     def test_periodic_training_checkpoint_writes_latest_and_prunes_old_steps(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1387,6 +1438,40 @@ class _FakeStateful:
 
     def state_dict(self):
         return {"name": self.name}
+
+
+class _FakeRuntimeTorch:
+    def __init__(self, *, cuda_available: bool):
+        self.cuda = _FakeRuntimeCuda(cuda_available=cuda_available)
+        self.distributed = _FakeRuntimeDistributed()
+
+    @staticmethod
+    def device(*args):
+        return args
+
+
+class _FakeRuntimeCuda:
+    def __init__(self, *, cuda_available: bool):
+        self._available = cuda_available
+        self.set_devices = []
+
+    def is_available(self):
+        return self._available
+
+    def set_device(self, index):
+        self.set_devices.append(index)
+
+
+class _FakeRuntimeDistributed:
+    def __init__(self):
+        self.init_backends = []
+
+    @staticmethod
+    def is_initialized():
+        return False
+
+    def init_process_group(self, *, backend):
+        self.init_backends.append(backend)
 
 
 class _FakeTensor:
