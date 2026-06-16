@@ -166,7 +166,7 @@ train:
     init_sync: false
   log_every: 20
   eval_every: 200
-  checkpoint_every_steps: 100
+  checkpoint_every_steps: 5000
   keep_last_checkpoints: 3
   dataloader:
     num_workers: 0
