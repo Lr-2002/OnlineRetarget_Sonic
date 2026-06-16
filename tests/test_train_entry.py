@@ -575,6 +575,9 @@ class TrainEntryTests(unittest.TestCase):
 
         self.assertEqual(accepted["status"], "blocked")
         self.assertEqual(accepted["export_status"], "ok")
+        self.assertEqual(result["primary_backend"], "accepted_vertical_v2")
+        self.assertEqual(result["route_visualization_status"], "ok")
+        self.assertEqual(result["status"], "blocked")
         self.assertEqual(accepted["clip_count"], 1)
         self.assertEqual(accepted["error_count"], 0)
         self.assertEqual(accepted["accepted_vertical_v2_ok_count"], 0)
@@ -622,11 +625,56 @@ class TrainEntryTests(unittest.TestCase):
             )
 
         accepted = result["accepted_vertical_v2"]
+        self.assertEqual(result["primary_backend"], "accepted_vertical_v2")
+        self.assertEqual(result["status"], "failed")
         self.assertEqual(accepted["status"], "failed")
         self.assertEqual(accepted["export_status"], "failed")
         self.assertEqual(accepted["clip_count"], 0)
         self.assertEqual(accepted["error_count"], 1)
         self.assertIn("target_g1_path does not exist", accepted["errors"][0]["error"])
+
+    def test_visualization_artifacts_capsule_only_cannot_satisfy_accepted_vertical_v2_primary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            predictions = root / "train_predictions.jsonl"
+            predictions.write_text(
+                json.dumps(
+                    {
+                        "sample_id": "capsule-only",
+                        "target_g1_path": str(root / "missing_target.npz"),
+                        "predicted_joints": [[0.25, 1.25]],
+                        "target_joints": [[0.0, 1.0]],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = train_entry._write_visualization_artifacts(
+                config={
+                    "visualization": {
+                        "enabled": True,
+                        "num_samples": 1,
+                        "max_joints": 2,
+                        "capsule": {"enabled": True},
+                        "accepted_vertical_v2": {
+                            "enabled": True,
+                            "continue_on_error": True,
+                            "execute_renderers": False,
+                        },
+                    },
+                },
+                predictions_jsonl=predictions,
+                output_dir=root / "train",
+                eval_result=None,
+                run_name="train_visualization",
+            )
+
+        self.assertEqual(result["route_visualization_status"], "ok")
+        self.assertEqual(result["primary_backend"], "accepted_vertical_v2")
+        self.assertEqual(result["accepted_vertical_v2"]["status"], "failed")
+        self.assertEqual(result["status"], "failed")
+        self.assertNotEqual(result["status"], "ok")
 
     def test_accepted_vertical_v2_status_helper_uses_clip_acceptance(self):
         accepted_clip = {"acceptance_ok": True}
@@ -700,16 +748,36 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(result["accepted_vertical_v2"], {"enabled": False})
 
     def test_route_b_debug_config_enables_accepted_vertical_v2_export(self):
+        config_text = Path("configs/bones_sonic_diffusion_policy_debug.yaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("primary_backend: accepted_vertical_v2", config_text)
+        self.assertIn("capsule:\n    enabled: false", config_text)
+        self.assertIn("accepted_vertical_v2:\n    enabled: true", config_text)
+        self.assertIn("execute_renderers: true", config_text)
+        self.assertIn("skip_source_bvh_resolve: false", config_text)
+        self.assertIn("soma_render_script: scripts/render_somamesh_source.py", config_text)
+        self.assertIn("isaac_render_script: scripts/render_g1_isaac_pair.py", config_text)
+        self.assertIn("soma_retargeter_root:", config_text)
+        self.assertIn("somamesh_usd:", config_text)
+        self.assertIn("source_bvh_tar:", config_text)
         if train_entry.yaml is None:
-            self.skipTest("PyYAML is not installed in this Python environment")
+            return
         config = train_entry._load_config(Path("configs/bones_sonic_diffusion_policy_debug.yaml"))
 
         visual_cfg = config["visualization"]["accepted_vertical_v2"]
 
+        self.assertEqual(config["visualization"]["primary_backend"], "accepted_vertical_v2")
+        self.assertFalse(config["visualization"]["capsule"]["enabled"])
         self.assertTrue(visual_cfg["enabled"])
-        self.assertFalse(visual_cfg["execute_renderers"])
-        self.assertTrue(visual_cfg["skip_source_bvh_resolve"])
+        self.assertTrue(visual_cfg["execute_renderers"])
+        self.assertFalse(visual_cfg["skip_source_bvh_resolve"])
         self.assertEqual(visual_cfg["output_dir"], "accepted_vertical_v2")
+        self.assertEqual(visual_cfg["soma_render_script"], "scripts/render_somamesh_source.py")
+        self.assertEqual(visual_cfg["isaac_render_script"], "scripts/render_g1_isaac_pair.py")
+        self.assertIn("soma_retargeter_root", visual_cfg)
+        self.assertIn("somamesh_usd", visual_cfg)
+        self.assertIn("source_bvh_tar", visual_cfg)
 
     def test_route_b_debug_config_checkpoint_cadence_is_5000_steps(self):
         config_path = Path("configs/bones_sonic_diffusion_policy_debug.yaml")
@@ -1124,6 +1192,8 @@ class TrainEntryTests(unittest.TestCase):
         visualization = {
             "enabled": True,
             "status": "ok",
+            "primary_backend": "accepted_vertical_v2",
+            "route_visualization_status": "ok",
             "summary_json": "/tmp/periodic/visual_manifest.json",
             "sample_count": 1,
             "trajectory_row_count": 2,
@@ -1140,9 +1210,48 @@ class TrainEntryTests(unittest.TestCase):
         payload, step = logged_payloads[0]
         self.assertIsNone(step)
         self.assertIn("periodic_eval/visualization/status", payload)
+        self.assertEqual(
+            payload["periodic_eval/visualization/primary_backend"],
+            "accepted_vertical_v2",
+        )
+        self.assertEqual(payload["periodic_eval/visualization/route_status"], "ok")
         self.assertIn("periodic_eval/visualization/summary_json", payload)
         self.assertNotIn("visualization/status", payload)
         self.assertNotIn("visualization/summary_json", payload)
+
+    def test_periodic_eval_wandb_payload_records_visualization_primary_backend(self):
+        payload = train_entry._wandb_periodic_eval_payload(
+            step=5000,
+            summary={
+                "predictions_jsonl": "predictions.jsonl",
+                "summary_json": "periodic_eval_summary.json",
+                "sample_count": 1,
+                "status": "ok",
+            },
+            eval_result=None,
+            visualization={
+                "enabled": True,
+                "status": "failed",
+                "primary_backend": "accepted_vertical_v2",
+                "route_visualization_status": "ok",
+                "summary_json": "visual_manifest.json",
+                "accepted_vertical_v2": {
+                    "enabled": True,
+                    "status": "failed",
+                    "export_status": "failed",
+                    "accepted_vertical_v2_ok_count": 0,
+                },
+            },
+        )
+
+        self.assertEqual(payload["periodic_eval/visualization_status"], "failed")
+        self.assertEqual(
+            payload["periodic_eval/visualization_primary_backend"],
+            "accepted_vertical_v2",
+        )
+        self.assertEqual(payload["periodic_eval/visualization_route_status"], "ok")
+        self.assertEqual(payload["periodic_eval/accepted_vertical_v2_status"], "failed")
+        self.assertEqual(payload["periodic_eval/accepted_vertical_v2_export_status"], "failed")
 
     def test_quality_gate_blocks_formal_training_without_policy(self):
         context = train_entry._quality_gate_context(
