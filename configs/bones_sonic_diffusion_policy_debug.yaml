@@ -165,7 +165,7 @@ train:
     gradient_as_bucket_view: false
     init_sync: false
   log_every: 20
-  eval_every: 200
+  eval_every: 5000
   checkpoint_every_steps: 5000
   keep_last_checkpoints: 3
   dataloader:
@@ -180,6 +180,7 @@ train:
     pin_materialized_tensors: false
 
 evaluation:
+  every_steps: 5000
   metrics:
     - joint_mae
     - joint_mse

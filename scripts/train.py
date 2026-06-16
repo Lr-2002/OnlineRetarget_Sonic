@@ -928,6 +928,178 @@ def _checkpointing_config(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _periodic_eval_config(config: dict[str, Any]) -> dict[str, Any]:
+    train_cfg = _train_section(config)
+    eval_cfg = config.get("evaluation", {})
+    eval_cfg = dict(eval_cfg) if isinstance(eval_cfg, dict) else {}
+    every_steps = eval_cfg.get(
+        "every_steps",
+        eval_cfg.get("eval_every", train_cfg.get("eval_every", 0)),
+    )
+    every_steps = max(0, int(every_steps or 0))
+    enabled_value = eval_cfg.get("enabled")
+    enabled = every_steps > 0
+    if enabled_value is not None:
+        enabled = _bool_value(enabled_value, default=enabled) and every_steps > 0
+    return {
+        "enabled": enabled,
+        "every_steps": every_steps,
+        "source_key": "evaluation.every_steps"
+        if "every_steps" in eval_cfg
+        else "evaluation.eval_every"
+        if "eval_every" in eval_cfg
+        else "train.eval_every",
+        "artifact_dir": str(eval_cfg.get("artifact_dir", eval_cfg.get("periodic_dir", "periodic_eval"))),
+        "run_name_prefix": str(eval_cfg.get("run_name_prefix", "periodic_step")),
+        "max_samples": max(
+            0,
+            int(eval_cfg.get("periodic_max_samples", eval_cfg.get("max_periodic_samples", 0)) or 0),
+        ),
+    }
+
+
+def _should_run_periodic_eval(step: int, periodic_eval: dict[str, Any]) -> bool:
+    if not bool(periodic_eval.get("enabled", False)):
+        return False
+    every_steps = int(periodic_eval.get("every_steps", 0))
+    return every_steps > 0 and step > 0 and step % every_steps == 0
+
+
+def _periodic_eval_run_name(step: int, periodic_eval: dict[str, Any]) -> str:
+    prefix = str(periodic_eval.get("run_name_prefix", "periodic_step")).strip()
+    if not prefix:
+        prefix = "periodic_step"
+    return f"{prefix}_{int(step):08d}"
+
+
+def _periodic_eval_output_dir(
+    output_dir: Path,
+    *,
+    step: int,
+    periodic_eval: dict[str, Any],
+) -> Path:
+    configured = Path(str(periodic_eval.get("artifact_dir", "periodic_eval"))).expanduser()
+    if not configured.is_absolute():
+        configured = output_dir / configured
+    return configured / f"step_{int(step):08d}"
+
+
+def _periodic_eval_sample_count(sample_count: int, periodic_eval: dict[str, Any]) -> int:
+    max_samples = int(periodic_eval.get("max_samples", 0))
+    if max_samples <= 0:
+        return sample_count
+    return min(sample_count, max_samples)
+
+
+def _periodic_eval_sample_scope(
+    *,
+    rank: int,
+    world_size: int,
+    sample_loader: dict[str, Any],
+    loaded_sample_count: int,
+    evaluated_sample_count: int,
+) -> dict[str, Any]:
+    sharded = bool(sample_loader.get("sharded", False))
+    materialized_count = int(sample_loader.get("materialized_count", loaded_sample_count) or 0)
+    scope = "rank_shard" if sharded and int(world_size) > 1 else "global"
+    return {
+        "scope": scope,
+        "rank": int(rank),
+        "world_size": int(world_size),
+        "sample_loader_sharded": sharded,
+        "sample_loader": sample_loader,
+        "loaded_sample_count": int(loaded_sample_count),
+        "evaluated_sample_count": int(evaluated_sample_count),
+        "rank_loaded_sample_count": int(loaded_sample_count),
+        "rank_evaluated_sample_count": int(evaluated_sample_count),
+        "rank_materialized_sample_count": materialized_count,
+        "global_sample_count": None if sharded else int(loaded_sample_count),
+        "global_evaluated_sample_count": None if sharded else int(evaluated_sample_count),
+        "message": (
+            "periodic eval metrics are rank-shard scoped, not global"
+            if scope == "rank_shard"
+            else "periodic eval metrics cover the loaded global sample set"
+        ),
+    }
+
+
+def _slice_prediction_inputs(value: Any, count: int) -> Any:
+    if isinstance(value, dict):
+        return {key: item[:count] for key, item in value.items()}
+    return value[:count]
+
+
+def _run_periodic_eval_if_due(
+    *,
+    torch,
+    config: dict[str, Any],
+    output_dir: Path,
+    step: int,
+    samples: list[dict[str, Any]],
+    model,
+    model_family: str,
+    prediction_inputs: Any,
+    batch_size: int,
+    device,
+    periodic_eval: dict[str, Any],
+    wandb_run,
+    sample_loader: dict[str, Any],
+    rank: int,
+    world_size: int,
+    prev_y: Any = None,
+    checkpoint: Path | None = None,
+) -> dict[str, Any] | None:
+    if not _should_run_periodic_eval(step, periodic_eval):
+        return None
+    was_training = bool(getattr(_unwrap_model(model), "training", False))
+    eval_count = _periodic_eval_sample_count(len(samples), periodic_eval)
+    sample_scope = _periodic_eval_sample_scope(
+        rank=rank,
+        world_size=world_size,
+        sample_loader=sample_loader,
+        loaded_sample_count=len(samples),
+        evaluated_sample_count=eval_count,
+    )
+    print(
+        json.dumps(
+            {
+                "event": "periodic_eval_start",
+                "step": step,
+                "sample_count": eval_count,
+                "every_steps": periodic_eval["every_steps"],
+                "sample_scope": sample_scope,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    with torch.no_grad():
+        periodic_pred = _predict_tensor(
+            torch,
+            model,
+            _slice_prediction_inputs(prediction_inputs, eval_count),
+            family=model_family,
+            config=config,
+            batch_size=batch_size,
+            device=device,
+            prev_y=_slice_prediction_inputs(prev_y, eval_count) if prev_y is not None else None,
+        )
+    summary = _write_periodic_eval_artifacts(
+        config=config,
+        output_dir=output_dir,
+        step=step,
+        samples=samples[:eval_count],
+        predictions=periodic_pred.detach().cpu().tolist(),
+        periodic_eval=periodic_eval,
+        wandb_run=wandb_run,
+        sample_scope=sample_scope,
+        checkpoint=checkpoint,
+    )
+    if was_training:
+        model.train()
+    return summary
+
+
 def _step_profiler_config(config: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
     train_cfg = _train_section(config)
     profiler_cfg = train_cfg.get("step_profiler", train_cfg.get("profiler", {}))
@@ -1354,6 +1526,7 @@ def _train_jsonl(
     output_dir.mkdir(parents=True, exist_ok=True)
     log_every = max(1, int(_nested_get(config, ("train", "log_every"), 100)))
     steps = min(max_steps, max_steps if max_steps > 0 else 1)
+    periodic_eval = _periodic_eval_config(config)
     dataset = torch.utils.data.TensorDataset(x, y, prev_y)
     sampler = None
     loader_kwargs, data_loader = _train_dataloader_kwargs(
@@ -1391,6 +1564,27 @@ def _train_jsonl(
                 step_log = {"step": step, "loss": float(loss.detach().cpu())}
                 print(json.dumps(step_log, sort_keys=True))
                 _wandb_log(wandb_run, step_log, step=step)
+            if rank == 0:
+                _run_periodic_eval_if_due(
+                    torch=torch,
+                    config=config,
+                    output_dir=output_dir,
+                    step=step,
+                    samples=samples,
+                    model=model,
+                    model_family=model_build.family,
+                    prediction_inputs=x,
+                    batch_size=batch_size,
+                    device=device,
+                    periodic_eval=periodic_eval,
+                    wandb_run=wandb_run,
+                    sample_loader=sample_loader,
+                    rank=rank,
+                    world_size=world_size,
+                    prev_y=prev_y,
+                )
+            if runtime["distributed"] and _should_run_periodic_eval(step, periodic_eval):
+                torch.distributed.barrier()
             if step >= steps:
                 break
         epoch += 1
@@ -1461,6 +1655,7 @@ def _train_jsonl(
         model_config=model_build.config,
         loss_config=_loss_config(config),
         evaluation_config=_evaluation_config(config, run_name="train_offline_eval").to_dict(),
+        periodic_evaluation=periodic_eval,
         distributed_runtime=_runtime_report(runtime),
         resume_checkpoint=str(resume_checkpoint) if resume_checkpoint is not None else "",
         sample_filter=sample_filter,
@@ -1660,6 +1855,7 @@ def _train_temporal_diffusion_jsonl(
     steps = min(max_steps, max_steps if max_steps > 0 else 1)
     feed = _temporal_feed_config(config, runtime)
     checkpointing = _checkpointing_config(config)
+    periodic_eval = _periodic_eval_config(config)
     step_profiler = _init_temporal_step_profiler(config, runtime)
     _print_temporal_startup_stage(
         rank=rank,
@@ -1669,6 +1865,7 @@ def _train_temporal_diffusion_jsonl(
         steps=steps,
         feed=feed,
         checkpointing=checkpointing,
+        periodic_eval=periodic_eval,
         step_profiler={
             key: value
             for key, value in step_profiler.items()
@@ -2104,6 +2301,7 @@ def _train_temporal_diffusion_jsonl(
                 torch=torch,
                 runtime=runtime,
             ):
+                periodic_checkpoint = None
                 if rank == 0 and (step == 1 or step == steps or step % log_every == 0):
                     step_log = {"step": step, "loss": loss_value}
                     print(json.dumps(step_log, sort_keys=True))
@@ -2133,6 +2331,27 @@ def _train_temporal_diffusion_jsonl(
                             sort_keys=True,
                         )
                     )
+                if rank == 0:
+                    _run_periodic_eval_if_due(
+                        torch=torch,
+                        config=config,
+                        output_dir=output_dir,
+                        step=step,
+                        samples=samples,
+                        model=model,
+                        model_family=model_build.family,
+                        prediction_inputs=tensors,
+                        batch_size=batch_size,
+                        device=runtime["device"],
+                        periodic_eval=periodic_eval,
+                        wandb_run=wandb_run,
+                        sample_loader=sample_loader,
+                        rank=rank,
+                        world_size=world_size,
+                        checkpoint=periodic_checkpoint,
+                    )
+                if runtime["distributed"] and _should_run_periodic_eval(step, periodic_eval):
+                    torch.distributed.barrier()
             _finish_temporal_step_profile(step_profiler, step_timings)
             if step >= steps:
                 break
@@ -2219,6 +2438,7 @@ def _train_temporal_diffusion_jsonl(
         },
         loss_config=_loss_config(config),
         evaluation_config=_evaluation_config(config, run_name="train_offline_eval").to_dict(),
+        periodic_evaluation=periodic_eval,
         feature_contract=feature_contract,
         distributed_runtime=_runtime_report(runtime),
         resume_checkpoint=str(resume_checkpoint) if resume_checkpoint is not None else "",
@@ -3501,6 +3721,202 @@ def _write_prediction_jsonl(
             f.write("\n")
 
 
+def _slice_periodic_eval_samples(
+    samples: list[dict[str, Any]],
+    predictions: list[Any],
+    *,
+    periodic_eval: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[Any]]:
+    max_samples = int(periodic_eval.get("max_samples", 0))
+    if max_samples <= 0:
+        return samples, predictions
+    return samples[:max_samples], predictions[:max_samples]
+
+
+def _periodic_visualization_config(config: dict[str, Any], *, artifact_dir: Path) -> dict[str, Any]:
+    visual_cfg = config.get("visualization", {})
+    if not isinstance(visual_cfg, dict):
+        visual_cfg = {}
+    updated_visual_cfg = dict(visual_cfg)
+    updated_visual_cfg["output_dir"] = str((artifact_dir / "visualization").resolve())
+    if "artifact_name" in updated_visual_cfg:
+        updated_visual_cfg["artifact_name"] = "visualization"
+    updated = dict(config)
+    updated["visualization"] = updated_visual_cfg
+    return updated
+
+
+def _wandb_periodic_eval_payload(
+    *,
+    step: int,
+    summary: dict[str, Any],
+    eval_result: Any,
+    visualization: dict[str, Any],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "periodic_eval/step": int(step),
+        "periodic_eval/predictions_jsonl": summary.get("predictions_jsonl", ""),
+        "periodic_eval/summary_json": summary.get("summary_json", ""),
+        "periodic_eval/sample_count": int(summary.get("sample_count", 0)),
+        "periodic_eval/status": summary.get("status", ""),
+    }
+    sample_scope = summary.get("sample_scope", {})
+    if isinstance(sample_scope, dict):
+        payload.update(
+            {
+                "periodic_eval/scope": sample_scope.get("scope", ""),
+                "periodic_eval/rank": int(sample_scope.get("rank", 0) or 0),
+                "periodic_eval/world_size": int(sample_scope.get("world_size", 1) or 1),
+                "periodic_eval/sample_loader_sharded": bool(
+                    sample_scope.get("sample_loader_sharded", False)
+                ),
+                "periodic_eval/sample_loader/sharded": bool(
+                    sample_scope.get("sample_loader_sharded", False)
+                ),
+                "periodic_eval/loaded_sample_count": int(
+                    sample_scope.get("loaded_sample_count", 0) or 0
+                ),
+                "periodic_eval/evaluated_sample_count": int(
+                    sample_scope.get("evaluated_sample_count", 0) or 0
+                ),
+                "periodic_eval/rank_loaded_sample_count": int(
+                    sample_scope.get("rank_loaded_sample_count", 0) or 0
+                ),
+                "periodic_eval/rank_evaluated_sample_count": int(
+                    sample_scope.get("rank_evaluated_sample_count", 0) or 0
+                ),
+                "periodic_eval/rank_materialized_sample_count": int(
+                    sample_scope.get("rank_materialized_sample_count", 0) or 0
+                ),
+            }
+        )
+    if eval_result is not None:
+        payload["periodic_eval/eval_summary_json"] = str(eval_result.summary_json)
+        for name, value in eval_result.overall.items():
+            if isinstance(value, (int, float)):
+                payload[f"periodic_eval/{name}"] = float(value)
+    if visualization.get("enabled"):
+        payload["periodic_eval/visualization_summary_json"] = visualization.get("summary_json", "")
+        payload["periodic_eval/visualization_status"] = visualization.get("status", "")
+        accepted_vertical = visualization.get("accepted_vertical_v2", {})
+        if isinstance(accepted_vertical, dict) and accepted_vertical.get("enabled"):
+            payload["periodic_eval/accepted_vertical_v2_status"] = accepted_vertical.get("status", "")
+            payload["periodic_eval/accepted_vertical_v2_export_status"] = accepted_vertical.get("export_status", "")
+            payload["periodic_eval/accepted_vertical_v2_ok_count"] = int(
+                accepted_vertical.get("accepted_vertical_v2_ok_count", 0) or 0
+            )
+    return payload
+
+
+def _write_periodic_eval_artifacts(
+    *,
+    config: dict[str, Any],
+    output_dir: Path,
+    step: int,
+    samples: list[dict[str, Any]],
+    predictions: list[Any],
+    periodic_eval: dict[str, Any],
+    wandb_run,
+    sample_scope: dict[str, Any],
+    checkpoint: Path | None = None,
+) -> dict[str, Any]:
+    artifact_dir = _periodic_eval_output_dir(output_dir, step=step, periodic_eval=periodic_eval)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    eval_samples, eval_predictions = _slice_periodic_eval_samples(
+        samples,
+        predictions,
+        periodic_eval=periodic_eval,
+    )
+    predictions_jsonl = artifact_dir / "predictions.jsonl"
+    _write_prediction_jsonl(
+        predictions_jsonl,
+        samples=eval_samples,
+        predictions=eval_predictions,
+    )
+    run_name = _periodic_eval_run_name(step, periodic_eval)
+    eval_result = evaluate_jsonl(
+        input_jsonl=predictions_jsonl,
+        output_root=output_dir,
+        config=_evaluation_config(config, run_name=run_name),
+    )
+    _annotate_periodic_eval_summary(eval_result.summary_json, sample_scope=sample_scope)
+    visualization = _write_visualization_artifacts(
+        config=_periodic_visualization_config(config, artifact_dir=artifact_dir),
+        predictions_jsonl=predictions_jsonl,
+        output_dir=output_dir,
+        eval_result=eval_result,
+        run_name=f"{run_name}_visualization",
+        checkpoint=checkpoint,
+        checkpoint_step=step,
+    )
+    summary_path = artifact_dir / "periodic_eval_summary.json"
+    summary = {
+        "enabled": True,
+        "status": "ok",
+        "step": int(step),
+        "config": periodic_eval,
+        "output_dir": str(artifact_dir),
+        "predictions_jsonl": str(predictions_jsonl),
+        "summary_json": str(summary_path),
+        "offline_eval": eval_result.to_dict(),
+        "visualization": visualization,
+        "sample_scope": sample_scope,
+        "sample_count": len(eval_samples),
+        "input_sample_count": len(samples),
+        "checkpoint": str(checkpoint or ""),
+        "git_sha": _git_sha(),
+        "git_dirty": _git_dirty(),
+    }
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    event = {
+        "event": "periodic_eval",
+        "step": int(step),
+        "status": summary["status"],
+        "predictions_jsonl": str(predictions_jsonl),
+        "summary_json": str(summary_path),
+        "eval_summary_json": str(eval_result.summary_json),
+        "visualization_summary_json": str(visualization.get("summary_json", "")),
+        "sample_count": len(eval_samples),
+        "sample_scope": sample_scope,
+    }
+    print(json.dumps(event, sort_keys=True), flush=True)
+    _wandb_log(
+        wandb_run,
+        _wandb_periodic_eval_payload(
+            step=step,
+            summary=summary,
+            eval_result=eval_result,
+            visualization=visualization,
+        ),
+        step=step,
+    )
+    _wandb_save(wandb_run, predictions_jsonl)
+    _wandb_save(wandb_run, summary_path)
+    _wandb_save(wandb_run, eval_result.summary_json)
+    _wandb_log_visualization(
+        wandb_run,
+        visualization,
+        config,
+        key_prefix="periodic_eval/visualization",
+    )
+    return summary
+
+
+def _annotate_periodic_eval_summary(summary_json: Path, *, sample_scope: dict[str, Any]) -> None:
+    payload: dict[str, Any] = {}
+    if summary_json.exists():
+        try:
+            loaded = json.loads(summary_json.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                payload = loaded
+        except json.JSONDecodeError:
+            payload = {}
+    payload["sample_scope"] = sample_scope
+    payload["metric_scope"] = sample_scope.get("scope", "")
+    summary_json.parent.mkdir(parents=True, exist_ok=True)
+    summary_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def _target_sequence(sample: dict[str, Any]) -> list[list[float]]:
     future = sample.get("future_target_joints")
     if isinstance(future, list) and future and all(isinstance(row, list) for row in future):
@@ -4310,6 +4726,7 @@ def _build_train_report(
     model_config: dict[str, Any] | None = None,
     loss_config: dict[str, Any] | None = None,
     evaluation_config: dict[str, Any] | None = None,
+    periodic_evaluation: dict[str, Any] | None = None,
     feature_contract: dict[str, Any] | None = None,
     distributed_runtime: dict[str, Any] | None = None,
     resume_checkpoint: str = "",
@@ -4341,6 +4758,7 @@ def _build_train_report(
         "model_config": model_config or {},
         "loss_config": loss_config or {},
         "evaluation_config": evaluation_config or {},
+        "periodic_evaluation": periodic_evaluation or {"enabled": False},
         "feature_contract": feature_contract or {"enabled": False},
         "quality_gate": quality_gate,
         "device": device,
@@ -4415,11 +4833,20 @@ def _wandb_save(run, path: Path) -> None:
         run.save(str(path))
 
 
-def _wandb_log_visualization(run, visualization: dict[str, Any], config: dict[str, Any]) -> None:
+def _wandb_log_visualization(
+    run,
+    visualization: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    key_prefix: str = "visualization",
+) -> None:
     if run is None or not visualization.get("enabled"):
         return
     if not bool(_nested_get(config, ("visualization", "wandb_upload"), False)):
         return
+    key_prefix = key_prefix.strip("/")
+    if not key_prefix:
+        key_prefix = "visualization"
     capsule = visualization.get("capsule_visualization", {})
     if not isinstance(capsule, dict):
         capsule = {}
@@ -4438,19 +4865,19 @@ def _wandb_log_visualization(run, visualization: dict[str, Any], config: dict[st
     for video_path in _capsule_video_paths(capsule):
         _wandb_save(run, video_path)
     payload = {
-        "visualization/status": visualization.get("status", ""),
-        "visualization/summary_json": visualization.get("summary_json", ""),
-        "visualization/sample_count": visualization.get("sample_count", 0),
-        "visualization/trajectory_row_count": visualization.get("trajectory_row_count", 0),
-        "visualization/capsule_status": capsule.get("status", ""),
-        "visualization/capsule_manifest": capsule.get("manifest_json", ""),
+        f"{key_prefix}/status": visualization.get("status", ""),
+        f"{key_prefix}/summary_json": visualization.get("summary_json", ""),
+        f"{key_prefix}/sample_count": visualization.get("sample_count", 0),
+        f"{key_prefix}/trajectory_row_count": visualization.get("trajectory_row_count", 0),
+        f"{key_prefix}/capsule_status": capsule.get("status", ""),
+        f"{key_prefix}/capsule_manifest": capsule.get("manifest_json", ""),
     }
     html_path = Path(str(visualization.get("trajectory_html", "")))
     if html_path.exists():
         try:
             import wandb
 
-            payload["visualization/trajectory_preview"] = wandb.Html(
+            payload[f"{key_prefix}/trajectory_preview"] = wandb.Html(
                 html_path.read_text(encoding="utf-8")
             )
         except Exception:
@@ -4460,11 +4887,11 @@ def _wandb_log_visualization(run, visualization: dict[str, Any], config: dict[st
         try:
             import wandb
 
-            payload["visualization/capsule_preview"] = wandb.Html(
+            payload[f"{key_prefix}/capsule_preview"] = wandb.Html(
                 capsule_html.read_text(encoding="utf-8")
             )
             for index, video_path in enumerate(_capsule_video_paths(capsule)[:4]):
-                payload[f"visualization/capsule_video_{index}"] = wandb.Video(str(video_path))
+                payload[f"{key_prefix}/capsule_video_{index}"] = wandb.Video(str(video_path))
         except Exception:
             pass
     _wandb_log(run, payload)

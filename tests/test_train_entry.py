@@ -726,6 +726,424 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(checkpointing["every_steps"], 5000)
         self.assertTrue(checkpointing["enabled"])
 
+    def test_route_b_debug_config_periodic_eval_cadence_is_5000_steps(self):
+        config_path = Path("configs/bones_sonic_diffusion_policy_debug.yaml")
+        config_text = config_path.read_text(encoding="utf-8")
+        self.assertIn("eval_every: 5000", config_text)
+        self.assertIn("every_steps: 5000", config_text)
+        self.assertNotIn("eval_every: 200\n", config_text)
+        if train_entry.yaml is None:
+            return
+
+        config = train_entry._load_config(config_path)
+        periodic_eval = train_entry._periodic_eval_config(config)
+
+        self.assertEqual(config["train"]["eval_every"], 5000)
+        self.assertEqual(config["evaluation"]["every_steps"], 5000)
+        self.assertEqual(periodic_eval["source_key"], "evaluation.every_steps")
+        self.assertEqual(periodic_eval["every_steps"], 5000)
+        self.assertTrue(periodic_eval["enabled"])
+
+    def test_periodic_eval_triggers_at_5000_not_adjacent_steps(self):
+        periodic_eval = train_entry._periodic_eval_config(
+            {"train": {"eval_every": 200}, "evaluation": {"every_steps": 5000}}
+        )
+
+        self.assertFalse(train_entry._should_run_periodic_eval(4999, periodic_eval))
+        self.assertTrue(train_entry._should_run_periodic_eval(5000, periodic_eval))
+        self.assertFalse(train_entry._should_run_periodic_eval(5001, periodic_eval))
+        self.assertTrue(train_entry._should_run_periodic_eval(10000, periodic_eval))
+
+    def test_run_periodic_eval_if_due_calls_artifact_writer_at_5000_only(self):
+        class FakeTensor:
+            def __getitem__(self, _item):
+                return self
+
+            def detach(self):
+                return self
+
+            def cpu(self):
+                return self
+
+            def tolist(self):
+                return [[0.25, 1.25]]
+
+        class FakeNoGrad:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        class FakeTorch:
+            @staticmethod
+            def no_grad():
+                return FakeNoGrad()
+
+        class FakeModel:
+            training = True
+
+            def train(self):
+                self.training = True
+
+        calls = []
+
+        def fake_predict(*_args, **_kwargs):
+            calls.append("predict")
+            return FakeTensor()
+
+        def fake_write(**kwargs):
+            calls.append(
+                {
+                    "step": kwargs["step"],
+                    "sample_count": len(kwargs["samples"]),
+                    "predictions": kwargs["predictions"],
+                }
+            )
+            return {"step": kwargs["step"]}
+
+        periodic_eval = train_entry._periodic_eval_config(
+            {"evaluation": {"every_steps": 5000, "periodic_max_samples": 1}}
+        )
+        samples = [
+            {"sample_id": "s1", "target_joints": [0.0, 1.0]},
+            {"sample_id": "s2", "target_joints": [2.0, 3.0]},
+        ]
+        with mock.patch.object(train_entry, "_predict_tensor", side_effect=fake_predict):
+            with mock.patch.object(
+                train_entry,
+                "_write_periodic_eval_artifacts",
+                side_effect=fake_write,
+            ):
+                self.assertIsNone(
+                    train_entry._run_periodic_eval_if_due(
+                        torch=FakeTorch,
+                        config={},
+                        output_dir=Path("/tmp/out"),
+                        step=4999,
+                        samples=samples,
+                        model=FakeModel(),
+                        model_family="temporal_mlp",
+                        prediction_inputs=FakeTensor(),
+                        batch_size=64,
+                        device="cpu",
+                        periodic_eval=periodic_eval,
+                        wandb_run=None,
+                        sample_loader={"sharded": False, "materialized_count": len(samples)},
+                        rank=0,
+                        world_size=1,
+                    )
+                )
+                summary = train_entry._run_periodic_eval_if_due(
+                    torch=FakeTorch,
+                    config={},
+                    output_dir=Path("/tmp/out"),
+                    step=5000,
+                    samples=samples,
+                    model=FakeModel(),
+                    model_family="temporal_mlp",
+                    prediction_inputs=FakeTensor(),
+                    batch_size=64,
+                    device="cpu",
+                    periodic_eval=periodic_eval,
+                    wandb_run=None,
+                    sample_loader={"sharded": False, "materialized_count": len(samples)},
+                    rank=0,
+                    world_size=1,
+                )
+
+        self.assertEqual(summary, {"step": 5000})
+        self.assertEqual(calls[0], "predict")
+        self.assertEqual(
+            calls[1],
+            {
+                "step": 5000,
+                "sample_count": 1,
+                "predictions": [[0.25, 1.25]],
+            },
+        )
+
+    def test_periodic_eval_artifacts_are_step_scoped_and_use_eval_path(self):
+        class FakeEvalResult:
+            def __init__(self, output_root: Path, run_name: str):
+                self.output_dir = output_root / "eval" / run_name
+                self.summary_json = self.output_dir / "eval_summary.json"
+                self.per_sample_csv = self.output_dir / "per_sample_metrics.csv"
+                self.failure_manifest_csv = self.output_dir / "failure_manifest.csv"
+                self.sample_count = 1
+                self.overall = {"joint_rmse": 0.25}
+                self.git_sha = "fake"
+                self.git_dirty = False
+                self.output_dir.mkdir(parents=True, exist_ok=True)
+                self.summary_json.write_text("{}\n", encoding="utf-8")
+
+            def to_dict(self):
+                return {
+                    "output_dir": str(self.output_dir),
+                    "summary_json": str(self.summary_json),
+                    "per_sample_csv": str(self.per_sample_csv),
+                    "failure_manifest_csv": str(self.failure_manifest_csv),
+                    "sample_count": self.sample_count,
+                    "overall": self.overall,
+                    "git_sha": self.git_sha,
+                    "git_dirty": self.git_dirty,
+                }
+
+        eval_calls = []
+
+        def fake_evaluate_jsonl(*, input_jsonl, output_root, config):
+            eval_calls.append(
+                {
+                    "input_jsonl": input_jsonl,
+                    "output_root": output_root,
+                    "run_name": config.run_name,
+                }
+            )
+            return FakeEvalResult(output_root, config.run_name)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "train"
+            periodic_eval = train_entry._periodic_eval_config(
+                {"evaluation": {"every_steps": 5000}}
+            )
+            with mock.patch.object(train_entry, "evaluate_jsonl", side_effect=fake_evaluate_jsonl):
+                with mock.patch.object(
+                    train_entry,
+                    "_write_visualization_artifacts",
+                    return_value={"enabled": False},
+                ) as visual_mock:
+                    summary = train_entry._write_periodic_eval_artifacts(
+                        config={"evaluation": {"every_steps": 5000}},
+                        output_dir=output_dir,
+                        step=5000,
+                        samples=[
+                            {
+                                "sample_id": "s1",
+                                "target_joints": [0.0, 1.0],
+                            }
+                        ],
+                        predictions=[[0.25, 1.25]],
+                        periodic_eval=periodic_eval,
+                        wandb_run=None,
+                        sample_scope=train_entry._periodic_eval_sample_scope(
+                            rank=0,
+                            world_size=1,
+                            sample_loader={"sharded": False, "materialized_count": 1},
+                            loaded_sample_count=1,
+                            evaluated_sample_count=1,
+                        ),
+                        checkpoint=output_dir / "checkpoints" / "step_00005000.pt",
+                    )
+
+            predictions_path = output_dir / "periodic_eval" / "step_00005000" / "predictions.jsonl"
+            summary_path = output_dir / "periodic_eval" / "step_00005000" / "periodic_eval_summary.json"
+            eval_summary_path = output_dir / "eval" / "periodic_step_00005000" / "eval_summary.json"
+
+            self.assertEqual(summary["step"], 5000)
+            self.assertEqual(summary["predictions_jsonl"], str(predictions_path))
+            self.assertTrue(predictions_path.exists())
+            self.assertTrue(summary_path.exists())
+            self.assertTrue(eval_summary_path.exists())
+            self.assertEqual(eval_calls[0]["run_name"], "periodic_step_00005000")
+            self.assertEqual(eval_calls[0]["input_jsonl"], predictions_path)
+            visual_mock.assert_called_once()
+            self.assertEqual(
+                visual_mock.call_args.kwargs["run_name"],
+                "periodic_step_00005000_visualization",
+            )
+
+    def test_periodic_eval_summary_log_and_wandb_payload_mark_shard_scope(self):
+        class FakeEvalResult:
+            output_dir = Path("/tmp/out/eval/periodic_step_00005000")
+            summary_json = output_dir / "eval_summary.json"
+            per_sample_csv = output_dir / "per_sample_metrics.csv"
+            failure_manifest_csv = output_dir / "failure_manifest.csv"
+            sample_count = 2
+            overall = {"joint_rmse": 0.5}
+            git_sha = "fake"
+            git_dirty = False
+
+            def to_dict(self):
+                return {
+                    "output_dir": str(self.output_dir),
+                    "summary_json": str(self.summary_json),
+                    "per_sample_csv": str(self.per_sample_csv),
+                    "failure_manifest_csv": str(self.failure_manifest_csv),
+                    "sample_count": self.sample_count,
+                    "overall": self.overall,
+                    "git_sha": self.git_sha,
+                    "git_dirty": self.git_dirty,
+                }
+
+        logged_payloads = []
+
+        class FakeRun:
+            def log(self, payload, step=None):
+                logged_payloads.append((payload, step))
+
+            def save(self, _path):
+                return None
+
+        sample_scope = train_entry._periodic_eval_sample_scope(
+            rank=0,
+            world_size=4,
+            sample_loader={
+                "rank": 0,
+                "world_size": 4,
+                "sharded": True,
+                "materialized_count": 2,
+            },
+            loaded_sample_count=2,
+            evaluated_sample_count=2,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "train"
+            fake_eval_summary = output_dir / "eval" / "periodic_step_00005000" / "eval_summary.json"
+            fake_eval_summary.parent.mkdir(parents=True, exist_ok=True)
+            fake_eval_summary.write_text("{}\n", encoding="utf-8")
+            FakeEvalResult.output_dir = fake_eval_summary.parent
+            FakeEvalResult.summary_json = fake_eval_summary
+            FakeEvalResult.per_sample_csv = fake_eval_summary.parent / "per_sample_metrics.csv"
+            FakeEvalResult.failure_manifest_csv = fake_eval_summary.parent / "failure_manifest.csv"
+            with mock.patch.object(train_entry, "evaluate_jsonl", return_value=FakeEvalResult()):
+                with mock.patch.object(
+                    train_entry,
+                    "_write_visualization_artifacts",
+                    return_value={"enabled": False},
+                ):
+                    with mock.patch.object(train_entry, "_wandb_log_visualization"):
+                        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                            summary = train_entry._write_periodic_eval_artifacts(
+                                config={"evaluation": {"every_steps": 5000}},
+                                output_dir=output_dir,
+                                step=5000,
+                                samples=[
+                                    {"sample_id": "s1", "target_joints": [0.0]},
+                                    {"sample_id": "s2", "target_joints": [1.0]},
+                                ],
+                                predictions=[[0.0], [1.0]],
+                                periodic_eval=train_entry._periodic_eval_config(
+                                    {"evaluation": {"every_steps": 5000}}
+                                ),
+                                wandb_run=FakeRun(),
+                                sample_scope=sample_scope,
+                            )
+
+            summary_path = output_dir / "periodic_eval" / "step_00005000" / "periodic_eval_summary.json"
+            persisted = json.loads(summary_path.read_text(encoding="utf-8"))
+            eval_summary = json.loads(fake_eval_summary.read_text(encoding="utf-8"))
+            event = json.loads(
+                [line for line in stdout.getvalue().splitlines() if line.strip()][-1]
+            )
+            wandb_payload, wandb_step = logged_payloads[0]
+
+        self.assertEqual(summary["sample_scope"]["scope"], "rank_shard")
+        self.assertEqual(persisted["sample_scope"]["rank"], 0)
+        self.assertEqual(persisted["sample_scope"]["world_size"], 4)
+        self.assertTrue(persisted["sample_scope"]["sample_loader_sharded"])
+        self.assertEqual(persisted["sample_scope"]["loaded_sample_count"], 2)
+        self.assertEqual(persisted["sample_scope"]["evaluated_sample_count"], 2)
+        self.assertEqual(eval_summary["metric_scope"], "rank_shard")
+        self.assertEqual(eval_summary["sample_scope"]["rank"], 0)
+        self.assertTrue(eval_summary["sample_scope"]["sample_loader"]["sharded"])
+        self.assertEqual(event["sample_scope"]["scope"], "rank_shard")
+        self.assertTrue(event["sample_scope"]["sample_loader_sharded"])
+        self.assertEqual(wandb_step, 5000)
+        self.assertEqual(wandb_payload["periodic_eval/scope"], "rank_shard")
+        self.assertEqual(wandb_payload["periodic_eval/rank"], 0)
+        self.assertEqual(wandb_payload["periodic_eval/world_size"], 4)
+        self.assertTrue(wandb_payload["periodic_eval/sample_loader_sharded"])
+        self.assertTrue(wandb_payload["periodic_eval/sample_loader/sharded"])
+        self.assertEqual(wandb_payload["periodic_eval/loaded_sample_count"], 2)
+        self.assertEqual(wandb_payload["periodic_eval/evaluated_sample_count"], 2)
+        self.assertEqual(wandb_payload["periodic_eval/rank_loaded_sample_count"], 2)
+        self.assertEqual(wandb_payload["periodic_eval/rank_evaluated_sample_count"], 2)
+        self.assertEqual(wandb_payload["periodic_eval/rank_materialized_sample_count"], 2)
+
+    def test_periodic_eval_writes_step_scoped_visualization_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "train"
+            config = {
+                "evaluation": {"every_steps": 5000},
+                "visualization": {
+                    "enabled": True,
+                    "num_samples": 1,
+                    "max_joints": 2,
+                    "wandb_upload": False,
+                },
+            }
+            summary = train_entry._write_periodic_eval_artifacts(
+                config=config,
+                output_dir=output_dir,
+                step=5000,
+                samples=[
+                    {
+                        "sample_id": "s1",
+                        "target_joints": [0.0, 1.0],
+                    }
+                ],
+                predictions=[[0.25, 1.25]],
+                periodic_eval=train_entry._periodic_eval_config(config),
+                wandb_run=None,
+                sample_scope=train_entry._periodic_eval_sample_scope(
+                    rank=0,
+                    world_size=1,
+                    sample_loader={"sharded": False, "materialized_count": 1},
+                    loaded_sample_count=1,
+                    evaluated_sample_count=1,
+                ),
+            )
+
+            visual_dir = output_dir / "periodic_eval" / "step_00005000" / "visualization"
+            visual_summary = visual_dir / "visual_manifest.json"
+
+            self.assertTrue(visual_summary.exists())
+            self.assertTrue((visual_dir / "trajectory_preview.csv").exists())
+            self.assertTrue((visual_dir / "trajectory_preview.svg").exists())
+            self.assertTrue((visual_dir / "trajectory_preview.html").exists())
+            self.assertEqual(
+                Path(summary["visualization"]["summary_json"]).resolve(),
+                visual_summary.resolve(),
+            )
+            self.assertEqual(
+                Path(summary["visualization"]["output_dir"]).resolve(),
+                visual_dir.resolve(),
+            )
+
+    def test_periodic_visualization_wandb_uses_periodic_namespace(self):
+        logged_payloads = []
+
+        class FakeRun:
+            def log(self, payload, step=None):
+                logged_payloads.append((payload, step))
+
+            def save(self, _path):
+                return None
+
+        visualization = {
+            "enabled": True,
+            "status": "ok",
+            "summary_json": "/tmp/periodic/visual_manifest.json",
+            "sample_count": 1,
+            "trajectory_row_count": 2,
+            "capsule_visualization": {"status": "blocked", "manifest_json": ""},
+        }
+
+        train_entry._wandb_log_visualization(
+            FakeRun(),
+            visualization,
+            {"visualization": {"wandb_upload": True}},
+            key_prefix="periodic_eval/visualization",
+        )
+
+        payload, step = logged_payloads[0]
+        self.assertIsNone(step)
+        self.assertIn("periodic_eval/visualization/status", payload)
+        self.assertIn("periodic_eval/visualization/summary_json", payload)
+        self.assertNotIn("visualization/status", payload)
+        self.assertNotIn("visualization/summary_json", payload)
+
     def test_quality_gate_blocks_formal_training_without_policy(self):
         context = train_entry._quality_gate_context(
             {},
