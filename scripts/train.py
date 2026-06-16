@@ -3798,6 +3798,12 @@ def _wandb_periodic_eval_payload(
     if visualization.get("enabled"):
         payload["periodic_eval/visualization_summary_json"] = visualization.get("summary_json", "")
         payload["periodic_eval/visualization_status"] = visualization.get("status", "")
+        payload["periodic_eval/visualization_primary_backend"] = visualization.get(
+            "primary_backend", ""
+        )
+        payload["periodic_eval/visualization_route_status"] = visualization.get(
+            "route_visualization_status", ""
+        )
         accepted_vertical = visualization.get("accepted_vertical_v2", {})
         if isinstance(accepted_vertical, dict) and accepted_vertical.get("enabled"):
             payload["periodic_eval/accepted_vertical_v2_status"] = accepted_vertical.get("status", "")
@@ -3996,13 +4002,25 @@ def _write_visualization_artifacts(
         checkpoint=checkpoint,
         checkpoint_step=checkpoint_step,
     )
+    route_status = "ok" if rows else "empty"
+    primary_backend = _visualization_primary_backend(
+        visual_cfg=visual_cfg,
+        accepted_vertical_enabled=accepted_vertical_enabled,
+    )
+    status = _visualization_summary_status(
+        primary_backend=primary_backend,
+        route_status=route_status,
+        accepted_vertical=accepted_vertical,
+    )
     summary_path = artifact_dir / "visual_manifest.json"
     eval_payload = eval_result.to_dict() if eval_result is not None else {}
     summary = {
         "enabled": True,
         "artifact_version": "route_b_joint_trajectory_v1",
         "artifact_name": artifact_name,
-        "status": "ok" if rows else "empty",
+        "status": status,
+        "primary_backend": primary_backend,
+        "route_visualization_status": route_status,
         "predictions_jsonl": str(predictions_jsonl),
         "output_dir": str(artifact_dir),
         "trajectory_csv": str(trajectory_csv),
@@ -4022,6 +4040,33 @@ def _write_visualization_artifacts(
     }
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return summary
+
+
+def _visualization_primary_backend(
+    *,
+    visual_cfg: dict[str, Any],
+    accepted_vertical_enabled: bool,
+) -> str:
+    configured = str(visual_cfg.get("primary_backend", "") or "").strip()
+    if configured:
+        return configured
+    if accepted_vertical_enabled:
+        return "accepted_vertical_v2"
+    return "trajectory_preview"
+
+
+def _visualization_summary_status(
+    *,
+    primary_backend: str,
+    route_status: str,
+    accepted_vertical: dict[str, Any],
+) -> str:
+    if primary_backend == "accepted_vertical_v2":
+        if not bool(accepted_vertical.get("enabled", False)):
+            return "blocked"
+        status = str(accepted_vertical.get("status", "") or "").strip()
+        return status or "blocked"
+    return route_status
 
 
 def _accepted_vertical_v2_config(config: dict[str, Any], visual_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -4866,6 +4911,8 @@ def _wandb_log_visualization(
         _wandb_save(run, video_path)
     payload = {
         f"{key_prefix}/status": visualization.get("status", ""),
+        f"{key_prefix}/primary_backend": visualization.get("primary_backend", ""),
+        f"{key_prefix}/route_status": visualization.get("route_visualization_status", ""),
         f"{key_prefix}/summary_json": visualization.get("summary_json", ""),
         f"{key_prefix}/sample_count": visualization.get("sample_count", 0),
         f"{key_prefix}/trajectory_row_count": visualization.get("trajectory_row_count", 0),
