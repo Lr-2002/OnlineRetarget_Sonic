@@ -13,6 +13,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import random
 import re
 import subprocess
 import time
@@ -842,18 +843,25 @@ def _temporal_feed_config(
     pin_requested = bool(feed_cfg.get("pin_materialized_tensors", False))
     preload_active = preload_requested and device_type == "cuda"
     pin_active = pin_requested and device_type == "cuda" and not preload_active
+    prebatch_requested = bool(feed_cfg.get("prebatch_in_memory", False))
+    prebatch_active = prebatch_requested and preload_active
     report = {
         "non_blocking": non_blocking,
         "preload_tensors": preload_active,
         "preload_tensors_requested": preload_requested,
         "pin_materialized_tensors": pin_active,
         "pin_materialized_tensors_requested": pin_requested,
+        "prebatch_in_memory": prebatch_active,
+        "prebatch_in_memory_requested": prebatch_requested,
     }
     if preload_requested and not preload_active:
         report["preload_tensors_skip_reason"] = f"device_type={device_type}"
     if pin_requested and not pin_active:
         reason = "preload_tensors_enabled" if preload_active else f"device_type={device_type}"
         report["pin_materialized_tensors_skip_reason"] = reason
+    if prebatch_requested and not prebatch_active:
+        reason = "preload_tensors_disabled" if not preload_active else f"device_type={device_type}"
+        report["prebatch_in_memory_skip_reason"] = reason
     return report
 
 
@@ -1907,6 +1915,10 @@ def _train_temporal_diffusion_jsonl(
         runtime=runtime,
         dataset_length=len(dataset),
     )
+    prebatched_epoch_enabled = bool(feed.get("prebatch_in_memory", False))
+    data_loader["prebatched_in_memory"] = prebatched_epoch_enabled
+    if prebatched_epoch_enabled:
+        data_loader["prebatched_epoch_seed"] = seed
     if rank == 0:
         print(f"batch_to_device={json.dumps(feed, sort_keys=True)}", flush=True)
         print(f"data_loader={json.dumps(data_loader, sort_keys=True)}", flush=True)
@@ -1915,14 +1927,25 @@ def _train_temporal_diffusion_jsonl(
         print(f"ddp={json.dumps(ddp_report, sort_keys=True)}", flush=True)
         if resume_position["resumed"]:
             print(f"resume_position={json.dumps(resume_position, sort_keys=True)}", flush=True)
-    loader = torch.utils.data.DataLoader(dataset, **loader_kwargs)
     step = int(resume_position["step"])
     epoch = int(resume_position["epoch"])
     first_train_step = step + 1
     while step < steps:
         if sampler is not None:
             sampler.set_epoch(epoch)
-        loader_iter = iter(loader)
+        if prebatched_epoch_enabled:
+            loader_iter = iter(
+                _temporal_prebatched_epoch(
+                    tensors,
+                    batch_size=int(loader_kwargs["batch_size"]),
+                    seed=seed,
+                    epoch=epoch,
+                    shuffle=bool(data_loader.get("shuffle", False)),
+                    drop_last=bool(data_loader.get("drop_last", False)),
+                )
+            )
+        else:
+            loader_iter = iter(torch.utils.data.DataLoader(dataset, **loader_kwargs))
         while True:
             fetch_started_at = time.perf_counter()
             try:
@@ -2998,6 +3021,33 @@ def _module_tensor_report(model) -> dict[str, Any]:
 
 def _temporal_training_dataset_tensors(tensors: dict[str, Any]) -> tuple[Any, ...]:
     return tuple(tensors[key] for key in TEMPORAL_BATCH_KEYS)
+
+
+def _temporal_prebatched_epoch(
+    tensors: dict[str, Any],
+    *,
+    batch_size: int,
+    seed: int,
+    epoch: int,
+    shuffle: bool,
+    drop_last: bool,
+):
+    dataset = _temporal_training_dataset_tensors(tensors)
+    if not dataset:
+        return
+    logical_batch_count = int(dataset[0].shape[0])
+    if logical_batch_count <= 0:
+        return
+    effective_batch_size = min(max(1, int(batch_size)), logical_batch_count)
+    indices = list(range(logical_batch_count))
+    if shuffle and logical_batch_count > 1:
+        random.Random(int(seed) + int(epoch)).shuffle(indices)
+    for start in range(0, logical_batch_count, effective_batch_size):
+        end = min(start + effective_batch_size, logical_batch_count)
+        if drop_last and end - start < effective_batch_size:
+            break
+        batch_indices = indices[start:end]
+        yield tuple(value[batch_indices] for value in dataset)
 
 
 def _filter_finite_supervised_tensors(

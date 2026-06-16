@@ -1006,6 +1006,38 @@ class TrainEntryTests(unittest.TestCase):
         for tensor in batch:
             self.assertEqual(tensor.to_calls, [{"device": "cuda:0", "non_blocking": False}])
 
+    def test_temporal_feed_config_enables_prebatch_only_with_preload(self):
+        feed = train_entry._temporal_feed_config(
+            {
+                "train": {
+                    "batch_to_device": {
+                        "preload_tensors": True,
+                        "prebatch_in_memory": True,
+                    }
+                }
+            },
+            {"device_type": "cuda"},
+        )
+
+        self.assertTrue(feed["preload_tensors"])
+        self.assertTrue(feed["prebatch_in_memory"])
+        self.assertTrue(feed["prebatch_in_memory_requested"])
+
+    def test_temporal_feed_config_skips_prebatch_without_preload(self):
+        feed = train_entry._temporal_feed_config(
+            {
+                "train": {
+                    "batch_to_device": {
+                        "prebatch_in_memory": True,
+                    }
+                }
+            },
+            {"device_type": "cuda"},
+        )
+
+        self.assertFalse(feed["prebatch_in_memory"])
+        self.assertEqual(feed["prebatch_in_memory_skip_reason"], "preload_tensors_disabled")
+
     def test_train_dataloader_kwargs_exposes_worker_and_prefetch_knobs(self):
         kwargs, report = train_entry._train_dataloader_kwargs(
             {
@@ -1265,6 +1297,25 @@ class TrainEntryTests(unittest.TestCase):
             first_condition["source_body_tokens"].to_calls,
             [{"device": "cuda:0", "non_blocking": True}],
         )
+
+    def test_temporal_prebatched_epoch_shuffles_and_batches_in_memory(self):
+        tensors = {key: _FakeSliceTensor(key, 8) for key in train_entry.TEMPORAL_BATCH_KEYS}
+
+        batches = list(
+            train_entry._temporal_prebatched_epoch(
+                tensors,
+                batch_size=3,
+                seed=11,
+                epoch=2,
+                shuffle=True,
+                drop_last=False,
+            )
+        )
+
+        self.assertEqual(len(batches), 3)
+        self.assertTrue(all(isinstance(batch, tuple) for batch in batches))
+        self.assertEqual(batches[0][0].shape[0], 3)
+        self.assertEqual(len(tensors["source_body_tokens"].slices), 3)
 
     def test_temporal_pre_cuda_diagnostics_print_before_model_device_transfer(self):
         stream = io.StringIO()
@@ -1717,6 +1768,12 @@ class _FakeSliceTensor(_FakeDeviceTensor):
         self.slices = []
 
     def __getitem__(self, item):
+        if isinstance(item, list):
+            self.slices.append(list(item))
+            return _FakeSliceTensor(
+                f"{self.name}[{','.join(str(index) for index in item)}]",
+                len(item),
+            )
         if not isinstance(item, slice):
             raise AssertionError(f"expected slice, got {item!r}")
         start, stop, step = item.indices(self.shape[0])
