@@ -711,6 +711,21 @@ class TrainEntryTests(unittest.TestCase):
         self.assertTrue(visual_cfg["skip_source_bvh_resolve"])
         self.assertEqual(visual_cfg["output_dir"], "accepted_vertical_v2")
 
+    def test_route_b_debug_config_checkpoint_cadence_is_5000_steps(self):
+        config_path = Path("configs/bones_sonic_diffusion_policy_debug.yaml")
+        config_text = config_path.read_text(encoding="utf-8")
+        self.assertIn("checkpoint_every_steps: 5000", config_text)
+        self.assertNotIn("checkpoint_every_steps: 100\n", config_text)
+        if train_entry.yaml is None:
+            return
+
+        config = train_entry._load_config(config_path)
+        checkpointing = train_entry._checkpointing_config(config)
+
+        self.assertEqual(config["train"]["checkpoint_every_steps"], 5000)
+        self.assertEqual(checkpointing["every_steps"], 5000)
+        self.assertTrue(checkpointing["enabled"])
+
     def test_quality_gate_blocks_formal_training_without_policy(self):
         context = train_entry._quality_gate_context(
             {},
