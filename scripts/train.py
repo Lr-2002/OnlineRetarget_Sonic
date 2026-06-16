@@ -3609,16 +3609,15 @@ def _write_visualization_artifacts(
 
 
 def _accepted_vertical_v2_config(config: dict[str, Any], visual_cfg: dict[str, Any]) -> dict[str, Any]:
-    """Merge accepted_vertical_v2 settings from the training and visual config surfaces."""
+    """Return the explicit train-closeout accepted_vertical_v2 config.
 
-    merged: dict[str, Any] = {}
-    top_level = config.get("visual_validation", {})
-    if isinstance(top_level, dict):
-        merged.update(top_level)
-    nested = visual_cfg.get("accepted_vertical_v2", visual_cfg.get("visual_validation", {}))
-    if isinstance(nested, dict):
-        merged.update(nested)
-    return merged
+    Top-level visual_validation remains the bridge CLI/config surface, but it is
+    not an opt-in gate for train/predict closeout. The closeout bridge must be
+    enabled under visualization.accepted_vertical_v2.enabled.
+    """
+
+    nested = visual_cfg.get("accepted_vertical_v2", {})
+    return dict(nested) if isinstance(nested, dict) else {}
 
 
 def _write_accepted_vertical_v2_artifacts(
@@ -3694,23 +3693,24 @@ def _write_accepted_vertical_v2_artifacts(
                     "error": str(exc),
                 }
             )
-    if errors and clips:
-        status = "partial"
-    elif errors:
-        status = "failed"
-    elif clips:
-        status = "ok"
-    else:
-        status = "empty"
+    export_status = _accepted_vertical_v2_export_status(clips=clips, errors=errors)
+    status = _accepted_vertical_v2_summary_status(
+        clips=clips,
+        errors=errors,
+        requested_clip_count=len(rows),
+        execute_renderers=execute_renderers,
+    )
     accepted_count = sum(1 for clip in clips if bool(clip.get("acceptance_ok", False)))
     payload = {
         "enabled": True,
         "artifact_version": "lr310_dp_accepted_vertical_v2_train_bridge_v1",
         "status": status,
+        "export_status": export_status,
         "predictions_jsonl": str(predictions_jsonl),
         "output_dir": str(output_dir),
         "summary_json": str(summary_path),
         "count": count,
+        "requested_clip_count": len(rows),
         "step": step,
         "checkpoint": str(checkpoint or ""),
         "checkpoint_step": checkpoint_step,
@@ -3731,6 +3731,41 @@ def _write_accepted_vertical_v2_artifacts(
         )
     summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return payload
+
+
+def _accepted_vertical_v2_export_status(
+    *,
+    clips: list[dict[str, Any]],
+    errors: list[dict[str, Any]],
+) -> str:
+    if clips and errors:
+        return "partial"
+    if errors:
+        return "failed"
+    if clips:
+        return "ok"
+    return "empty"
+
+
+def _accepted_vertical_v2_summary_status(
+    *,
+    clips: list[dict[str, Any]],
+    errors: list[dict[str, Any]],
+    requested_clip_count: int,
+    execute_renderers: bool,
+) -> str:
+    if requested_clip_count <= 0:
+        return "empty"
+    accepted_count = sum(1 for clip in clips if bool(clip.get("acceptance_ok", False)))
+    if accepted_count == requested_clip_count and not errors:
+        return "ok"
+    if accepted_count > 0:
+        return "partial"
+    if clips and not execute_renderers:
+        return "blocked"
+    if clips or errors:
+        return "failed"
+    return "empty"
 
 
 def _visual_validation_path_list(value: Any) -> list[Path]:

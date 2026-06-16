@@ -511,7 +511,7 @@ class TrainEntryTests(unittest.TestCase):
             "Route B predicted G1 FK capsules",
         })
 
-    def test_visualization_artifacts_export_accepted_vertical_v2_bridge_assets(self):
+    def test_visualization_artifacts_export_accepted_vertical_v2_bridge_assets_without_accepting(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             target_npz = root / "target.npz"
@@ -573,9 +573,13 @@ class TrainEntryTests(unittest.TestCase):
             target_motion_exists = Path(clip["target_motion_npz"]).exists()
             prediction_motion_exists = Path(clip["prediction_motion_npz"]).exists()
 
-        self.assertEqual(accepted["status"], "ok")
+        self.assertEqual(accepted["status"], "blocked")
+        self.assertEqual(accepted["export_status"], "ok")
         self.assertEqual(accepted["clip_count"], 1)
         self.assertEqual(accepted["error_count"], 0)
+        self.assertEqual(accepted["accepted_vertical_v2_ok_count"], 0)
+        self.assertFalse(clip["acceptance_ok"])
+        self.assertEqual(clip["accepted_vertical_v2_status"], "failed")
         self.assertTrue(target_motion_exists)
         self.assertTrue(prediction_motion_exists)
         self.assertEqual(metadata["accepted_visual_contract"]["panels"][2]["checkpoint_step"], 17)
@@ -583,7 +587,7 @@ class TrainEntryTests(unittest.TestCase):
         self.assertTrue(metadata["lr310_dp_prediction_bridge"]["source_bvh_resolution_skipped"])
         self.assertEqual(accepted_summary["visualization_core"], "scripts.rerender_lr310_dp_visual_validation.rerender_prediction_row")
 
-    def test_visualization_artifacts_report_accepted_vertical_v2_blocker_without_crashing(self):
+    def test_visualization_artifacts_report_accepted_vertical_v2_export_failure_without_crashing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             predictions = root / "train_predictions.jsonl"
@@ -602,11 +606,13 @@ class TrainEntryTests(unittest.TestCase):
 
             result = train_entry._write_visualization_artifacts(
                 config={
-                    "visualization": {"enabled": True},
-                    "visual_validation": {
+                    "visualization": {
                         "enabled": True,
-                        "continue_on_error": True,
-                        "execute_renderers": False,
+                        "accepted_vertical_v2": {
+                            "enabled": True,
+                            "continue_on_error": True,
+                            "execute_renderers": False,
+                        },
                     },
                 },
                 predictions_jsonl=predictions,
@@ -617,9 +623,81 @@ class TrainEntryTests(unittest.TestCase):
 
         accepted = result["accepted_vertical_v2"]
         self.assertEqual(accepted["status"], "failed")
+        self.assertEqual(accepted["export_status"], "failed")
         self.assertEqual(accepted["clip_count"], 0)
         self.assertEqual(accepted["error_count"], 1)
         self.assertIn("target_g1_path does not exist", accepted["errors"][0]["error"])
+
+    def test_accepted_vertical_v2_status_helper_uses_clip_acceptance(self):
+        accepted_clip = {"acceptance_ok": True}
+        rejected_clip = {"acceptance_ok": False}
+
+        self.assertEqual(
+            train_entry._accepted_vertical_v2_summary_status(
+                clips=[accepted_clip],
+                errors=[],
+                requested_clip_count=1,
+                execute_renderers=True,
+            ),
+            "ok",
+        )
+        self.assertEqual(
+            train_entry._accepted_vertical_v2_summary_status(
+                clips=[accepted_clip, rejected_clip],
+                errors=[],
+                requested_clip_count=2,
+                execute_renderers=True,
+            ),
+            "partial",
+        )
+        self.assertEqual(
+            train_entry._accepted_vertical_v2_summary_status(
+                clips=[rejected_clip],
+                errors=[],
+                requested_clip_count=1,
+                execute_renderers=True,
+            ),
+            "failed",
+        )
+        self.assertEqual(
+            train_entry._accepted_vertical_v2_summary_status(
+                clips=[rejected_clip],
+                errors=[],
+                requested_clip_count=1,
+                execute_renderers=False,
+            ),
+            "blocked",
+        )
+
+    def test_top_level_visual_validation_does_not_opt_in_train_closeout_bridge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            predictions = root / "train_predictions.jsonl"
+            predictions.write_text(
+                json.dumps(
+                    {
+                        "sample_id": "s1",
+                        "target_g1_path": str(root / "missing.npz"),
+                        "predicted_joints": [[0.25, 1.25]],
+                        "target_joints": [[0.0, 1.0]],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = train_entry._write_visualization_artifacts(
+                config={
+                    "visualization": {"enabled": True},
+                    "visual_validation": {"enabled": True},
+                },
+                predictions_jsonl=predictions,
+                output_dir=root / "train",
+                eval_result=None,
+                run_name="train_visualization",
+            )
+
+        self.assertEqual(result["accepted_vertical_v2"], {"enabled": False})
 
     def test_route_b_debug_config_enables_accepted_vertical_v2_export(self):
         if train_entry.yaml is None:
