@@ -1433,6 +1433,8 @@ def _train_jsonl(
         output_dir=output_dir,
         eval_result=eval_result,
         run_name="train_visualization",
+        checkpoint=checkpoint,
+        checkpoint_step=steps,
     )
     report = _build_train_report(
         samples_jsonl=samples_jsonl,
@@ -2185,6 +2187,8 @@ def _train_temporal_diffusion_jsonl(
         output_dir=output_dir,
         eval_result=eval_result,
         run_name="train_visualization",
+        checkpoint=checkpoint,
+        checkpoint_step=steps,
     )
     report = _build_train_report(
         samples_jsonl=samples_jsonl,
@@ -3302,6 +3306,8 @@ def _predict_jsonl(
         output_dir=output_dir,
         eval_result=eval_result,
         run_name="predict_visualization",
+        checkpoint=checkpoint,
+        checkpoint_step=_checkpoint_step_from_payload(payload),
     )
     report = {
         "mode": "predict_only",
@@ -3416,6 +3422,8 @@ def _predict_temporal_diffusion_jsonl(
         output_dir=output_dir,
         eval_result=eval_result,
         run_name="predict_visualization",
+        checkpoint=checkpoint,
+        checkpoint_step=_checkpoint_step_from_payload(payload),
     )
     report = {
         "mode": "predict_only",
@@ -3525,9 +3533,16 @@ def _write_visualization_artifacts(
     output_dir: Path,
     eval_result: Any,
     run_name: str,
+    checkpoint: Path | None = None,
+    checkpoint_step: int | None = None,
 ) -> dict[str, Any]:
     visual_cfg = config.get("visualization", {})
-    if not isinstance(visual_cfg, dict) or not bool(visual_cfg.get("enabled", False)):
+    if not isinstance(visual_cfg, dict):
+        visual_cfg = {}
+    accepted_vertical_cfg = _accepted_vertical_v2_config(config, visual_cfg)
+    route_enabled = bool(visual_cfg.get("enabled", False))
+    accepted_vertical_enabled = bool(accepted_vertical_cfg.get("enabled", False))
+    if not route_enabled and not accepted_vertical_enabled:
         return {"enabled": False}
     artifact_name = str(visual_cfg.get("artifact_name") or visual_cfg.get("run_name") or run_name)
     configured_output = str(visual_cfg.get("output_dir", "") or "")
@@ -3542,16 +3557,28 @@ def _write_visualization_artifacts(
     max_joints = max(1, int(visual_cfg.get("max_joints", 8)))
     samples = _read_prediction_samples(predictions_jsonl, limit=num_samples)
     trajectory_csv = artifact_dir / "trajectory_preview.csv"
-    rows = _visualization_rows(samples, max_joints=max_joints)
-    _write_visualization_csv(trajectory_csv, rows)
     svg_path = artifact_dir / "trajectory_preview.svg"
-    _write_visualization_svg(svg_path, rows)
     html_path = artifact_dir / "trajectory_preview.html"
-    _write_visualization_html(html_path, rows, svg_path=svg_path)
-    capsule = _write_capsule_visualization_artifacts(
-        visual_cfg=visual_cfg,
-        samples=samples,
+    if route_enabled:
+        rows = _visualization_rows(samples, max_joints=max_joints)
+        _write_visualization_csv(trajectory_csv, rows)
+        _write_visualization_svg(svg_path, rows)
+        _write_visualization_html(html_path, rows, svg_path=svg_path)
+        capsule = _write_capsule_visualization_artifacts(
+            visual_cfg=visual_cfg,
+            samples=samples,
+            artifact_dir=artifact_dir,
+        )
+    else:
+        rows = []
+        capsule = {"enabled": False}
+    accepted_vertical = _write_accepted_vertical_v2_artifacts(
+        config=config,
+        visual_cfg=accepted_vertical_cfg,
+        predictions_jsonl=predictions_jsonl,
         artifact_dir=artifact_dir,
+        checkpoint=checkpoint,
+        checkpoint_step=checkpoint_step,
     )
     summary_path = artifact_dir / "visual_manifest.json"
     eval_payload = eval_result.to_dict() if eval_result is not None else {}
@@ -3566,6 +3593,7 @@ def _write_visualization_artifacts(
         "trajectory_svg": str(svg_path),
         "trajectory_html": str(html_path),
         "capsule_visualization": capsule,
+        "accepted_vertical_v2": accepted_vertical,
         "summary_json": str(summary_path),
         "sample_count": len(samples),
         "trajectory_row_count": len(rows),
@@ -3578,6 +3606,193 @@ def _write_visualization_artifacts(
     }
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return summary
+
+
+def _accepted_vertical_v2_config(config: dict[str, Any], visual_cfg: dict[str, Any]) -> dict[str, Any]:
+    """Return the explicit train-closeout accepted_vertical_v2 config.
+
+    Top-level visual_validation remains the bridge CLI/config surface, but it is
+    not an opt-in gate for train/predict closeout. The closeout bridge must be
+    enabled under visualization.accepted_vertical_v2.enabled.
+    """
+
+    nested = visual_cfg.get("accepted_vertical_v2", {})
+    return dict(nested) if isinstance(nested, dict) else {}
+
+
+def _write_accepted_vertical_v2_artifacts(
+    *,
+    config: dict[str, Any],
+    visual_cfg: dict[str, Any],
+    predictions_jsonl: Path,
+    artifact_dir: Path,
+    checkpoint: Path | None,
+    checkpoint_step: int | None,
+) -> dict[str, Any]:
+    if not bool(visual_cfg.get("enabled", False)):
+        return {"enabled": False}
+    output_name = str(
+        visual_cfg.get("output_dir")
+        or visual_cfg.get("artifact_name")
+        or "accepted_vertical_v2"
+    )
+    output_dir = Path(output_name).expanduser()
+    if not output_dir.is_absolute():
+        output_dir = artifact_dir / output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = output_dir / "lr310_dp_visual_validation_summary.json"
+    count_value = visual_cfg.get("count", visual_cfg.get("num_samples", visual_cfg.get("max_samples", 1)))
+    count = max(1, int(count_value))
+    execute_renderers = bool(visual_cfg.get("execute_renderers", False))
+    skip_source_bvh_resolve = bool(visual_cfg.get("skip_source_bvh_resolve", not execute_renderers))
+    continue_on_error = bool(visual_cfg.get("continue_on_error", True))
+    root_source = str(visual_cfg.get("root_source", "auto"))
+    root_body_index = int(visual_cfg.get("root_body_index", 0))
+    root_body_name = str(visual_cfg.get("root_body_name", "pelvis"))
+    root_quat_format = str(visual_cfg.get("root_quat_format", "wxyz"))
+    allow_root_fixed_fallback = bool(visual_cfg.get("allow_root_fixed_fallback", False))
+    step = int(0 if checkpoint_step is None else checkpoint_step)
+    target_g1_roots = _visual_validation_path_list(
+        visual_cfg.get("target_g1_roots", visual_cfg.get("target_g1_root", []))
+    )
+    bridge_config = dict(config)
+    bridge_config["visual_validation"] = dict(visual_cfg)
+    bridge = _load_lr310_dp_visual_bridge()
+    rows = bridge.read_prediction_rows(predictions_jsonl, count=count)
+    clips: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        try:
+            clips.append(
+                bridge.rerender_prediction_row(
+                    row=row,
+                    index=index,
+                    predictions_jsonl=predictions_jsonl,
+                    output_dir=output_dir,
+                    config=bridge_config,
+                    target_g1_roots=target_g1_roots,
+                    step=step,
+                    execute_renderers=execute_renderers,
+                    root_source=root_source,
+                    root_body_index=root_body_index,
+                    root_body_name=root_body_name,
+                    root_quat_format=root_quat_format,
+                    allow_root_fixed_fallback=allow_root_fixed_fallback,
+                    checkpoint_path=checkpoint,
+                    checkpoint_step=checkpoint_step,
+                    skip_source_bvh_resolve=skip_source_bvh_resolve,
+                )
+            )
+        except Exception as exc:
+            if not continue_on_error:
+                raise
+            errors.append(
+                {
+                    "index": int(index),
+                    "sample_id": str(row.get("sample_id") or row.get("sequence_id") or ""),
+                    "error": str(exc),
+                }
+            )
+    export_status = _accepted_vertical_v2_export_status(clips=clips, errors=errors)
+    status = _accepted_vertical_v2_summary_status(
+        clips=clips,
+        errors=errors,
+        requested_clip_count=len(rows),
+        execute_renderers=execute_renderers,
+    )
+    accepted_count = sum(1 for clip in clips if bool(clip.get("acceptance_ok", False)))
+    payload = {
+        "enabled": True,
+        "artifact_version": "lr310_dp_accepted_vertical_v2_train_bridge_v1",
+        "status": status,
+        "export_status": export_status,
+        "predictions_jsonl": str(predictions_jsonl),
+        "output_dir": str(output_dir),
+        "summary_json": str(summary_path),
+        "count": count,
+        "requested_clip_count": len(rows),
+        "step": step,
+        "checkpoint": str(checkpoint or ""),
+        "checkpoint_step": checkpoint_step,
+        "execute_renderers": execute_renderers,
+        "skip_source_bvh_resolve": skip_source_bvh_resolve,
+        "continue_on_error": continue_on_error,
+        "target_g1_roots": [str(path) for path in target_g1_roots],
+        "visualization_core": "scripts.rerender_lr310_dp_visual_validation.rerender_prediction_row",
+        "accepted_vertical_v2_ok_count": accepted_count,
+        "clip_count": len(clips),
+        "error_count": len(errors),
+        "clips": clips,
+        "errors": errors,
+    }
+    if not execute_renderers:
+        payload["renderer_status"] = (
+            "not_executed; accepted_vertical_v2 NPZ assets, commands, and metadata were exported only"
+        )
+    summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return payload
+
+
+def _accepted_vertical_v2_export_status(
+    *,
+    clips: list[dict[str, Any]],
+    errors: list[dict[str, Any]],
+) -> str:
+    if clips and errors:
+        return "partial"
+    if errors:
+        return "failed"
+    if clips:
+        return "ok"
+    return "empty"
+
+
+def _accepted_vertical_v2_summary_status(
+    *,
+    clips: list[dict[str, Any]],
+    errors: list[dict[str, Any]],
+    requested_clip_count: int,
+    execute_renderers: bool,
+) -> str:
+    if requested_clip_count <= 0:
+        return "empty"
+    accepted_count = sum(1 for clip in clips if bool(clip.get("acceptance_ok", False)))
+    if accepted_count == requested_clip_count and not errors:
+        return "ok"
+    if accepted_count > 0:
+        return "partial"
+    if clips and not execute_renderers:
+        return "blocked"
+    if clips or errors:
+        return "failed"
+    return "empty"
+
+
+def _visual_validation_path_list(value: Any) -> list[Path]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, (str, os.PathLike)):
+        values = [value]
+    elif isinstance(value, (list, tuple)):
+        values = value
+    else:
+        values = [value]
+    return [Path(str(item)).expanduser() for item in values if str(item)]
+
+
+def _checkpoint_step_from_payload(payload: Any) -> int | None:
+    if not isinstance(payload, dict) or "step" not in payload:
+        return None
+    try:
+        return int(payload["step"])
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_lr310_dp_visual_bridge():
+    from scripts import rerender_lr310_dp_visual_validation
+
+    return rerender_lr310_dp_visual_validation
 
 
 def _read_prediction_samples(path: Path, *, limit: int) -> list[dict[str, Any]]:

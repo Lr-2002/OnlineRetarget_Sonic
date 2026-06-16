@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+import numpy as np
+
 import scripts.train as train_entry
 
 
@@ -508,6 +510,206 @@ class TrainEntryTests(unittest.TestCase):
             "Route B target G1 FK capsules",
             "Route B predicted G1 FK capsules",
         })
+
+    def test_visualization_artifacts_export_accepted_vertical_v2_bridge_assets_without_accepting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target_npz = root / "target.npz"
+            np.savez(
+                target_npz,
+                joint_pos=np.asarray([[0.0, 1.0], [2.0, 3.0], [4.0, 5.0]], dtype=np.float32),
+                root_pos=np.asarray(
+                    [[0.0, 0.0, 0.7], [0.1, 0.0, 0.7], [0.2, 0.0, 0.7]],
+                    dtype=np.float32,
+                ),
+                root_quat=np.asarray([[1.0, 0.0, 0.0, 0.0]] * 3, dtype=np.float32),
+                fps=np.asarray([50.0], dtype=np.float32),
+            )
+            predictions = root / "train_predictions.jsonl"
+            predictions.write_text(
+                json.dumps(
+                    {
+                        "sample_id": "walk/probe",
+                        "source_motion_path": "soma_proportional/bvh/clip.bvh",
+                        "target_g1_path": str(target_npz),
+                        "target_frame_indices": [0, 2],
+                        "target_joint_names": ["hip", "knee"],
+                        "predicted_joints": [[0.25, 1.25], [4.25, 5.25]],
+                        "target_joints": [[0.0, 1.0], [4.0, 5.0]],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = train_entry._write_visualization_artifacts(
+                config={
+                    "visualization": {
+                        "enabled": True,
+                        "artifact_name": "route_b_probe",
+                        "num_samples": 1,
+                        "max_joints": 2,
+                        "accepted_vertical_v2": {
+                            "enabled": True,
+                            "num_samples": 1,
+                            "execute_renderers": False,
+                            "skip_source_bvh_resolve": True,
+                            "root_source": "target_npz_root",
+                        },
+                    }
+                },
+                predictions_jsonl=predictions,
+                output_dir=root / "train",
+                eval_result=None,
+                run_name="train_visualization",
+                checkpoint=root / "train" / "checkpoint.pt",
+                checkpoint_step=17,
+            )
+
+            accepted = result["accepted_vertical_v2"]
+            accepted_summary = json.loads(Path(accepted["summary_json"]).read_text(encoding="utf-8"))
+            clip = accepted_summary["clips"][0]
+            metadata = json.loads(Path(clip["metadata"]).read_text(encoding="utf-8"))
+            target_motion_exists = Path(clip["target_motion_npz"]).exists()
+            prediction_motion_exists = Path(clip["prediction_motion_npz"]).exists()
+
+        self.assertEqual(accepted["status"], "blocked")
+        self.assertEqual(accepted["export_status"], "ok")
+        self.assertEqual(accepted["clip_count"], 1)
+        self.assertEqual(accepted["error_count"], 0)
+        self.assertEqual(accepted["accepted_vertical_v2_ok_count"], 0)
+        self.assertFalse(clip["acceptance_ok"])
+        self.assertEqual(clip["accepted_vertical_v2_status"], "failed")
+        self.assertTrue(target_motion_exists)
+        self.assertTrue(prediction_motion_exists)
+        self.assertEqual(metadata["accepted_visual_contract"]["panels"][2]["checkpoint_step"], 17)
+        self.assertEqual(metadata["inference_render"]["checkpoint_step"], 17)
+        self.assertTrue(metadata["lr310_dp_prediction_bridge"]["source_bvh_resolution_skipped"])
+        self.assertEqual(accepted_summary["visualization_core"], "scripts.rerender_lr310_dp_visual_validation.rerender_prediction_row")
+
+    def test_visualization_artifacts_report_accepted_vertical_v2_export_failure_without_crashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            predictions = root / "train_predictions.jsonl"
+            predictions.write_text(
+                json.dumps(
+                    {
+                        "sample_id": "missing-target",
+                        "target_g1_path": str(root / "missing.npz"),
+                        "predicted_joints": [[0.25, 1.25]],
+                        "target_joints": [[0.0, 1.0]],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = train_entry._write_visualization_artifacts(
+                config={
+                    "visualization": {
+                        "enabled": True,
+                        "accepted_vertical_v2": {
+                            "enabled": True,
+                            "continue_on_error": True,
+                            "execute_renderers": False,
+                        },
+                    },
+                },
+                predictions_jsonl=predictions,
+                output_dir=root / "train",
+                eval_result=None,
+                run_name="train_visualization",
+            )
+
+        accepted = result["accepted_vertical_v2"]
+        self.assertEqual(accepted["status"], "failed")
+        self.assertEqual(accepted["export_status"], "failed")
+        self.assertEqual(accepted["clip_count"], 0)
+        self.assertEqual(accepted["error_count"], 1)
+        self.assertIn("target_g1_path does not exist", accepted["errors"][0]["error"])
+
+    def test_accepted_vertical_v2_status_helper_uses_clip_acceptance(self):
+        accepted_clip = {"acceptance_ok": True}
+        rejected_clip = {"acceptance_ok": False}
+
+        self.assertEqual(
+            train_entry._accepted_vertical_v2_summary_status(
+                clips=[accepted_clip],
+                errors=[],
+                requested_clip_count=1,
+                execute_renderers=True,
+            ),
+            "ok",
+        )
+        self.assertEqual(
+            train_entry._accepted_vertical_v2_summary_status(
+                clips=[accepted_clip, rejected_clip],
+                errors=[],
+                requested_clip_count=2,
+                execute_renderers=True,
+            ),
+            "partial",
+        )
+        self.assertEqual(
+            train_entry._accepted_vertical_v2_summary_status(
+                clips=[rejected_clip],
+                errors=[],
+                requested_clip_count=1,
+                execute_renderers=True,
+            ),
+            "failed",
+        )
+        self.assertEqual(
+            train_entry._accepted_vertical_v2_summary_status(
+                clips=[rejected_clip],
+                errors=[],
+                requested_clip_count=1,
+                execute_renderers=False,
+            ),
+            "blocked",
+        )
+
+    def test_top_level_visual_validation_does_not_opt_in_train_closeout_bridge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            predictions = root / "train_predictions.jsonl"
+            predictions.write_text(
+                json.dumps(
+                    {
+                        "sample_id": "s1",
+                        "target_g1_path": str(root / "missing.npz"),
+                        "predicted_joints": [[0.25, 1.25]],
+                        "target_joints": [[0.0, 1.0]],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = train_entry._write_visualization_artifacts(
+                config={
+                    "visualization": {"enabled": True},
+                    "visual_validation": {"enabled": True},
+                },
+                predictions_jsonl=predictions,
+                output_dir=root / "train",
+                eval_result=None,
+                run_name="train_visualization",
+            )
+
+        self.assertEqual(result["accepted_vertical_v2"], {"enabled": False})
+
+    def test_route_b_debug_config_enables_accepted_vertical_v2_export(self):
+        if train_entry.yaml is None:
+            self.skipTest("PyYAML is not installed in this Python environment")
+        config = train_entry._load_config(Path("configs/bones_sonic_diffusion_policy_debug.yaml"))
+
+        visual_cfg = config["visualization"]["accepted_vertical_v2"]
+
+        self.assertTrue(visual_cfg["enabled"])
+        self.assertFalse(visual_cfg["execute_renderers"])
+        self.assertTrue(visual_cfg["skip_source_bvh_resolve"])
+        self.assertEqual(visual_cfg["output_dir"], "accepted_vertical_v2")
 
     def test_quality_gate_blocks_formal_training_without_policy(self):
         context = train_entry._quality_gate_context(

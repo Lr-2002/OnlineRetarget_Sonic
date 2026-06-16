@@ -214,3 +214,11 @@ visualization:
     width: 640
     height: 360
     fps: 50.0
+  accepted_vertical_v2:
+    enabled: true
+    output_dir: accepted_vertical_v2
+    num_samples: 2
+    execute_renderers: false
+    skip_source_bvh_resolve: true
+    continue_on_error: true
+    root_source: auto
