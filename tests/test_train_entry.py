@@ -872,6 +872,69 @@ class TrainEntryTests(unittest.TestCase):
         self.assertFalse(train_entry._should_run_periodic_eval(5001, periodic_eval))
         self.assertTrue(train_entry._should_run_periodic_eval(10000, periodic_eval))
 
+    def test_route_b_visual_smoke_config_enables_single_clip_accepted_vertical_v2_export(self):
+        config_path = Path("configs/bones_sonic_temporal_diffusion_policy_vis_smoke.yaml")
+        config_text = config_path.read_text(encoding="utf-8")
+        self.assertIn("primary_backend: accepted_vertical_v2", config_text)
+        self.assertIn("artifact_name: route_b_walk_visual_smoke", config_text)
+        self.assertIn("wandb_upload: true", config_text)
+        self.assertIn("num_samples: 1", config_text)
+        self.assertIn("accepted_vertical_v2:\n    enabled: true", config_text)
+        self.assertIn("execute_renderers: true", config_text)
+        self.assertIn("skip_source_bvh_resolve: false", config_text)
+        self.assertIn("continue_on_error: true", config_text)
+        self.assertIn("capsule:\n    enabled: false", config_text)
+        if train_entry.yaml is None:
+            return
+
+        config = train_entry._load_config(config_path)
+        visual_cfg = config["visualization"]
+        accepted_cfg = visual_cfg["accepted_vertical_v2"]
+
+        self.assertEqual(config["experiment"]["name"], "bones_sonic_temporal_diffusion_policy_vis_smoke")
+        self.assertEqual(config["tracking"]["wandb_mode"], "online")
+        self.assertTrue(config["data"]["allow_debug_data"])
+        self.assertEqual(visual_cfg["primary_backend"], "accepted_vertical_v2")
+        self.assertEqual(visual_cfg["artifact_name"], "route_b_walk_visual_smoke")
+        self.assertEqual(visual_cfg["output_dir"], "visualization/route_b_walk_visual_smoke")
+        self.assertEqual(visual_cfg["num_samples"], 1)
+        self.assertTrue(visual_cfg["wandb_upload"])
+        self.assertFalse(visual_cfg["capsule"]["enabled"])
+        self.assertTrue(accepted_cfg["enabled"])
+        self.assertEqual(accepted_cfg["num_samples"], 1)
+        self.assertTrue(accepted_cfg["execute_renderers"])
+        self.assertFalse(accepted_cfg["skip_source_bvh_resolve"])
+        self.assertTrue(accepted_cfg["continue_on_error"])
+
+    def test_route_b_visual_smoke_config_runs_periodic_eval_checkpoint_and_sample_cap_at_20_steps(self):
+        config_path = Path("configs/bones_sonic_temporal_diffusion_policy_vis_smoke.yaml")
+        config_text = config_path.read_text(encoding="utf-8")
+        self.assertIn("max_steps: 20", config_text)
+        self.assertIn("eval_every: 20", config_text)
+        self.assertIn("checkpoint_every_steps: 20", config_text)
+        self.assertIn("every_steps: 20", config_text)
+        self.assertIn("periodic_max_samples: 2", config_text)
+        if train_entry.yaml is None:
+            return
+
+        config = train_entry._load_config(config_path)
+        periodic_eval = train_entry._periodic_eval_config(config)
+        checkpointing = train_entry._checkpointing_config(config)
+
+        self.assertEqual(config["train"]["batch_size"], 8)
+        self.assertEqual(config["train"]["max_steps"], 20)
+        self.assertEqual(config["train"]["eval_every"], 20)
+        self.assertEqual(config["train"]["checkpoint_every_steps"], 20)
+        self.assertEqual(periodic_eval["every_steps"], 20)
+        self.assertEqual(periodic_eval["source_key"], "evaluation.every_steps")
+        self.assertEqual(periodic_eval["max_samples"], 2)
+        self.assertTrue(periodic_eval["enabled"])
+        self.assertEqual(checkpointing["every_steps"], 20)
+        self.assertTrue(checkpointing["enabled"])
+        self.assertFalse(train_entry._should_run_periodic_eval(19, periodic_eval))
+        self.assertTrue(train_entry._should_run_periodic_eval(20, periodic_eval))
+        self.assertFalse(train_entry._should_run_periodic_eval(21, periodic_eval))
+
     def test_run_periodic_eval_if_due_calls_artifact_writer_at_5000_only(self):
         class FakeTensor:
             def __getitem__(self, _item):

@@ -1,0 +1,237 @@
+experiment:
+  name: bones_sonic_temporal_diffusion_policy_vis_smoke
+  project: OnlineRetarget_DP
+  seed: 17
+  output_root: runs
+
+policy_preset: route_b_temporal_diffusion
+policy_presets:
+  flat_diffusion_policy:
+    data:
+      samples_jsonl: runs/supervised/somabvh_walk_train_h8_fh10_stride10_limit128/samples.jsonl
+      target_format: bones_sonic_joint_pos_future_window
+      history_frames: 8
+      target_horizon_frames: 10
+      target_future_step: 1
+      source_body_count: 30
+      source_body_token_dim: 15
+      source_rotation: rot6d
+      action_dim: 29
+      build:
+        split: train
+        source_mode: soma_bvh
+        include_mirrors: false
+        limit: 128
+        clip_limit:
+        history_frames: 8
+        target_frame_offset: 0
+        target_horizon_frames: 10
+        target_future_step: 1
+        source_rotation: rot6d
+        include_source_angular_velocity: true
+        window_stride: 10
+        max_windows_per_clip: 1
+        train_ratio: 1.0
+        val_ratio: 0.0
+        position_scale: 0.01
+    model:
+      family: diffusion_policy
+      hidden_dims: [512, 512, 256]
+      activation: silu
+      dropout: 0.0
+      time_embed_dim: 32
+      diffusion_steps: 32
+      inference_steps: 8
+      inference_start: zeros
+      output: g1_joint_position_future_window
+    loss:
+      diffusion_policy: 1.0
+  route_b_temporal_diffusion:
+    data:
+      samples_jsonl: runs/supervised/somabvh_walk_train_h8_fh10_fs5_stride10_limit128/samples.jsonl
+      target_format: bones_sonic_joint_pos_future_window
+      history_frames: 8
+      target_horizon_frames: 10
+      target_future_step: 5
+      source_body_count: 30
+      source_body_token_dim: 15
+      source_rotation: rot6d
+      action_dim: 29
+      build:
+        split: train
+        source_mode: soma_bvh
+        include_mirrors: false
+        limit: 128
+        clip_limit:
+        history_frames: 8
+        target_frame_offset: 0
+        target_horizon_frames: 10
+        target_future_step: 5
+        source_rotation: rot6d
+        include_source_angular_velocity: true
+        window_stride: 10
+        max_windows_per_clip: 1
+        train_ratio: 1.0
+        val_ratio: 0.0
+        position_scale: 0.01
+    model:
+      family: temporal_diffusion_policy
+      d_model: 128
+      nhead: 4
+      num_layers: 2
+      dim_feedforward: 256
+      dropout: 0.0
+      time_embed_dim: 32
+      diffusion_steps: 32
+      inference_steps: 8
+      inference_start: zeros
+      action_dim: 29
+      source_body_count: 30
+      source_body_token_dim: 15
+      source_skeleton_dim: 120
+      morphology_dim: 13
+      robot_state_dim: 0
+      output_mode: residual_prev_action
+      output: g1_joint_position_future_window
+    loss:
+      temporal_diffusion_policy: 1.0
+      denoise: 1.0
+      x0_reconstruction: 0.25
+      velocity: 0.10
+      acceleration: 0.05
+      jerk: 0.0
+      delta_smoothness: 0.05
+      joint_jump: 0.02
+      joint_jump_velocity: 20.0
+      joint_jump_fps: 50.0
+      joint_limit: 0.0
+
+feature_contract:
+  enabled: true
+  enforce: true
+  name: route_b_temporal_diffusion_smoke_p0
+  condition_sample_keys:
+    - source_body_tokens
+    - source_skeleton
+    - morphology
+    - prev_target_joints
+    - previous_target_joints
+    - prev_g1_joints
+  forbid_condition_sample_keys:
+    - target_joints
+    - future_target_joints
+    - target_frame
+    - target_frame_indices
+    - target_g1_path
+    - actor_uid
+  robot_state_policy: disabled
+  expected:
+    target_horizon_frames: 10
+    source_body_count: 30
+    source_body_token_dim: 15
+    source_skeleton_dim: 120
+    morphology_dim: 13
+    robot_state_dim: 0
+    action_dim: 29
+  required_eval_metrics:
+    - joint_rmse
+    - joint_velocity_rmse
+    - predicted_minus_target_joint_jump_rate
+    - max_joint_abs_error
+
+data:
+  root: /mnt/data_cpfs
+  index_csv: /mnt/data_cpfs/code/wxh/OnlineRetarget/runs/indices/bones_sonic_index_full_v0/sonic_index.csv
+  source_bvh_tar: /mnt/data_oss/online_retarget/lr147_delta_bvh_vis_data_20260525/back_data/soma_proportional.tar
+  sonic_npz_root: /mnt/data_cpfs/bones_sonic
+  sonic_path_prefix_from: /home/user/data/motion_data/bones_sonic
+  sonic_path_prefix_to: /mnt/data_cpfs/bones_sonic
+  allow_debug_data: true
+  source_format: soma_proportional_bvh_fk
+  task: walk
+
+train:
+  batch_size: 8
+  max_steps: 20
+  learning_rate: 0.0003
+  forward_microbatch_size: 8192
+  precision: fp32
+  ddp: false
+  ddp_options:
+    backend: nccl
+    broadcast_buffers: false
+    find_unused_parameters: true
+    static_graph: false
+    gradient_as_bucket_view: false
+    init_sync: false
+  log_every: 5
+  eval_every: 20
+  checkpoint_every_steps: 20
+  keep_last_checkpoints: 2
+  dataloader:
+    num_workers: 0
+    prefetch_factor: 2
+    persistent_workers: false
+    pin_memory: true
+    drop_last: false
+  batch_to_device:
+    non_blocking: true
+    preload_tensors: false
+    pin_materialized_tensors: false
+
+evaluation:
+  every_steps: 20
+  periodic_max_samples: 2
+  metrics:
+    - joint_mae
+    - joint_mse
+    - joint_rmse
+    - max_joint_abs_error
+    - joint_velocity_rmse
+    - action_similarity
+    - predicted_joint_jump_rate
+    - target_joint_jump_rate
+    - predicted_minus_target_joint_jump_rate
+  failure_metric: joint_rmse
+  joint_jump_velocity: 20.0
+  max_failures: 50
+
+tracking:
+  wandb_mode: online
+  auto_offline_eval: true
+
+visualization:
+  enabled: true
+  artifact_name: route_b_walk_visual_smoke
+  output_dir: visualization/route_b_walk_visual_smoke
+  primary_backend: accepted_vertical_v2
+  num_samples: 1
+  max_joints: 8
+  wandb_upload: true
+  capsule:
+    enabled: false
+    model_xml: /mnt/data_cpfs/code/wxh/GR00T-WholeBodyControl-upstream-training/gear_sonic/data/assets/robot_description/mjcf/g1_29dof_rev_1_0.xml
+    output_dir: capsule_preview
+    num_samples: 1
+    max_frames: 48
+    width: 640
+    height: 360
+    fps: 50.0
+  accepted_vertical_v2:
+    enabled: true
+    output_dir: accepted_vertical_v2
+    num_samples: 1
+    execute_renderers: true
+    skip_source_bvh_resolve: false
+    continue_on_error: true
+    root_source: auto
+    source_bvh_roots:
+      - /mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/source_bvh_cache
+    source_bvh_cache: /mnt/data_cpfs/code/wxh/OnlineRetarget/outputs/source_bvh_cache
+    source_bvh_tar: /mnt/data_oss/online_retarget/lr147_delta_bvh_vis_data_20260525/back_data/soma_proportional.tar
+    soma_retargeter_root: /home/user/project/ContextRetarget/third_party/soma-retargeter
+    somamesh_usd: /home/user/data/motion_data/soma_shapes/soma_base_rig/soma_base_skel_minimal.usd
+    soma_render_script: scripts/render_somamesh_source.py
+    g1_robot_usd: /mnt/data_cpfs/code/wxh/OnlineRetarget/runs/isaaclab_urdf_cache/g1_main/main.usd
+    isaac_python_bin: /workspace/isaaclab/_isaac_sim/python.sh
+    isaac_render_script: scripts/render_g1_isaac_pair.py
