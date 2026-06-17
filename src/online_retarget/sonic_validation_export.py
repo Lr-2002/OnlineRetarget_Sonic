@@ -326,8 +326,8 @@ def export_readable_validation_pack(
     search_root: Path,
     run_group: str,
     output_dir: Path,
-    clips: Sequence[int] = DEFAULT_READABLE_CLIP_INDICES,
-    variants: Sequence[str] = VARIANT_NAMES,
+    clips: Sequence[int] | None = None,
+    variants: Sequence[str] | None = None,
     width: int = DEFAULT_READABLE_WIDTH,
     height: int = DEFAULT_READABLE_HEIGHT,
     allow_missing: bool = False,
@@ -338,8 +338,17 @@ def export_readable_validation_pack(
     raw_by_key = _find_latest_raw_trajectories(
         search_root=search_root,
         run_group=run_group,
-        clips=clips,
         variants=variants,
+    )
+    resolved_variants = (
+        tuple(str(item) for item in variants)
+        if variants is not None
+        else tuple(sorted({variant for variant, _clip_index in raw_by_key}))
+    )
+    resolved_clips = (
+        tuple(int(item) for item in clips)
+        if clips is not None
+        else tuple(sorted({int(clip_index) for _variant, clip_index in raw_by_key}))
     )
     results: list[dict[str, Any]] = []
     missing: list[str] = []
@@ -347,8 +356,8 @@ def export_readable_validation_pack(
     videos_ok = 0
     videos_failed = 0
     contract_failed = 0
-    for variant in variants:
-        for clip_index in clips:
+    for variant in resolved_variants:
+        for clip_index in resolved_clips:
             native_contract: dict[str, Any] = {}
             key = (variant, int(clip_index))
             raw_path = raw_by_key.get(key)
@@ -396,10 +405,13 @@ def export_readable_validation_pack(
             )
             native_contract = {}
 
+    no_candidates = not raw_by_key or not resolved_variants or not resolved_clips
     if missing and not allow_missing:
         videos_failed += len(missing)
-    status = "ok" if not missing and videos_failed == 0 else "partial"
-    if missing and not allow_missing:
+    status = "ok" if not missing and videos_failed == 0 and not no_candidates else "partial"
+    if no_candidates:
+        status = "blocked"
+    elif missing and not allow_missing:
         status = "blocked"
     elif contract_failed > 0:
         status = "failed"
@@ -413,8 +425,8 @@ def export_readable_validation_pack(
         "run_group": run_group,
         "search_root": str(search_root),
         "output_dir": str(output_dir),
-        "clips": [int(item) for item in clips],
-        "variants": list(variants),
+        "clips": [int(item) for item in resolved_clips],
+        "variants": list(resolved_variants),
         "videos_ok": videos_ok,
         "videos_failed": videos_failed,
         "missing": missing,
@@ -424,9 +436,20 @@ def export_readable_validation_pack(
             "final_review_eligible": final_review_eligible,
             "requires_raw_trajectory_npz": True,
             "rejects_metric_horizon_predictions_jsonl": True,
+            "selection_mode": {
+                "variants": "explicit" if variants is not None else "auto_discovered",
+                "clips": "explicit" if clips is not None else "auto_discovered",
+            },
+            "requested_variants": None if variants is None else [str(item) for item in variants],
+            "requested_clips": None if clips is None else [int(item) for item in clips],
             "required_rerun_when_missing": (
                 "Run the non-predict visual validation rollout with visual_validation.enabled=true "
                 "and persist_raw_trajectories=true, then rerun this exporter."
+            ),
+            "blocked_reason": (
+                f"no raw trajectory NPZ matched run_group={run_group!r}"
+                if no_candidates
+                else None
             ),
             "evidence": evidence,
         },
@@ -448,38 +471,62 @@ def _find_latest_raw_trajectories(
     *,
     search_root: Path,
     run_group: str,
-    clips: Sequence[int],
-    variants: Sequence[str],
+    variants: Sequence[str] | None,
 ) -> dict[tuple[str, int], Path]:
     candidates: dict[tuple[str, int], list[Path]] = {}
-    for clip_index in clips:
-        patterns = (
-            (
-                f"*{run_group}*/online_retarget_visual_validation/step_*/rank_*/"
-                f"clip_{int(clip_index):02d}_*_trajectory.npz"
-            ),
-            (
-                f"*{run_group}*/visual_validation/step_*/accepted_vertical_v2/"
-                f"clip_{int(clip_index):02d}_*_trajectory.npz"
-            ),
-        )
-        for pattern in patterns:
-            for path in search_root.glob(pattern):
-                variant = _variant_from_path(path, variants)
-                if variant is None:
-                    continue
-                candidates.setdefault((variant, int(clip_index)), []).append(path)
+    patterns = (
+        f"*{run_group}*/**/online_retarget_visual_validation/step_*/rank_*/clip_*_trajectory.npz",
+        f"*{run_group}*/**/visual_validation/step_*/accepted_vertical_v2/clip_*_trajectory.npz",
+    )
+    for pattern in patterns:
+        for path in search_root.glob(pattern):
+            clip_index = _clip_index_from_path(path)
+            if clip_index is None:
+                continue
+            variant = _variant_from_path(path, variants)
+            if variant is None:
+                continue
+            candidates.setdefault((variant, int(clip_index)), []).append(path)
     latest: dict[tuple[str, int], Path] = {}
     for key, paths in candidates.items():
         latest[key] = max(paths, key=lambda item: (_step_number(item), item.stat().st_mtime))
     return latest
 
 
-def _variant_from_path(path: Path, variants: Sequence[str]) -> str | None:
+def _clip_index_from_path(path: Path) -> int | None:
+    match = re.match(r"clip_(\d+)_", path.name)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def _variant_from_path(path: Path, variants: Sequence[str] | None) -> str | None:
     text = str(path)
-    for variant in variants:
-        if variant in text:
-            return variant
+    if variants is not None:
+        for variant in variants:
+            if variant in text:
+                return str(variant)
+    inferred = _infer_variant_from_path(path)
+    if variants is None:
+        return inferred
+    if inferred in {str(item) for item in variants}:
+        return inferred
+    return None
+
+
+def _infer_variant_from_path(path: Path) -> str | None:
+    parts = path.parts
+    for anchor in ("online_retarget_visual_validation", "visual_validation", "accepted_vertical_v2"):
+        if anchor not in parts:
+            continue
+        anchor_index = parts.index(anchor)
+        if anchor_index <= 0:
+            continue
+        candidate = parts[anchor_index - 1]
+        if re.fullmatch(r"(step|rank)_\d+", candidate):
+            continue
+        if candidate:
+            return candidate
     return None
 
 

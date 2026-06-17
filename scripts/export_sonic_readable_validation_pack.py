@@ -48,14 +48,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--clips",
         nargs="+",
-        default=[str(item) for item in DEFAULT_READABLE_CLIP_INDICES],
-        help="Clip indices to export, e.g. --clips 0 6.",
+        default=None,
+        help=(
+            "Clip indices to export, e.g. --clips 0 6. Defaults to auto-discovering "
+            "the available clip indices for the run group."
+        ),
     )
     parser.add_argument(
         "--variants",
         nargs="+",
-        default=list(VARIANT_NAMES),
-        help="Variant names to require in the pack.",
+        default=None,
+        help=(
+            "Variant names to require in the pack. Defaults to auto-discovering the "
+            "available run variant directories for the run group."
+        ),
     )
     parser.add_argument("--width", type=int, default=DEFAULT_READABLE_WIDTH)
     parser.add_argument("--height", type=int, default=DEFAULT_READABLE_HEIGHT)
@@ -75,13 +81,13 @@ def main() -> None:
     output_dir = args.output_dir
     if output_dir is None:
         output_dir = REPO_ROOT / "outputs" / "readable_validation_packs" / args.run_group
-    clips = parse_clip_indices(",".join(args.clips))
+    clips = None if args.clips is None else parse_clip_indices(",".join(args.clips))
     result = export_readable_validation_pack(
         search_root=args.search_root,
         run_group=args.run_group,
         output_dir=output_dir,
         clips=clips,
-        variants=tuple(args.variants),
+        variants=None if args.variants is None else tuple(args.variants),
         width=args.width,
         height=args.height,
         allow_missing=args.allow_missing,
