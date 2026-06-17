@@ -24,7 +24,7 @@ VIDEO_FIELDS = (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True, help="Training output directory")
-    parser.add_argument("--entity", default=None, help="W&B entity")
+    parser.add_argument("--entity", default=None, help="W&B entity; required with --resume-run-id")
     parser.add_argument("--project", required=True, help="W&B project")
     parser.add_argument("--resume-run-id", default=None, help="Existing W&B run id to append to")
     parser.add_argument("--run-name", default="accepted-v2-backfill", help="New W&B run name")
@@ -89,22 +89,40 @@ def upload_to_wandb(
     resume_run_id: str | None,
     run_name: str,
 ) -> int:
+    if resume_run_id and not entity:
+        raise ValueError(
+            "--entity is required with --resume-run-id to avoid uploading to the wrong W&B run"
+        )
+
     import wandb
+
+    resume_latest_step = None
+    if resume_run_id:
+        resume_latest_step = _wandb_latest_step(wandb, entity, project, resume_run_id)
 
     run = wandb.init(
         entity=entity,
         project=project,
         id=resume_run_id,
-        resume="allow" if resume_run_id else None,
+        resume="must" if resume_run_id else None,
         name=run_name if not resume_run_id else None,
         job_type="accepted_vertical_v2_mp4_backfill",
     )
     uploaded = 0
     try:
-        for record in records:
-            step = int(record["step"])
+        if resume_run_id:
+            _validate_initialized_run(run, resume_run_id)
+            resume_latest_step = max(resume_latest_step, _wandb_run_latest_step(run))
+        next_resume_step = resume_latest_step + 1 if resume_run_id else None
+        for record in sorted(records, key=lambda item: int(item["step"])):
+            source_step = int(record["step"])
+            log_step = next_resume_step if next_resume_step is not None else source_step
+            if next_resume_step is not None:
+                next_resume_step += 1
             payload: dict[str, Any] = {
-                "periodic_eval/visualization/accepted_vertical_v2/backfill_step": step,
+                "periodic_eval/visualization/accepted_vertical_v2/backfill_step": source_step,
+                "periodic_eval/visualization/accepted_vertical_v2/backfill_source_step": source_step,
+                "periodic_eval/visualization/accepted_vertical_v2/backfill_wandb_history_step": log_step,
                 "periodic_eval/visualization/accepted_vertical_v2/backfill_sample_id": record[
                     "sample_id"
                 ],
@@ -124,11 +142,57 @@ def upload_to_wandb(
                 path = Path(str(record[field]))
                 if path.exists():
                     run.save(str(path))
-            run.log(payload, step=step)
+            run.log(payload, step=log_step)
             uploaded += 1
     finally:
         run.finish()
     return uploaded
+
+
+def _wandb_latest_step(wandb_module: Any, entity: str | None, project: str, run_id: str) -> int:
+    target = f"{entity}/{project}/{run_id}"
+    api_run = wandb_module.Api().run(target)
+    actual_id = getattr(api_run, "id", run_id)
+    if str(actual_id) != str(run_id):
+        raise RuntimeError(f"W&B API resolved {target} to run id {actual_id!r}, expected {run_id!r}")
+    return _wandb_run_latest_step(api_run)
+
+
+def _validate_initialized_run(run: Any, run_id: str) -> None:
+    actual_id = getattr(run, "id", run_id)
+    if str(actual_id) != str(run_id):
+        raise RuntimeError(
+            f"wandb.init returned run id {actual_id!r}, expected existing run id {run_id!r}"
+        )
+
+
+def _wandb_run_latest_step(run: Any) -> int:
+    candidates: list[Any] = [
+        getattr(run, "lastHistoryStep", None),
+        getattr(run, "step", None),
+        getattr(run, "_step", None),
+    ]
+    summary = getattr(run, "summary", None)
+    if summary is not None:
+        for key in ("_step", "step", "global_step"):
+            try:
+                candidates.append(summary.get(key))
+            except AttributeError:
+                try:
+                    candidates.append(summary[key])
+                except (KeyError, TypeError):
+                    pass
+    steps: list[int] = []
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            step = int(candidate)
+        except (TypeError, ValueError):
+            continue
+        if step >= 0:
+            steps.append(step)
+    return max(steps) if steps else -1
 
 
 def _record_paths_exist(record: dict[str, Any]) -> bool:

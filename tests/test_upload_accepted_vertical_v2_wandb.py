@@ -46,12 +46,25 @@ class UploadAcceptedVerticalV2WandbTests(unittest.TestCase):
     def test_upload_to_wandb_uses_periodic_accepted_vertical_v2_media_keys(self):
         logged = []
         saved = []
+        api_paths = []
+        init_kwargs = {}
 
         class FakeVideo:
             def __init__(self, path):
                 self.path = path
 
+        class FakeApiRun:
+            id = "4gosirw6"
+            lastHistoryStep = 1000003
+
+        class FakeApi:
+            def run(self, path):
+                api_paths.append(path)
+                return FakeApiRun()
+
         class FakeRun:
+            id = "4gosirw6"
+
             def save(self, path):
                 saved.append(path)
 
@@ -61,9 +74,14 @@ class UploadAcceptedVerticalV2WandbTests(unittest.TestCase):
             def finish(self):
                 return None
 
+        def fake_init(**kwargs):
+            init_kwargs.update(kwargs)
+            return FakeRun()
+
         fake_wandb = types.SimpleNamespace(
             Video=FakeVideo,
-            init=lambda **_kwargs: FakeRun(),
+            Api=FakeApi,
+            init=fake_init,
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -72,7 +90,7 @@ class UploadAcceptedVerticalV2WandbTests(unittest.TestCase):
             with mock.patch.dict(sys.modules, {"wandb": fake_wandb}):
                 uploaded = uploader.upload_to_wandb(
                     records,
-                    entity=None,
+                    entity="world_model_xh",
                     project="OnlineRetarget_DP",
                     resume_run_id="4gosirw6",
                     run_name="ignored",
@@ -80,7 +98,26 @@ class UploadAcceptedVerticalV2WandbTests(unittest.TestCase):
 
         self.assertEqual(uploaded, 1)
         payload, step = logged[0]
-        self.assertEqual(step, 1000000)
+        self.assertEqual(step, 1000004)
+        self.assertNotEqual(step, 1000000)
+        self.assertEqual(api_paths, ["world_model_xh/OnlineRetarget_DP/4gosirw6"])
+        self.assertEqual(init_kwargs["entity"], "world_model_xh")
+        self.assertEqual(init_kwargs["project"], "OnlineRetarget_DP")
+        self.assertEqual(init_kwargs["id"], "4gosirw6")
+        self.assertEqual(init_kwargs["resume"], "must")
+        self.assertIsNone(init_kwargs["name"])
+        self.assertEqual(
+            payload["periodic_eval/visualization/accepted_vertical_v2/backfill_step"],
+            1000000,
+        )
+        self.assertEqual(
+            payload["periodic_eval/visualization/accepted_vertical_v2/backfill_source_step"],
+            1000000,
+        )
+        self.assertEqual(
+            payload["periodic_eval/visualization/accepted_vertical_v2/backfill_wandb_history_step"],
+            1000004,
+        )
         for key in (
             "periodic_eval/visualization/accepted_vertical_v2/primary",
             "periodic_eval/visualization/accepted_vertical_v2/row1_soma_somamesh",
@@ -90,6 +127,40 @@ class UploadAcceptedVerticalV2WandbTests(unittest.TestCase):
             self.assertIsInstance(payload[key], FakeVideo)
         self.assertTrue(any(path.endswith("__vertical_somamesh_g1target_g1kinematics.mp4") for path in saved))
         self.assertTrue(any(path.endswith("__row1_soma_somamesh.mp4") for path in saved))
+
+    def test_upload_to_wandb_resume_requires_entity(self):
+        with self.assertRaisesRegex(ValueError, "--entity is required"):
+            uploader.upload_to_wandb(
+                [],
+                entity=None,
+                project="OnlineRetarget_DP",
+                resume_run_id="4gosirw6",
+                run_name="ignored",
+            )
+
+    def test_upload_to_wandb_resume_rejects_wrong_target_run(self):
+        class FakeApiRun:
+            id = "wrong-run"
+            lastHistoryStep = 7
+
+        class FakeApi:
+            def run(self, _path):
+                return FakeApiRun()
+
+        fake_wandb = types.SimpleNamespace(
+            Api=FakeApi,
+            init=mock.Mock(),
+        )
+        with mock.patch.dict(sys.modules, {"wandb": fake_wandb}):
+            with self.assertRaisesRegex(RuntimeError, "expected '4gosirw6'"):
+                uploader.upload_to_wandb(
+                    [],
+                    entity="world_model_xh",
+                    project="OnlineRetarget_DP",
+                    resume_run_id="4gosirw6",
+                    run_name="ignored",
+                )
+        fake_wandb.init.assert_not_called()
 
 
 def _write_step(
