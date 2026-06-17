@@ -77,6 +77,22 @@ class LR310DPVisualBridgeTests(unittest.TestCase):
             )
             self.assertIn("target-root reuse", bridge_meta["lr290_contract_parity_note"])
             self.assertEqual(metadata["visual_backend"]["accepted_vertical_v2_status"], "failed")
+            self.assertEqual(
+                Path(result["combined_video"]).name,
+                "probe__step_00000123__vertical_somamesh_g1target_g1kinematics.mp4",
+            )
+            self.assertEqual(
+                Path(result["row1_soma_somamesh_video"]).name,
+                "probe__step_00000123__row1_soma_somamesh.mp4",
+            )
+            self.assertEqual(
+                Path(result["row2_g1_target_isaaclab_video"]).name,
+                "probe__step_00000123__row2_g1_target_isaaclab.mp4",
+            )
+            self.assertEqual(
+                Path(result["row3_g1_kinematics_isaaclab_video"]).name,
+                "probe__step_00000123__row3_g1_kinematics_isaaclab.mp4",
+            )
 
     def test_noncontiguous_target_frame_indices_align_joint_and_root_arrays(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -3808,6 +3808,9 @@ def _wandb_periodic_eval_payload(
         if isinstance(accepted_vertical, dict) and accepted_vertical.get("enabled"):
             payload["periodic_eval/accepted_vertical_v2_status"] = accepted_vertical.get("status", "")
             payload["periodic_eval/accepted_vertical_v2_export_status"] = accepted_vertical.get("export_status", "")
+            payload["periodic_eval/accepted_vertical_v2_primary_video"] = accepted_vertical.get(
+                "primary_video", ""
+            )
             payload["periodic_eval/accepted_vertical_v2_ok_count"] = int(
                 accepted_vertical.get("accepted_vertical_v2_ok_count", 0) or 0
             )
@@ -4064,9 +4067,26 @@ def _visualization_summary_status(
     if primary_backend == "accepted_vertical_v2":
         if not bool(accepted_vertical.get("enabled", False)):
             return "blocked"
+        if not _accepted_vertical_v2_completion_ok(accepted_vertical):
+            status = str(accepted_vertical.get("status", "") or "").strip()
+            return status if status in {"failed", "partial", "empty"} else "blocked"
         status = str(accepted_vertical.get("status", "") or "").strip()
         return status or "blocked"
     return route_status
+
+
+def _accepted_vertical_v2_completion_ok(accepted_vertical: dict[str, Any]) -> bool:
+    if not bool(accepted_vertical.get("enabled", False)):
+        return False
+    if str(accepted_vertical.get("status", "")) != "ok":
+        return False
+    if not bool(accepted_vertical.get("execute_renderers", False)):
+        return False
+    if bool(accepted_vertical.get("skip_source_bvh_resolve", False)):
+        return False
+    if int(accepted_vertical.get("accepted_vertical_v2_ok_count", 0) or 0) <= 0:
+        return False
+    return True
 
 
 def _accepted_vertical_v2_config(config: dict[str, Any], visual_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -4160,8 +4180,11 @@ def _write_accepted_vertical_v2_artifacts(
         errors=errors,
         requested_clip_count=len(rows),
         execute_renderers=execute_renderers,
+        skip_source_bvh_resolve=skip_source_bvh_resolve,
     )
     accepted_count = sum(1 for clip in clips if bool(clip.get("acceptance_ok", False)))
+    primary_clip = next((clip for clip in clips if bool(clip.get("acceptance_ok", False))), {})
+    primary_media = _accepted_vertical_v2_primary_media(primary_clip)
     payload = {
         "enabled": True,
         "artifact_version": "lr310_dp_accepted_vertical_v2_train_bridge_v1",
@@ -4181,6 +4204,26 @@ def _write_accepted_vertical_v2_artifacts(
         "target_g1_roots": [str(path) for path in target_g1_roots],
         "visualization_core": "scripts.rerender_lr310_dp_visual_validation.rerender_prediction_row",
         "accepted_vertical_v2_ok_count": accepted_count,
+        "completion_requires": {
+            "execute_renderers": True,
+            "skip_source_bvh_resolve": False,
+            "accepted_vertical_v2_ok_count_gt_zero": True,
+        },
+        "completion_ok": bool(
+            status == "ok"
+            and execute_renderers
+            and not skip_source_bvh_resolve
+            and accepted_count > 0
+        ),
+        "primary_video": primary_media.get("combined_video", ""),
+        "primary_metadata": primary_media.get("metadata", ""),
+        "primary_row1_soma_somamesh_video": primary_media.get("row1_soma_somamesh_video", ""),
+        "primary_row2_g1_target_isaaclab_video": primary_media.get(
+            "row2_g1_target_isaaclab_video", ""
+        ),
+        "primary_row3_g1_kinematics_isaaclab_video": primary_media.get(
+            "row3_g1_kinematics_isaaclab_video", ""
+        ),
         "clip_count": len(clips),
         "error_count": len(errors),
         "clips": clips,
@@ -4214,19 +4257,75 @@ def _accepted_vertical_v2_summary_status(
     errors: list[dict[str, Any]],
     requested_clip_count: int,
     execute_renderers: bool,
+    skip_source_bvh_resolve: bool = False,
 ) -> str:
     if requested_clip_count <= 0:
         return "empty"
     accepted_count = sum(1 for clip in clips if bool(clip.get("acceptance_ok", False)))
-    if accepted_count == requested_clip_count and not errors:
+    if not execute_renderers or skip_source_bvh_resolve:
+        if clips:
+            return "blocked"
+        if errors:
+            return "failed"
+        return "empty"
+    if accepted_count == requested_clip_count and accepted_count > 0 and not errors:
         return "ok"
     if accepted_count > 0:
         return "partial"
-    if clips and not execute_renderers:
-        return "blocked"
     if clips or errors:
         return "failed"
     return "empty"
+
+
+def _accepted_vertical_v2_primary_media(clip: dict[str, Any]) -> dict[str, str]:
+    keys = (
+        "combined_video",
+        "metadata",
+        "row1_soma_somamesh_video",
+        "row2_g1_target_isaaclab_video",
+        "row3_g1_kinematics_isaaclab_video",
+    )
+    return {key: str(clip.get(key, "") or "") for key in keys}
+
+
+def _accepted_vertical_v2_media_paths(accepted_vertical: dict[str, Any]) -> list[Path]:
+    paths: list[Path] = []
+    for key in (
+        "primary_video",
+        "primary_metadata",
+        "primary_row1_soma_somamesh_video",
+        "primary_row2_g1_target_isaaclab_video",
+        "primary_row3_g1_kinematics_isaaclab_video",
+        "summary_json",
+    ):
+        value = accepted_vertical.get(key)
+        if value:
+            path = Path(str(value))
+            if path.exists():
+                paths.append(path)
+    for clip in accepted_vertical.get("clips", []):
+        if not isinstance(clip, dict):
+            continue
+        for key in (
+            "metadata",
+            "combined_video",
+            "row1_soma_somamesh_video",
+            "row2_g1_target_isaaclab_video",
+            "row3_g1_kinematics_isaaclab_video",
+        ):
+            value = clip.get(key)
+            if value:
+                path = Path(str(value))
+                if path.exists():
+                    paths.append(path)
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(path)
+    return deduped
 
 
 def _visual_validation_path_list(value: Any) -> list[Path]:
@@ -4895,6 +4994,9 @@ def _wandb_log_visualization(
     capsule = visualization.get("capsule_visualization", {})
     if not isinstance(capsule, dict):
         capsule = {}
+    accepted_vertical = visualization.get("accepted_vertical_v2", {})
+    if not isinstance(accepted_vertical, dict):
+        accepted_vertical = {}
     for key in (
         "summary_json",
         "trajectory_csv",
@@ -4909,6 +5011,8 @@ def _wandb_log_visualization(
             _wandb_save(run, Path(str(path_text)))
     for video_path in _capsule_video_paths(capsule):
         _wandb_save(run, video_path)
+    for path in _accepted_vertical_v2_media_paths(accepted_vertical):
+        _wandb_save(run, path)
     payload = {
         f"{key_prefix}/status": visualization.get("status", ""),
         f"{key_prefix}/primary_backend": visualization.get("primary_backend", ""),
@@ -4916,6 +5020,13 @@ def _wandb_log_visualization(
         f"{key_prefix}/summary_json": visualization.get("summary_json", ""),
         f"{key_prefix}/sample_count": visualization.get("sample_count", 0),
         f"{key_prefix}/trajectory_row_count": visualization.get("trajectory_row_count", 0),
+        f"{key_prefix}/accepted_vertical_v2_status": accepted_vertical.get("status", ""),
+        f"{key_prefix}/accepted_vertical_v2_primary_video": accepted_vertical.get(
+            "primary_video", ""
+        ),
+        f"{key_prefix}/accepted_vertical_v2_primary_metadata": accepted_vertical.get(
+            "primary_metadata", ""
+        ),
         f"{key_prefix}/capsule_status": capsule.get("status", ""),
         f"{key_prefix}/capsule_manifest": capsule.get("manifest_json", ""),
     }
@@ -4941,6 +5052,20 @@ def _wandb_log_visualization(
                 payload[f"{key_prefix}/capsule_video_{index}"] = wandb.Video(str(video_path))
         except Exception:
             pass
+    try:
+        import wandb
+
+        for key, field in (
+            ("accepted_vertical_v2_primary", "primary_video"),
+            ("accepted_vertical_v2_row1_soma_somamesh", "primary_row1_soma_somamesh_video"),
+            ("accepted_vertical_v2_row2_g1_target", "primary_row2_g1_target_isaaclab_video"),
+            ("accepted_vertical_v2_row3_g1_kinematics", "primary_row3_g1_kinematics_isaaclab_video"),
+        ):
+            path = Path(str(accepted_vertical.get(field, "")))
+            if path.exists():
+                payload[f"{key_prefix}/{key}"] = wandb.Video(str(path))
+    except Exception:
+        pass
     _wandb_log(run, payload)
 
 
