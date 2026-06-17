@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -686,8 +687,29 @@ class TrainEntryTests(unittest.TestCase):
                 errors=[],
                 requested_clip_count=1,
                 execute_renderers=True,
+                skip_source_bvh_resolve=False,
             ),
             "ok",
+        )
+        self.assertEqual(
+            train_entry._accepted_vertical_v2_summary_status(
+                clips=[accepted_clip],
+                errors=[],
+                requested_clip_count=1,
+                execute_renderers=True,
+                skip_source_bvh_resolve=True,
+            ),
+            "blocked",
+        )
+        self.assertEqual(
+            train_entry._accepted_vertical_v2_summary_status(
+                clips=[accepted_clip],
+                errors=[],
+                requested_clip_count=1,
+                execute_renderers=False,
+                skip_source_bvh_resolve=False,
+            ),
+            "blocked",
         )
         self.assertEqual(
             train_entry._accepted_vertical_v2_summary_status(
@@ -716,6 +738,26 @@ class TrainEntryTests(unittest.TestCase):
             ),
             "blocked",
         )
+
+    def test_accepted_vertical_v2_completion_requires_renderers_resolution_and_ok_clip(self):
+        self.assertTrue(
+            train_entry._accepted_vertical_v2_completion_ok(
+                {
+                    "enabled": True,
+                    "status": "ok",
+                    "execute_renderers": True,
+                    "skip_source_bvh_resolve": False,
+                    "accepted_vertical_v2_ok_count": 1,
+                }
+            )
+        )
+        for rejected in (
+            {"execute_renderers": False, "skip_source_bvh_resolve": False, "accepted_vertical_v2_ok_count": 1},
+            {"execute_renderers": True, "skip_source_bvh_resolve": True, "accepted_vertical_v2_ok_count": 1},
+            {"execute_renderers": True, "skip_source_bvh_resolve": False, "accepted_vertical_v2_ok_count": 0},
+        ):
+            payload = {"enabled": True, "status": "ok", **rejected}
+            self.assertFalse(train_entry._accepted_vertical_v2_completion_ok(payload))
 
     def test_top_level_visual_validation_does_not_opt_in_train_closeout_bridge(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1219,6 +1261,89 @@ class TrainEntryTests(unittest.TestCase):
         self.assertNotIn("visualization/status", payload)
         self.assertNotIn("visualization/summary_json", payload)
 
+    def test_periodic_visualization_wandb_logs_accepted_vertical_v2_media(self):
+        logged_payloads = []
+        saved_paths = []
+
+        class FakeRun:
+            def log(self, payload, step=None):
+                logged_payloads.append((payload, step))
+
+            def save(self, path):
+                saved_paths.append(path)
+
+        class FakeVideo:
+            def __init__(self, path):
+                self.path = path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = {
+                "summary_json": root / "lr310_dp_visual_validation_summary.json",
+                "metadata": root / "walk__step_00005000__vertical_somamesh_g1target_g1kinematics.json",
+                "combined_video": root / "walk__step_00005000__vertical_somamesh_g1target_g1kinematics.mp4",
+                "row1_soma_somamesh_video": root / "walk__step_00005000__row1_soma_somamesh.mp4",
+                "row2_g1_target_isaaclab_video": root / "walk__step_00005000__row2_g1_target_isaaclab.mp4",
+                "row3_g1_kinematics_isaaclab_video": root / "walk__step_00005000__row3_g1_kinematics_isaaclab.mp4",
+            }
+            for path in paths.values():
+                path.write_bytes(b"artifact")
+            visualization = {
+                "enabled": True,
+                "status": "ok",
+                "primary_backend": "accepted_vertical_v2",
+                "route_visualization_status": "ok",
+                "summary_json": str(root / "visual_manifest.json"),
+                "sample_count": 1,
+                "trajectory_row_count": 0,
+                "accepted_vertical_v2": {
+                    "enabled": True,
+                    "status": "ok",
+                    "summary_json": str(paths["summary_json"]),
+                    "primary_metadata": str(paths["metadata"]),
+                    "primary_video": str(paths["combined_video"]),
+                    "primary_row1_soma_somamesh_video": str(paths["row1_soma_somamesh_video"]),
+                    "primary_row2_g1_target_isaaclab_video": str(paths["row2_g1_target_isaaclab_video"]),
+                    "primary_row3_g1_kinematics_isaaclab_video": str(paths["row3_g1_kinematics_isaaclab_video"]),
+                    "clips": [
+                        {
+                            "metadata": str(paths["metadata"]),
+                            "combined_video": str(paths["combined_video"]),
+                            "row1_soma_somamesh_video": str(paths["row1_soma_somamesh_video"]),
+                            "row2_g1_target_isaaclab_video": str(paths["row2_g1_target_isaaclab_video"]),
+                            "row3_g1_kinematics_isaaclab_video": str(paths["row3_g1_kinematics_isaaclab_video"]),
+                        }
+                    ],
+                },
+                "capsule_visualization": {"status": "disabled", "manifest_json": ""},
+            }
+            fake_wandb = types.SimpleNamespace(Video=FakeVideo)
+            with mock.patch.dict(sys.modules, {"wandb": fake_wandb}):
+                train_entry._wandb_log_visualization(
+                    FakeRun(),
+                    visualization,
+                    {"visualization": {"wandb_upload": True}},
+                    key_prefix="periodic_eval/visualization",
+                )
+
+        payload, step = logged_payloads[0]
+        self.assertIsNone(step)
+        self.assertEqual(
+            payload["periodic_eval/visualization/accepted_vertical_v2_primary_video"],
+            str(paths["combined_video"]),
+        )
+        for key in (
+            "periodic_eval/visualization/accepted_vertical_v2_primary",
+            "periodic_eval/visualization/accepted_vertical_v2_row1_soma_somamesh",
+            "periodic_eval/visualization/accepted_vertical_v2_row2_g1_target",
+            "periodic_eval/visualization/accepted_vertical_v2_row3_g1_kinematics",
+        ):
+            self.assertIsInstance(payload[key], FakeVideo)
+        self.assertTrue(any(str(paths["combined_video"]) == path for path in saved_paths))
+        self.assertTrue(any(str(paths["row1_soma_somamesh_video"]) == path for path in saved_paths))
+        self.assertTrue(any(str(paths["row2_g1_target_isaaclab_video"]) == path for path in saved_paths))
+        self.assertTrue(any(str(paths["row3_g1_kinematics_isaaclab_video"]) == path for path in saved_paths))
+
     def test_periodic_eval_wandb_payload_records_visualization_primary_backend(self):
         payload = train_entry._wandb_periodic_eval_payload(
             step=5000,
@@ -1239,6 +1364,7 @@ class TrainEntryTests(unittest.TestCase):
                     "enabled": True,
                     "status": "failed",
                     "export_status": "failed",
+                    "primary_video": "vertical_somamesh_g1target_g1kinematics.mp4",
                     "accepted_vertical_v2_ok_count": 0,
                 },
             },
@@ -1252,6 +1378,10 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(payload["periodic_eval/visualization_route_status"], "ok")
         self.assertEqual(payload["periodic_eval/accepted_vertical_v2_status"], "failed")
         self.assertEqual(payload["periodic_eval/accepted_vertical_v2_export_status"], "failed")
+        self.assertEqual(
+            payload["periodic_eval/accepted_vertical_v2_primary_video"],
+            "vertical_somamesh_g1target_g1kinematics.mp4",
+        )
 
     def test_quality_gate_blocks_formal_training_without_policy(self):
         context = train_entry._quality_gate_context(
