@@ -6,6 +6,7 @@ import unittest
 import numpy as np
 
 from scripts import rerender_lr310_dp_visual_validation as bridge
+from online_retarget.sonic_validation_export import load_raw_validation_trajectory
 
 
 class LR310DPVisualBridgeTests(unittest.TestCase):
@@ -13,7 +14,7 @@ class LR310DPVisualBridgeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source_bvh = root / "clip.bvh"
-            source_bvh.write_text("HIERARCHY\n", encoding="utf-8")
+            source_bvh.write_text(_minimal_bvh(frames=3), encoding="utf-8")
             target_npz = root / "target.npz"
             body_pos = np.zeros((3, 30, 3), dtype=np.float32)
             body_pos[:, 0, :] = np.asarray(
@@ -76,6 +77,14 @@ class LR310DPVisualBridgeTests(unittest.TestCase):
                 "target_root_pose_reused",
             )
             self.assertIn("target-root reuse", bridge_meta["lr290_contract_parity_note"])
+            raw_path = Path(result["raw_trajectory_path"])
+            self.assertTrue(raw_path.exists())
+            raw = load_raw_validation_trajectory(raw_path)
+            self.assertEqual(raw["source_frame_indices"], [0, 1, 2])
+            self.assertEqual(raw["frame_count"], 3)
+            self.assertFalse(bridge_meta["review_contract"]["final_review_eligible"])
+            self.assertFalse(bridge_meta["review_contract"]["physical_time_aligned"])
+            self.assertIn("metric-horizon", bridge_meta["review_contract"]["blocked_reason"])
             self.assertEqual(metadata["visual_backend"]["accepted_vertical_v2_status"], "failed")
             self.assertEqual(
                 Path(result["combined_video"]).name,
@@ -98,7 +107,7 @@ class LR310DPVisualBridgeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source_bvh = root / "clip.bvh"
-            source_bvh.write_text("HIERARCHY\n", encoding="utf-8")
+            source_bvh.write_text(_minimal_bvh(frames=6), encoding="utf-8")
             target_npz = root / "target.npz"
             frames = 6
             joint_pos = np.asarray([[frame, frame + 0.5] for frame in range(frames)], dtype=np.float32)
@@ -165,6 +174,9 @@ class LR310DPVisualBridgeTests(unittest.TestCase):
                 bridge_meta["prediction_root_pose"]["prediction_root_pose_source"],
                 "target_root_pose_reused",
             )
+            self.assertEqual(bridge_meta["review_contract"]["source_frame_range"], [4, 5])
+            self.assertFalse(bridge_meta["review_contract"]["final_review_eligible"])
+            self.assertIn("metric-horizon sparse/windows", bridge_meta["review_contract"]["blocked_reason"])
 
     def test_target_frame_indices_validate_npz_range(self) -> None:
         arrays = {
@@ -211,6 +223,25 @@ class LR310DPVisualBridgeTests(unittest.TestCase):
         np.testing.assert_allclose(root_quat, np.asarray([[1.0, 0.0, 0.0, 0.0]] * 2, dtype=np.float32))
         self.assertTrue(semantics["root_fixed_fallback"])
         self.assertIn("not LR-290", semantics["root_semantics"])
+
+
+def _minimal_bvh(*, frames: int) -> str:
+    motion_lines = []
+    for frame_idx in range(frames):
+        motion_lines.append(f"{frame_idx}.0 0.0 0.0 0.0 0.0 0.0")
+    return (
+        "HIERARCHY\n"
+        "ROOT Hips\n"
+        "{\n"
+        "  OFFSET 0.0 0.0 0.0\n"
+        "  CHANNELS 6 Xposition Yposition Zposition Zrotation Xrotation Yrotation\n"
+        "}\n"
+        "MOTION\n"
+        f"Frames: {frames}\n"
+        "Frame Time: 0.02\n"
+        + "\n".join(motion_lines)
+        + "\n"
+    )
 
 
 if __name__ == "__main__":

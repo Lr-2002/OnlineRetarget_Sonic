@@ -31,6 +31,16 @@ from online_retarget.a0_visual_validation import (  # noqa: E402
     build_accepted_vertical_v2_metadata,
 )
 from online_retarget.data.bones_sonic import SONIC_JOINT_NAMES  # noqa: E402
+from online_retarget.data.windowed_builder import (  # noqa: E402
+    DEFAULT_SOURCE_BODY_NAMES,
+    global_body_position_maps_from_bvh,
+    parse_bvh_motion,
+)
+from online_retarget.sonic_validation_export import (  # noqa: E402
+    TRACKING_BODY_NAMES,
+    native_fps_review_evidence,
+    save_raw_validation_trajectory,
+)
 
 
 SourceBvhResolver = Callable[[Mapping[str, Any], dict[str, Any], Path], Path | None]
@@ -442,6 +452,64 @@ def write_dp_motion_assets(
     return target_report, prediction_report, bridge_metadata
 
 
+def _load_source_soma_tracking_frames(
+    *,
+    source_bvh: Path | None,
+    frame_indices: Sequence[int],
+) -> tuple[np.ndarray | None, list[str] | None]:
+    if source_bvh is None:
+        return None, None
+    text = source_bvh.read_text(encoding="utf-8")
+    max_frame = max(int(index) for index in frame_indices) if frame_indices else -1
+    try:
+        motion = parse_bvh_motion(text, max_frames=max_frame + 1 if max_frame >= 0 else 1)
+    except ValueError:
+        return None, None
+    maps = global_body_position_maps_from_bvh(
+        motion,
+        body_names=DEFAULT_SOURCE_BODY_NAMES,
+        position_scale=0.01,
+    )
+    selected: list[np.ndarray] = []
+    for frame_index in frame_indices:
+        if frame_index < 0 or frame_index >= len(maps):
+            raise ValueError(
+                f"source BVH lacks frame {frame_index} needed by target_frame_indices={list(frame_indices)}"
+            )
+        frame_map = maps[frame_index]
+        frame_points: list[list[float]] = []
+        for name in DEFAULT_SOURCE_BODY_NAMES:
+            point = frame_map.get(name, (0.0, 0.0, 0.0))
+            frame_points.append([float(point[0]), float(point[1]), float(point[2])])
+        selected.append(np.asarray(frame_points, dtype=np.float32))
+    if not selected:
+        return np.zeros((0, len(DEFAULT_SOURCE_BODY_NAMES), 3), dtype=np.float32), list(DEFAULT_SOURCE_BODY_NAMES)
+    return np.stack(selected, axis=0), list(DEFAULT_SOURCE_BODY_NAMES)
+
+
+def _g1_tracking_frames_from_joint_root(
+    *,
+    joint_pos: np.ndarray,
+    root_pos: np.ndarray,
+) -> np.ndarray:
+    frames = int(min(len(joint_pos), len(root_pos)))
+    body_count = len(TRACKING_BODY_NAMES)
+    tracked = np.zeros((frames, body_count, 3), dtype=np.float32)
+    tracked[:, 0, :] = np.asarray(root_pos[:frames], dtype=np.float32)
+    usable_joint_dim = min(joint_pos.shape[1], body_count - 1) if joint_pos.ndim == 2 else 0
+    if usable_joint_dim > 0:
+        tracked[:, 1 : usable_joint_dim + 1, 0] = np.asarray(joint_pos[:frames, :usable_joint_dim], dtype=np.float32)
+    return tracked
+
+
+def _load_motion_asset_arrays(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    with np.load(path, allow_pickle=False) as loaded:
+        joint_pos = np.asarray(loaded["joint_pos"], dtype=np.float32)
+        root_pos = np.asarray(loaded["root_pos"], dtype=np.float32)
+        root_quat = np.asarray(loaded["root_quat"], dtype=np.float32)
+    return joint_pos, root_pos, root_quat
+
+
 def rerender_prediction_row(
     *,
     row: Mapping[str, Any],
@@ -492,6 +560,11 @@ def rerender_prediction_row(
     else:
         resolver = source_bvh_resolver or _lazy_source_bvh_resolver()
         source_bvh = resolver(normalize_prediction_row_for_source_bvh(row), config, step_dir)
+    frame_indices = bridge_metadata.get("target_frame_indices", [])
+    source_tracking_frames, source_tracking_names = _load_source_soma_tracking_frames(
+        source_bvh=source_bvh,
+        frame_indices=frame_indices,
+    )
     visual_cfg = config.get("visual_validation", {})
     if not isinstance(visual_cfg, Mapping):
         visual_cfg = {}
@@ -605,6 +678,95 @@ def rerender_prediction_row(
         checkpoint_path=checkpoint_path,
         checkpoint_step=checkpoint_step,
     )
+    target_joint_pos_asset, target_root_pos_asset, target_root_quat_asset = _load_motion_asset_arrays(
+        paths["row2_motion_npz"]
+    )
+    pred_joint_pos_asset, pred_root_pos_asset, pred_root_quat_asset = _load_motion_asset_arrays(
+        paths["row3_motion_npz"]
+    )
+    raw_trajectory_report = {
+        "status": "blocked",
+        "message": "source BVH unresolved; raw trajectory pack not persisted",
+        "raw_trajectory_path": "",
+        "raw_trajectory_metadata_path": "",
+        "raw_trajectory_frames": 0,
+        "raw_trajectory_fields": [],
+    }
+    review_contract = {
+        "mode": "metric_horizon_bridge_only",
+        "fps": float(fps),
+        "frame_count": int(frame_count),
+        "source_frame_range": None,
+        "duration_sec": float(frame_count / fps) if fps > 0 else 0.0,
+        "source_frame_indices_count": int(len(frame_indices)),
+        "source_frame_indices_covered": 0,
+        "physical_time_aligned": False,
+        "final_review_eligible": False,
+        "blocked_reason": (
+            "DP accepted-v2 bridge reuses target_frame_indices from the metric horizon; "
+            "final native-fps review requires the non-predict visual validation rollout/export path"
+        ),
+    }
+    if source_tracking_frames is not None and source_tracking_names is not None:
+        raw_path = paths["artifact_dir"] / f"clip_{int(index):02d}_{sample_id}_trajectory.npz"
+        raw_trajectory_report = save_raw_validation_trajectory(
+            trajectory={
+                "clip_index": int(index),
+                "local_env_index": int(index),
+                "motion_id": row.get("motion_id"),
+                "motion_key": row.get("sequence_id") or row.get("target_g1_path") or sample_id,
+                "source_soma": source_tracking_frames[:frame_count],
+                "target_g1": _g1_tracking_frames_from_joint_root(
+                    joint_pos=target_joint_pos_asset,
+                    root_pos=target_root_pos_asset,
+                ),
+                "inferred_g1": _g1_tracking_frames_from_joint_root(
+                    joint_pos=pred_joint_pos_asset,
+                    root_pos=pred_root_pos_asset,
+                ),
+                "target_root_pos_w": target_root_pos_asset,
+                "target_root_rot_w": target_root_quat_asset,
+                "pred_root_pos_w": pred_root_pos_asset,
+                "pred_root_rot_w": pred_root_quat_asset,
+                "source_frame_indices": list(frame_indices[:frame_count]),
+                "encoder_routes": [],
+                "source_fps": float(fps),
+                "target_fps": float(fps),
+                "physical_time_aligned": False,
+                "root_rot_format": "wxyz",
+                "initial_root_xy_zeroed": False,
+                "source_soma_names": source_tracking_names,
+                "g1_body_names": TRACKING_BODY_NAMES,
+            },
+            output_path=raw_path,
+            target_fps=fps,
+            duration_sec=frame_count / fps if fps > 0 else float(visual_cfg.get("duration_sec", 4.0)),
+        )
+        loaded_contract = native_fps_review_evidence(
+            {
+                "source_soma": source_tracking_frames[:frame_count],
+                "target_g1": _g1_tracking_frames_from_joint_root(
+                    joint_pos=target_joint_pos_asset,
+                    root_pos=target_root_pos_asset,
+                ),
+                "inferred_g1": _g1_tracking_frames_from_joint_root(
+                    joint_pos=pred_joint_pos_asset,
+                    root_pos=pred_root_pos_asset,
+                ),
+                "source_frame_indices": list(frame_indices[:frame_count]),
+                "target_fps": float(fps),
+                "physical_time_aligned": False,
+            }
+        )
+        review_contract.update(loaded_contract)
+        review_contract["mode"] = "metric_horizon_bridge_only"
+        review_contract["final_review_eligible"] = False
+        review_contract["physical_time_aligned"] = False
+        blocked_reason = review_contract.get("blocked_reason")
+        review_contract["blocked_reason"] = (
+            (blocked_reason + "; " if blocked_reason else "")
+            + "DP bridge target_frame_indices are metric-horizon sparse/windows, not original native-fps contiguous rollout frames"
+        )
     metadata["lr310_dp_prediction_bridge"] = {
         **bridge_metadata,
         "predictions_jsonl": str(predictions_jsonl),
@@ -623,6 +785,8 @@ def rerender_prediction_row(
             "accepted_vertical_v2 backend is reused; row3 root pose is model-predicted only when "
             "pred_root_pos_w/pred_root_quat_w exist, otherwise metadata marks target-root reuse or fixed-root fallback"
         ),
+        "raw_trajectory": raw_trajectory_report,
+        "review_contract": review_contract,
     }
     paths["manifest_json"].write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return {
@@ -642,6 +806,9 @@ def rerender_prediction_row(
         "acceptance_failure_reasons": failure_reasons,
         "root_fixed_fallback": metadata["lr310_dp_prediction_bridge"]["root_fixed_fallback"],
         "execute_renderers": bool(execute_renderers),
+        "raw_trajectory_path": raw_trajectory_report.get("raw_trajectory_path", ""),
+        "raw_trajectory_metadata_path": raw_trajectory_report.get("raw_trajectory_metadata_path", ""),
+        "review_contract": review_contract,
     }
 
 

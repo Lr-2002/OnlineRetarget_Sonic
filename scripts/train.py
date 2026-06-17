@@ -4184,7 +4184,25 @@ def _write_accepted_vertical_v2_artifacts(
     )
     accepted_count = sum(1 for clip in clips if bool(clip.get("acceptance_ok", False)))
     primary_clip = next((clip for clip in clips if bool(clip.get("acceptance_ok", False))), {})
+    if not primary_clip and clips:
+        primary_clip = clips[0]
     primary_media = _accepted_vertical_v2_primary_media(primary_clip)
+    evidence = []
+    for clip in clips:
+        contract = clip.get("review_contract", {})
+        if isinstance(contract, dict):
+            evidence.append(
+                {
+                    "sample_id": str(clip.get("sample_id", "")),
+                    "fps": contract.get("fps"),
+                    "frame_count": contract.get("frame_count"),
+                    "source_frame_range": contract.get("source_frame_range"),
+                    "physical_time_aligned": contract.get("physical_time_aligned"),
+                    "final_review_eligible": contract.get("final_review_eligible"),
+                    "raw_trajectory_path": clip.get("raw_trajectory_path", ""),
+                    "blocked_reason": contract.get("blocked_reason"),
+                }
+            )
     payload = {
         "enabled": True,
         "artifact_version": "lr310_dp_accepted_vertical_v2_train_bridge_v1",
@@ -4198,12 +4216,14 @@ def _write_accepted_vertical_v2_artifacts(
             "blocked_reason": (
                 "predictions_jsonl accepted-v2 bridge only contains the metric horizon; final "
                 "review visualization must come from non-predict visual_validation.enabled=true "
-                "rollout artifacts under online_retarget_visual_validation/*_trajectory.npz"
+                "rollout/export artifacts or a native-fps contiguous rerender path; DP bridge raw "
+                "trajectory NPZs are exported for auditability but remain metric-horizon only"
             ),
             "required_export_command": (
                 "python scripts/export_sonic_readable_validation_pack.py --run-group <run_group> "
-                "--search-root <root-containing-online_retarget_visual_validation>"
+                "--search-root <root-containing-online_retarget_visual_validation-or-visual_validation>"
             ),
+            "evidence": evidence,
         },
         "predictions_jsonl": str(predictions_jsonl),
         "output_dir": str(output_dir),
@@ -4232,6 +4252,7 @@ def _write_accepted_vertical_v2_artifacts(
         ),
         "primary_video": primary_media.get("combined_video", ""),
         "primary_metadata": primary_media.get("metadata", ""),
+        "primary_raw_trajectory_path": primary_clip.get("raw_trajectory_path", ""),
         "primary_row1_soma_somamesh_video": primary_media.get("row1_soma_somamesh_video", ""),
         "primary_row2_g1_target_isaaclab_video": primary_media.get(
             "row2_g1_target_isaaclab_video", ""

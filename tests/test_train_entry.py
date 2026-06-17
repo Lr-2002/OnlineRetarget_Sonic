@@ -543,45 +543,48 @@ class TrainEntryTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = train_entry._write_visualization_artifacts(
-                config={
-                    "visualization": {
-                        "enabled": True,
-                        "artifact_name": "route_b_probe",
-                        "num_samples": 1,
-                        "max_joints": 2,
-                        "accepted_vertical_v2": {
-                            "enabled": True,
-                            "num_samples": 1,
-                            "execute_renderers": False,
-                            "skip_source_bvh_resolve": True,
-                            "root_source": "target_npz_root",
-                        },
-                    }
-                },
-                predictions_jsonl=predictions,
-                output_dir=root / "train",
-                eval_result=None,
-                run_name="train_visualization",
-                checkpoint=root / "train" / "checkpoint.pt",
-                checkpoint_step=17,
+            raw_trajectory = root / "train" / "visualization" / "route_b_probe" / "accepted_vertical_v2" / "clip_00_walk_probe_trajectory.npz"
+            fake_bridge = types.SimpleNamespace(
+                read_prediction_rows=lambda path, count=None: [json.loads(predictions.read_text(encoding="utf-8").strip())],
+                rerender_prediction_row=lambda **kwargs: _fake_dp_bridge_result(
+                    raw_trajectory_path=raw_trajectory,
+                    metadata_path=raw_trajectory.with_suffix(".json"),
+                    step=kwargs["step"],
+                ),
             )
 
-            accepted = result["accepted_vertical_v2"]
+            with mock.patch.object(train_entry, "_load_lr310_dp_visual_bridge", return_value=fake_bridge):
+                accepted = train_entry._write_accepted_vertical_v2_artifacts(
+                    config={"visualization": {}},
+                    visual_cfg={
+                        "enabled": True,
+                        "num_samples": 1,
+                        "execute_renderers": False,
+                        "skip_source_bvh_resolve": False,
+                        "root_source": "target_npz_root",
+                    },
+                    predictions_jsonl=predictions,
+                    artifact_dir=root / "train",
+                    checkpoint=root / "train" / "checkpoint.pt",
+                    checkpoint_step=17,
+                )
+
             accepted_summary = json.loads(Path(accepted["summary_json"]).read_text(encoding="utf-8"))
             clip = accepted_summary["clips"][0]
             metadata = json.loads(Path(clip["metadata"]).read_text(encoding="utf-8"))
             target_motion_exists = Path(clip["target_motion_npz"]).exists()
             prediction_motion_exists = Path(clip["prediction_motion_npz"]).exists()
+            raw_trajectory_exists = Path(clip["raw_trajectory_path"]).exists()
+            primary_raw_trajectory_exists = Path(accepted["primary_raw_trajectory_path"]).exists()
 
         self.assertEqual(accepted["status"], "blocked")
         self.assertEqual(accepted["export_status"], "ok")
         self.assertFalse(accepted["review_contract"]["final_review_eligible"])
         self.assertEqual(accepted["review_contract"]["mode"], "metric_horizon_bridge_only")
         self.assertTrue(accepted["review_contract"]["native_fps_review_required"])
-        self.assertEqual(result["primary_backend"], "accepted_vertical_v2")
-        self.assertEqual(result["route_visualization_status"], "ok")
-        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(len(accepted["review_contract"]["evidence"]), 1)
+        self.assertFalse(accepted["review_contract"]["evidence"][0]["final_review_eligible"])
+        self.assertTrue(accepted["review_contract"]["evidence"][0]["raw_trajectory_path"].endswith("_trajectory.npz"))
         self.assertEqual(accepted["clip_count"], 1)
         self.assertEqual(accepted["error_count"], 0)
         self.assertEqual(accepted["accepted_vertical_v2_ok_count"], 0)
@@ -589,9 +592,11 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(clip["accepted_vertical_v2_status"], "failed")
         self.assertTrue(target_motion_exists)
         self.assertTrue(prediction_motion_exists)
+        self.assertTrue(raw_trajectory_exists)
+        self.assertTrue(primary_raw_trajectory_exists)
         self.assertEqual(metadata["accepted_visual_contract"]["panels"][2]["checkpoint_step"], 17)
         self.assertEqual(metadata["inference_render"]["checkpoint_step"], 17)
-        self.assertTrue(metadata["lr310_dp_prediction_bridge"]["source_bvh_resolution_skipped"])
+        self.assertFalse(metadata["lr310_dp_prediction_bridge"]["source_bvh_resolution_skipped"])
         self.assertEqual(accepted_summary["visualization_core"], "scripts.rerender_lr310_dp_visual_validation.rerender_prediction_row")
 
     def test_visualization_artifacts_report_accepted_vertical_v2_export_failure_without_crashing(self):
@@ -2844,6 +2849,96 @@ class _FakeFiniteMatrix:
         if dim != 1:
             raise AssertionError(f"expected dim 1, got {dim}")
         return _FakeBoolVector([all(row) for row in self.rows])
+
+
+def _minimal_dp_bridge_bvh(*, frames: int) -> str:
+    motion_lines = []
+    for frame_idx in range(frames):
+        motion_lines.append(f"{frame_idx}.0 0.0 0.0 0.0 0.0 0.0")
+    return (
+        "HIERARCHY\n"
+        "ROOT Hips\n"
+        "{\n"
+        "  OFFSET 0.0 0.0 0.0\n"
+        "  CHANNELS 6 Xposition Yposition Zposition Zrotation Xrotation Yrotation\n"
+        "}\n"
+        "MOTION\n"
+        f"Frames: {frames}\n"
+        "Frame Time: 0.02\n"
+        + "\n".join(motion_lines)
+        + "\n"
+    )
+
+
+def _fake_dp_bridge_result(*, raw_trajectory_path: Path, metadata_path: Path, step: int) -> dict[str, object]:
+    from online_retarget.sonic_validation_export import save_raw_validation_trajectory
+
+    import numpy as np
+
+    source_soma = np.zeros((3, 14, 3), dtype=np.float32)
+    target_g1 = np.zeros((3, 14, 3), dtype=np.float32)
+    inferred_g1 = np.zeros((3, 14, 3), dtype=np.float32)
+    raw_report = save_raw_validation_trajectory(
+        trajectory={
+            "clip_index": 0,
+            "local_env_index": 0,
+            "motion_id": "walk/probe",
+            "motion_key": "walk/probe",
+            "source_soma": source_soma,
+            "target_g1": target_g1,
+            "inferred_g1": inferred_g1,
+            "source_frame_indices": [0, 1, 2],
+            "encoder_routes": [],
+            "source_fps": 50.0,
+            "target_fps": 50.0,
+            "physical_time_aligned": False,
+            "root_rot_format": "wxyz",
+            "initial_root_xy_zeroed": False,
+            "source_soma_names": [f"body_{index}" for index in range(14)],
+            "g1_body_names": [f"body_{index}" for index in range(14)],
+        },
+        output_path=raw_trajectory_path,
+        target_fps=50.0,
+        duration_sec=3 / 50.0,
+    )
+    row2_motion = raw_trajectory_path.with_name("row2_motion.npz")
+    row3_motion = raw_trajectory_path.with_name("row3_motion.npz")
+    np.savez(row2_motion, joint_pos=np.zeros((3, 2), dtype=np.float32), root_pos=np.zeros((3, 3), dtype=np.float32), root_quat=np.asarray([[1.0, 0.0, 0.0, 0.0]] * 3, dtype=np.float32))
+    np.savez(row3_motion, joint_pos=np.zeros((3, 2), dtype=np.float32), root_pos=np.zeros((3, 3), dtype=np.float32), root_quat=np.asarray([[1.0, 0.0, 0.0, 0.0]] * 3, dtype=np.float32))
+    metadata = {
+        "accepted_visual_contract": {"panels": [{}, {}, {"checkpoint_step": int(step)}]},
+        "inference_render": {"checkpoint_step": int(step)},
+        "visual_backend": {"accepted_vertical_v2_status": "failed"},
+        "lr310_dp_prediction_bridge": {"source_bvh_resolution_skipped": False},
+    }
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return {
+        "sample_id": "walk/probe",
+        "index": 0,
+        "fps": 50.0,
+        "frames": 3,
+        "target_motion_npz": str(row2_motion),
+        "prediction_motion_npz": str(row3_motion),
+        "metadata": str(metadata_path),
+        "combined_video": str(raw_trajectory_path.with_suffix(".mp4")),
+        "row1_soma_somamesh_video": str(raw_trajectory_path.with_name("row1.mp4")),
+        "row2_g1_target_isaaclab_video": str(raw_trajectory_path.with_name("row2.mp4")),
+        "row3_g1_kinematics_isaaclab_video": str(raw_trajectory_path.with_name("row3.mp4")),
+        "acceptance_ok": False,
+        "accepted_vertical_v2_status": "failed",
+        "acceptance_failure_reasons": ["stubbed"],
+        "root_fixed_fallback": False,
+        "execute_renderers": False,
+        "raw_trajectory_path": str(raw_trajectory_path),
+        "raw_trajectory_metadata_path": str(raw_trajectory_path.with_suffix(".json")),
+        "review_contract": {
+            **raw_report,
+            "final_review_eligible": False,
+            "physical_time_aligned": False,
+            "blocked_reason": "metric-horizon sparse/window stub",
+        },
+    }
 
 
 if __name__ == "__main__":
