@@ -1329,14 +1329,14 @@ class TrainEntryTests(unittest.TestCase):
         payload, step = logged_payloads[0]
         self.assertIsNone(step)
         self.assertEqual(
-            payload["periodic_eval/visualization/accepted_vertical_v2_primary_video"],
+            payload["periodic_eval/visualization/accepted_vertical_v2/primary_video"],
             str(paths["combined_video"]),
         )
         for key in (
-            "periodic_eval/visualization/accepted_vertical_v2_primary",
-            "periodic_eval/visualization/accepted_vertical_v2_row1_soma_somamesh",
-            "periodic_eval/visualization/accepted_vertical_v2_row2_g1_target",
-            "periodic_eval/visualization/accepted_vertical_v2_row3_g1_kinematics",
+            "periodic_eval/visualization/accepted_vertical_v2/primary",
+            "periodic_eval/visualization/accepted_vertical_v2/row1_soma_somamesh",
+            "periodic_eval/visualization/accepted_vertical_v2/row2_g1_target",
+            "periodic_eval/visualization/accepted_vertical_v2/row3_g1_kinematics",
         ):
             self.assertIsInstance(payload[key], FakeVideo)
         self.assertTrue(any(str(paths["combined_video"]) == path for path in saved_paths))
@@ -1379,7 +1379,7 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(payload["periodic_eval/accepted_vertical_v2_status"], "failed")
         self.assertEqual(payload["periodic_eval/accepted_vertical_v2_export_status"], "failed")
         self.assertEqual(
-            payload["periodic_eval/accepted_vertical_v2_primary_video"],
+            payload["periodic_eval/accepted_vertical_v2/primary_video"],
             "vertical_somamesh_g1target_g1kinematics.mp4",
         )
 
