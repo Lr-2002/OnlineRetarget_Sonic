@@ -4190,6 +4190,21 @@ def _write_accepted_vertical_v2_artifacts(
         "artifact_version": "lr310_dp_accepted_vertical_v2_train_bridge_v1",
         "status": status,
         "export_status": export_status,
+        "review_contract": {
+            "mode": "metric_horizon_bridge_only",
+            "final_review_eligible": False,
+            "metric_horizon_preserved": True,
+            "native_fps_review_required": True,
+            "blocked_reason": (
+                "predictions_jsonl accepted-v2 bridge only contains the metric horizon; final "
+                "review visualization must come from non-predict visual_validation.enabled=true "
+                "rollout artifacts under online_retarget_visual_validation/*_trajectory.npz"
+            ),
+            "required_export_command": (
+                "python scripts/export_sonic_readable_validation_pack.py --run-group <run_group> "
+                "--search-root <root-containing-online_retarget_visual_validation>"
+            ),
+        },
         "predictions_jsonl": str(predictions_jsonl),
         "output_dir": str(output_dir),
         "summary_json": str(summary_path),

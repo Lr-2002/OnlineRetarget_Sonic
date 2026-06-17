@@ -1710,6 +1710,11 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dic
     updated = copy.deepcopy(config)
     if args.max_steps is not None:
         updated["training"]["max_steps"] = int(args.max_steps)
+    if args.visual_validation_every_steps is not None:
+        visual = dict(updated.get("visual_validation", {}))
+        visual["enabled"] = True
+        visual["every_steps"] = int(args.visual_validation_every_steps)
+        updated["visual_validation"] = visual
     if args.disable_visual_validation:
         visual = dict(updated.get("visual_validation", {}))
         visual["enabled"] = False
@@ -6145,6 +6150,15 @@ def main() -> None:
         "--disable-visual-validation",
         action="store_true",
         help="Disable visual validation for short smoke checks.",
+    )
+    parser.add_argument(
+        "--visual-validation-every-steps",
+        type=int,
+        help=(
+            "Override visual_validation.every_steps. Use this for fresh smoke runs that "
+            "must emit native-fps visual_validation artifacts at 5k/10k without changing "
+            "the 10-frame metric horizon."
+        ),
     )
     parser.add_argument(
         "--dry-run",

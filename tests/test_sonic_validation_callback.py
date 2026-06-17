@@ -1,7 +1,9 @@
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from online_retarget.sonic_validation_callback import (
     SonicVisualValidationCallback,
@@ -17,6 +19,7 @@ from online_retarget.sonic_validation_export import (
     DEFAULT_READABLE_CLIP_INDICES,
     export_readable_validation_pack,
     load_raw_validation_trajectory,
+    native_fps_review_evidence,
     parse_clip_indices,
     render_readable_validation_video,
     save_raw_validation_trajectory,
@@ -143,6 +146,14 @@ class SonicValidationCallbackTests(unittest.TestCase):
         self.assertEqual(report["raw_trajectory_frames"], 3)
         self.assertEqual(loaded["clip_index"], 0)
         self.assertEqual(loaded["source_frame_indices"], [10, 11, 12])
+        self.assertEqual(loaded["review_mode"], "native_fps_contiguous_rollout")
+        self.assertEqual(loaded["fps"], 50.0)
+        self.assertEqual(loaded["frame_count"], 3)
+        self.assertEqual(loaded["source_frame_range"], [10, 12])
+        evidence = native_fps_review_evidence(loaded)
+        self.assertEqual(evidence["fps"], 50.0)
+        self.assertEqual(evidence["frame_count"], 3)
+        self.assertEqual(evidence["source_frame_range"], [10, 12])
         self.assertEqual(
             tuple(loaded["g1_body_names"][:3]),
             ("pelvis", "left_hip_roll_link", "left_knee_link"),
@@ -168,6 +179,9 @@ class SonicValidationCallbackTests(unittest.TestCase):
                 height=384,
             )
             self.assertEqual(report["status"], "ok")
+            self.assertEqual(report["review_mode"], "native_fps_contiguous_rollout")
+            self.assertEqual(report["frame_count"], 3)
+            self.assertEqual(report["source_frame_range"], [10, 12])
             self.assertIn("floor_contact_grid", report["readable_features"])
             self.assertIn("root_rotation_axes", report["readable_features"])
             self.assertIn("source_target_frame_counters", report["readable_features"])
@@ -206,6 +220,66 @@ class SonicValidationCallbackTests(unittest.TestCase):
         self.assertEqual(result.status, "ok")
         self.assertEqual(result.videos_ok, 4)
         self.assertEqual(result.missing, ())
+        manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["review_contract"]["mode"], "native_fps_contiguous_rollout")
+        self.assertTrue(manifest["review_contract"]["final_review_eligible"])
+        self.assertEqual(manifest["results"][0]["fps"], 50.0)
+        self.assertEqual(manifest["results"][0]["frame_count"], 2)
+        self.assertEqual(manifest["results"][0]["source_frame_range"], [10, 11])
+
+    @unittest.skipUnless(RAW_DEPS_AVAILABLE, "numpy is required")
+    def test_export_readable_validation_pack_manifest_contract_without_render_deps(self):
+        trajectory = _dummy_trajectory(frames=3, joints=14)
+
+        def fake_render(*, trajectory, video_path, target_fps, duration_sec, width, height):
+            video_path.parent.mkdir(parents=True, exist_ok=True)
+            video_path.write_bytes(b"fake")
+            return {
+                "status": "ok",
+                "video_path": str(video_path),
+                "fps": float(target_fps),
+                "frame_count": len(trajectory["target_g1"]),
+                "source_frame_range": [10, 12],
+                "review_mode": "native_fps_contiguous_rollout",
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw_dir = (
+                root
+                / "sonic_bones_seed_A1_concat_group"
+                / "online_retarget_visual_validation"
+                / "step_00005000"
+                / "rank_000"
+            )
+            save_raw_validation_trajectory(
+                trajectory=trajectory,
+                output_path=raw_dir / "clip_00_fixture_trajectory.npz",
+                target_fps=50,
+                duration_sec=3 / 50,
+            )
+            with mock.patch(
+                "online_retarget.sonic_validation_export.render_readable_validation_video",
+                side_effect=fake_render,
+            ):
+                result = export_readable_validation_pack(
+                    search_root=root,
+                    run_group="group",
+                    output_dir=root / "pack",
+                    clips=(0,),
+                    variants=("A1_concat",),
+                    width=960,
+                    height=384,
+                )
+
+            manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(manifest["review_contract"]["final_review_eligible"])
+        self.assertEqual(manifest["review_contract"]["evidence"][0]["fps"], 50.0)
+        self.assertEqual(manifest["review_contract"]["evidence"][0]["frame_count"], 3)
+        self.assertEqual(manifest["review_contract"]["evidence"][0]["source_frame_range"], [10, 12])
+        self.assertEqual(manifest["results"][0]["review_contract"]["mode"], "native_fps_contiguous_rollout")
 
     @unittest.skipUnless(RENDER_DEPS_AVAILABLE, "render dependencies are required")
     def test_render_triplet_video_writes_mp4_with_current_matplotlib(self):

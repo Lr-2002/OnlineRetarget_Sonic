@@ -29,6 +29,24 @@ if sonic_train is not None:
 
 @unittest.skipIf(sonic_train is None, "torch is required for sonic kin trainer tests")
 class SonicKinTrainTimingTests(unittest.TestCase):
+    def test_apply_cli_overrides_can_force_visual_validation_cadence_without_touching_max_steps(self):
+        config = {
+            "training": {"max_steps": 1000000},
+            "visual_validation": {"enabled": True, "every_steps": 100000},
+        }
+
+        class Args:
+            max_steps = 10000
+            visual_validation_every_steps = 5000
+            disable_visual_validation = False
+            wandb_mode = None
+
+        updated = sonic_train.apply_cli_overrides(copy.deepcopy(config), Args())
+
+        self.assertEqual(updated["training"]["max_steps"], 10000)
+        self.assertTrue(updated["visual_validation"]["enabled"])
+        self.assertEqual(updated["visual_validation"]["every_steps"], 5000)
+
     def test_shared_evaluation_cohort_ignores_variant_name_and_run_group(self):
         rows = [
             {
