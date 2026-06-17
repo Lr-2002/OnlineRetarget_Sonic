@@ -453,15 +453,22 @@ def _find_latest_raw_trajectories(
 ) -> dict[tuple[str, int], Path]:
     candidates: dict[tuple[str, int], list[Path]] = {}
     for clip_index in clips:
-        pattern = (
-            f"*{run_group}*/online_retarget_visual_validation/step_*/rank_*/"
-            f"clip_{int(clip_index):02d}_*_trajectory.npz"
+        patterns = (
+            (
+                f"*{run_group}*/online_retarget_visual_validation/step_*/rank_*/"
+                f"clip_{int(clip_index):02d}_*_trajectory.npz"
+            ),
+            (
+                f"*{run_group}*/visual_validation/step_*/accepted_vertical_v2/"
+                f"clip_{int(clip_index):02d}_*_trajectory.npz"
+            ),
         )
-        for path in search_root.glob(pattern):
-            variant = _variant_from_path(path, variants)
-            if variant is None:
-                continue
-            candidates.setdefault((variant, int(clip_index)), []).append(path)
+        for pattern in patterns:
+            for path in search_root.glob(pattern):
+                variant = _variant_from_path(path, variants)
+                if variant is None:
+                    continue
+                candidates.setdefault((variant, int(clip_index)), []).append(path)
     latest: dict[tuple[str, int], Path] = {}
     for key, paths in candidates.items():
         latest[key] = max(paths, key=lambda item: (_step_number(item), item.stat().st_mtime))

@@ -288,6 +288,56 @@ class SonicValidationCallbackTests(unittest.TestCase):
         self.assertIsNone(manifest["results"][0]["review_contract"]["blocked_reason"])
 
     @unittest.skipUnless(RAW_DEPS_AVAILABLE, "numpy is required")
+    def test_export_readable_validation_pack_discovers_accepted_vertical_v2_raw_trajectory(self):
+        trajectory = _dummy_trajectory(frames=3, joints=14)
+
+        def fake_render(*, trajectory, video_path, target_fps, duration_sec, width, height):
+            video_path.parent.mkdir(parents=True, exist_ok=True)
+            video_path.write_bytes(b"fake")
+            return {
+                "status": "ok",
+                "video_path": str(video_path),
+                "fps": float(target_fps),
+                "frame_count": len(trajectory["target_g1"]),
+                "source_frame_range": [10, 12],
+                "review_mode": "native_fps_contiguous_rollout",
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw_dir = (
+                root
+                / "sonic_bones_seed_A1_concat_group"
+                / "visual_validation"
+                / "step_00005000"
+                / "accepted_vertical_v2"
+            )
+            save_raw_validation_trajectory(
+                trajectory=trajectory,
+                output_path=raw_dir / "clip_00_fixture_trajectory.npz",
+                target_fps=50,
+                duration_sec=3 / 50,
+            )
+            with mock.patch(
+                "online_retarget.sonic_validation_export.render_readable_validation_video",
+                side_effect=fake_render,
+            ):
+                result = export_readable_validation_pack(
+                    search_root=root,
+                    run_group="group",
+                    output_dir=root / "pack",
+                    clips=(0,),
+                    variants=("A1_concat",),
+                    width=960,
+                    height=384,
+                )
+                manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.videos_ok, 1)
+        self.assertTrue(manifest["results"][0]["raw_trajectory_path"].endswith("clip_00_fixture_trajectory.npz"))
+
+    @unittest.skipUnless(RAW_DEPS_AVAILABLE, "numpy is required")
     def test_native_fps_review_evidence_requires_source_frame_provenance(self):
         trajectory = _dummy_trajectory(frames=3, joints=14)
         trajectory["source_frame_indices"] = []

@@ -75,6 +75,7 @@ from online_retarget.metric_validation_artifacts import (  # noqa: E402
     visual_validation_wandb_payload,
     write_metric_validation_artifact,
 )
+from online_retarget.sonic_validation_export import save_raw_validation_trajectory  # noqa: E402
 from online_retarget.data_package_indicator import (  # noqa: E402
     data_package_config,
     filter_rows_by_data_package_config,
@@ -2032,6 +2033,39 @@ def resample_soma_array(
     return np.concatenate([out, pad], axis=0).astype(np.float32, copy=False)
 
 
+def resample_soma_frame_indices(
+    source_frame_count: int,
+    fps_source: float,
+    fps_target: float,
+    *,
+    target_len: int | None = None,
+) -> np.ndarray:
+    if source_frame_count <= 0:
+        return np.zeros((0,), dtype=np.int64)
+    if (
+        source_frame_count <= 1
+        or fps_source <= 0
+        or fps_target <= 0
+        or abs(fps_source - fps_target) < 1e-6
+    ):
+        out = np.arange(source_frame_count, dtype=np.int64)
+    else:
+        duration = (source_frame_count - 1) / float(fps_source)
+        target_times = np.arange(0.0, duration, 1.0 / float(fps_target), dtype=np.float32)
+        if target_times.shape[0] <= 1:
+            out = np.zeros((1,), dtype=np.int64)
+        else:
+            phase = target_times / duration
+            src_pos = phase * (source_frame_count - 1)
+            out = np.floor(src_pos).astype(np.int64)
+    if target_len is None or out.shape[0] == target_len:
+        return out
+    if out.shape[0] > target_len:
+        return out[:target_len]
+    pad = np.repeat(out[-1:], target_len - out.shape[0], axis=0)
+    return np.concatenate([out, pad], axis=0).astype(np.int64, copy=False)
+
+
 def build_soma_motionlib_features(
     arrays: dict[str, np.ndarray],
     frame_indices: np.ndarray,
@@ -2168,6 +2202,12 @@ def load_soma_motionlib_arrays(row: Mapping[str, Any], config: Mapping[str, Any]
     robot_fps = float(robot.get("fps") or input_cfg.get("target_fps") or 50.0)
     soma_fps = float(soma.get("fps") or input_cfg.get("source_fps") or robot_fps)
     target_len = min(dof.shape[0], root_rot.shape[0], root_pos.shape[0])
+    source_frame_indices = resample_soma_frame_indices(
+        int(np.asarray(soma["soma_joints"]).shape[0]),
+        soma_fps,
+        robot_fps,
+        target_len=target_len,
+    )
     soma_joints = resample_soma_array(
         np.asarray(soma["soma_joints"], dtype=np.float32),
         soma_fps,
@@ -2193,6 +2233,8 @@ def load_soma_motionlib_arrays(row: Mapping[str, Any], config: Mapping[str, Any]
         "root_pos": root_pos,
         "root_rot": root_rot,
         "joint_names": list(soma.get("joint_names", SOMA_JOINT_NAMES)),
+        "source_frame_indices": source_frame_indices.astype(np.int64, copy=False),
+        "source_fps": np.asarray(soma_fps, dtype=np.float32),
         "fps": np.asarray(robot_fps, dtype=np.float32),
     }
 
@@ -4588,6 +4630,7 @@ def _render_motionlib_acceptance_visual_validation_clip(
     paths = accepted_vertical_v2_artifact_paths(output_dir, sample_id=sample_id, step=step)
     clip_dir = paths["artifact_dir"]
     clip_dir.mkdir(parents=True, exist_ok=True)
+    raw_trajectory_path = clip_dir / f"clip_{index:02d}_{sample_id}_trajectory.npz"
 
     source_video = paths["row1_video"]
     target_video = paths["row2_video"]
@@ -4655,6 +4698,18 @@ def _render_motionlib_acceptance_visual_validation_clip(
             "capsule_renderer_used": False,
         }
     )
+    source_frame_indices_value = arrays.get("source_frame_indices")
+    if source_frame_indices_value is None:
+        source_frame_indices = np.zeros((0,), dtype=np.int64)
+    else:
+        source_frame_indices = np.asarray(source_frame_indices_value, dtype=np.int64)[:frame_count]
+    if source_frame_indices.shape[0] != frame_count:
+        source_frame_indices = resample_soma_frame_indices(
+            int(arrays["soma_joints"].shape[0]),
+            float(arrays.get("source_fps", fps)),
+            fps,
+            target_len=frame_count,
+        )
 
     prediction = _predict_motionlib_visual_g1_state(
         model=model,
@@ -4669,7 +4724,21 @@ def _render_motionlib_acceptance_visual_validation_clip(
         row=row,
         skeleton_feature_lookup=skeleton_feature_lookup,
     )
+    target_tracking_frames = _g1_tracking_body_frames(
+        arrays["joint_pos"][:frame_count],
+        root_pos=root_pos,
+        root_quat=root_quat,
+        g1_model=g1_model,
+        render_deps=render_deps,
+    )
     inference_root_quat = _prediction_root_quat_wxyz(prediction, frame_count=frame_count)
+    inferred_tracking_frames = _g1_tracking_body_frames(
+        prediction["joint_pos"][:frame_count],
+        root_pos=prediction["root_pos"][:frame_count],
+        root_quat=inference_root_quat[:frame_count],
+        g1_model=g1_model,
+        render_deps=render_deps,
+    )
     motion_asset_report = visual_renderer.write_g1_motion_npz(
         path=inference_motion,
         joint_pos=prediction["joint_pos"][:frame_count],
@@ -4717,6 +4786,33 @@ def _render_motionlib_acceptance_visual_validation_clip(
         target_motion_path=target_motion,
         prediction_motion_path=inference_motion,
     )
+    raw_trajectory_report = save_raw_validation_trajectory(
+        trajectory={
+            "clip_index": int(index),
+            "local_env_index": int(index),
+            "motion_id": row.get("motion_id"),
+            "motion_key": row.get("filename") or row.get("relative_path") or sample_id,
+            "source_soma": arrays["soma_joints"][:frame_count],
+            "target_g1": target_tracking_frames,
+            "inferred_g1": inferred_tracking_frames,
+            "target_root_pos_w": root_pos[:frame_count],
+            "target_root_rot_w": root_quat[:frame_count],
+            "pred_root_pos_w": prediction["root_pos"][:frame_count],
+            "pred_root_rot_w": inference_root_quat[:frame_count],
+            "source_frame_indices": source_frame_indices.tolist(),
+            "encoder_routes": [],
+            "source_fps": fps,
+            "target_fps": fps,
+            "physical_time_aligned": True,
+            "root_rot_format": "wxyz",
+            "initial_root_xy_zeroed": False,
+            "source_soma_names": arrays.get("joint_names"),
+            "g1_body_names": A0_TRACKING_BODY_NAMES,
+        },
+        output_path=raw_trajectory_path,
+        target_fps=fps,
+        duration_sec=frame_count / fps if fps > 0 else 0.0,
+    )
 
     combine_report = _combine_panel_videos(
         (source_video, target_video, inference_video),
@@ -4763,6 +4859,9 @@ def _render_motionlib_acceptance_visual_validation_clip(
         "combined_video": str(combined_video),
         "metadata": str(metadata_path),
         "body_position_metrics": body_position_metrics,
+        "raw_trajectory_path": raw_trajectory_report["raw_trajectory_path"],
+        "raw_trajectory_metadata_path": raw_trajectory_report["raw_trajectory_metadata_path"],
+        "raw_trajectory_frames": raw_trajectory_report["raw_trajectory_frames"],
         "acceptance_ok": bool(acceptance_ok),
         "accepted_vertical_v2_status": metadata["visual_backend"].get("accepted_vertical_v2_status"),
         "acceptance_failure_reasons": failure_reasons,
