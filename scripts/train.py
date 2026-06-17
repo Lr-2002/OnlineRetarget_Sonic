@@ -3808,7 +3808,7 @@ def _wandb_periodic_eval_payload(
         if isinstance(accepted_vertical, dict) and accepted_vertical.get("enabled"):
             payload["periodic_eval/accepted_vertical_v2_status"] = accepted_vertical.get("status", "")
             payload["periodic_eval/accepted_vertical_v2_export_status"] = accepted_vertical.get("export_status", "")
-            payload["periodic_eval/accepted_vertical_v2_primary_video"] = accepted_vertical.get(
+            payload["periodic_eval/accepted_vertical_v2/primary_video"] = accepted_vertical.get(
                 "primary_video", ""
             )
             payload["periodic_eval/accepted_vertical_v2_ok_count"] = int(
@@ -5020,11 +5020,11 @@ def _wandb_log_visualization(
         f"{key_prefix}/summary_json": visualization.get("summary_json", ""),
         f"{key_prefix}/sample_count": visualization.get("sample_count", 0),
         f"{key_prefix}/trajectory_row_count": visualization.get("trajectory_row_count", 0),
-        f"{key_prefix}/accepted_vertical_v2_status": accepted_vertical.get("status", ""),
-        f"{key_prefix}/accepted_vertical_v2_primary_video": accepted_vertical.get(
+        f"{key_prefix}/accepted_vertical_v2/status": accepted_vertical.get("status", ""),
+        f"{key_prefix}/accepted_vertical_v2/primary_video": accepted_vertical.get(
             "primary_video", ""
         ),
-        f"{key_prefix}/accepted_vertical_v2_primary_metadata": accepted_vertical.get(
+        f"{key_prefix}/accepted_vertical_v2/primary_metadata": accepted_vertical.get(
             "primary_metadata", ""
         ),
         f"{key_prefix}/capsule_status": capsule.get("status", ""),
@@ -5056,10 +5056,10 @@ def _wandb_log_visualization(
         import wandb
 
         for key, field in (
-            ("accepted_vertical_v2_primary", "primary_video"),
-            ("accepted_vertical_v2_row1_soma_somamesh", "primary_row1_soma_somamesh_video"),
-            ("accepted_vertical_v2_row2_g1_target", "primary_row2_g1_target_isaaclab_video"),
-            ("accepted_vertical_v2_row3_g1_kinematics", "primary_row3_g1_kinematics_isaaclab_video"),
+            ("accepted_vertical_v2/primary", "primary_video"),
+            ("accepted_vertical_v2/row1_soma_somamesh", "primary_row1_soma_somamesh_video"),
+            ("accepted_vertical_v2/row2_g1_target", "primary_row2_g1_target_isaaclab_video"),
+            ("accepted_vertical_v2/row3_g1_kinematics", "primary_row3_g1_kinematics_isaaclab_video"),
         ):
             path = Path(str(accepted_vertical.get(field, "")))
             if path.exists():
