@@ -204,6 +204,9 @@ TRAIN_ARGS=(scripts/train_sonic_kin_skeleton_ae.py --config "${CONFIG}")
 if [[ -n "${MAX_STEPS:-}" ]]; then
   TRAIN_ARGS+=(--max-steps "${MAX_STEPS}")
 fi
+if [[ -n "${VISUAL_VALIDATION_EVERY_STEPS:-}" ]]; then
+  TRAIN_ARGS+=(--visual-validation-every-steps "${VISUAL_VALIDATION_EVERY_STEPS}")
+fi
 if [[ -n "${WANDB_MODE:-}" ]]; then
   TRAIN_ARGS+=(--wandb-mode "${WANDB_MODE}")
 fi
@@ -233,7 +236,7 @@ ${TRAIN_COMMAND} 2>&1 | tee -a ${LOG_PATH_QUOTED}
 EOF
 )
 
-"${PYTHON_BIN}" - "${LAUNCH_ROOT}/launch_manifest.json" "${RUN_GROUP}" "${CONFIG}" "${VARIANT}" "${NPROC_PER_NODE}" "${CUDA_VISIBLE_DEVICES}" "${CONTROL_COMMIT}" "${EXTERNAL_SOURCE_COMMIT}" "${WANDB_MODE:-online}" "${DISABLE_VISUAL_VALIDATION:-0}" "${MAX_STEPS:-}" "${SESSION}" "${RESUME_CHECKPOINT}" <<'PY'
+"${PYTHON_BIN}" - "${LAUNCH_ROOT}/launch_manifest.json" "${RUN_GROUP}" "${CONFIG}" "${VARIANT}" "${NPROC_PER_NODE}" "${CUDA_VISIBLE_DEVICES}" "${CONTROL_COMMIT}" "${EXTERNAL_SOURCE_COMMIT}" "${WANDB_MODE:-online}" "${DISABLE_VISUAL_VALIDATION:-0}" "${MAX_STEPS:-}" "${SESSION}" "${RESUME_CHECKPOINT}" "${VISUAL_VALIDATION_EVERY_STEPS:-}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -253,6 +256,7 @@ manifest = {
     "max_steps_override": sys.argv[11],
     "tmux_session": sys.argv[12],
     "resume_checkpoint": sys.argv[13],
+    "visual_validation_every_steps_override": sys.argv[14],
     "entrypoint": "scripts/train_sonic_kin_skeleton_ae.py",
     "distributed_launcher": "python -m torch.distributed.run",
     "contract": "strict_supervised_soma_motionlib_kin_only_no_ppo_no_isaac_no_reward_episode_length",

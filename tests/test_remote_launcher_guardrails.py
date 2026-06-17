@@ -1010,6 +1010,9 @@ class SupervisedSomaMotionlibFourGpuLauncherTests(unittest.TestCase):
         text = self.launcher_text
         self.assertIn("MAX_STEPS", text)
         self.assertIn("--max-steps", text)
+        self.assertIn("VISUAL_VALIDATION_EVERY_STEPS", text)
+        self.assertIn("--visual-validation-every-steps", text)
+        self.assertIn('"visual_validation_every_steps_override": sys.argv[14]', text)
         self.assertIn("WANDB_MODE", text)
         self.assertIn("--wandb-mode", text)
         self.assertIn("DISABLE_VISUAL_VALIDATION", text)

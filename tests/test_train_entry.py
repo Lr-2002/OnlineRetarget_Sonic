@@ -576,6 +576,9 @@ class TrainEntryTests(unittest.TestCase):
 
         self.assertEqual(accepted["status"], "blocked")
         self.assertEqual(accepted["export_status"], "ok")
+        self.assertFalse(accepted["review_contract"]["final_review_eligible"])
+        self.assertEqual(accepted["review_contract"]["mode"], "metric_horizon_bridge_only")
+        self.assertTrue(accepted["review_contract"]["native_fps_review_required"])
         self.assertEqual(result["primary_backend"], "accepted_vertical_v2")
         self.assertEqual(result["route_visualization_status"], "ok")
         self.assertEqual(result["status"], "blocked")
