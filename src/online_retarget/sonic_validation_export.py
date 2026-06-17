@@ -346,8 +346,10 @@ def export_readable_validation_pack(
     evidence: list[dict[str, Any]] = []
     videos_ok = 0
     videos_failed = 0
+    contract_failed = 0
     for variant in variants:
         for clip_index in clips:
+            native_contract: dict[str, Any] = {}
             key = (variant, int(clip_index))
             raw_path = raw_by_key.get(key)
             if raw_path is None:
@@ -356,6 +358,8 @@ def export_readable_validation_pack(
             try:
                 trajectory = load_raw_validation_trajectory(raw_path)
                 native_contract = native_fps_review_evidence(trajectory)
+                if not native_contract.get("final_review_eligible", False):
+                    raise RuntimeError(native_contract["blocked_reason"])
                 target_fps = float(trajectory.get("target_fps", 50.0))
                 duration_sec = float(trajectory.get("duration_sec", 4.0))
                 video_path = output_dir / variant / f"clip_{clip_index:02d}_readable.mp4"
@@ -371,7 +375,8 @@ def export_readable_validation_pack(
                 status = "ok"
             except Exception as exc:  # noqa: BLE001
                 render_report = {"status": "failed", "message": str(exc)}
-                native_contract = {}
+                if native_contract and not native_contract.get("final_review_eligible", False):
+                    contract_failed += 1
                 videos_failed += 1
                 status = "failed"
             if native_contract:
@@ -389,12 +394,20 @@ def export_readable_validation_pack(
                     "render": render_report,
                 }
             )
+            native_contract = {}
 
     if missing and not allow_missing:
         videos_failed += len(missing)
     status = "ok" if not missing and videos_failed == 0 else "partial"
     if missing and not allow_missing:
         status = "blocked"
+    elif contract_failed > 0:
+        status = "failed"
+    final_review_eligible = (
+        status == "ok"
+        and bool(evidence)
+        and all(item.get("final_review_eligible", False) for item in evidence)
+    )
     manifest = {
         "status": status,
         "run_group": run_group,
@@ -408,7 +421,7 @@ def export_readable_validation_pack(
         "review_contract": {
             "mode": NATIVE_FPS_REVIEW_MODE,
             "source": "online_retarget_visual_validation raw *_trajectory.npz",
-            "final_review_eligible": status == "ok",
+            "final_review_eligible": final_review_eligible,
             "requires_raw_trajectory_npz": True,
             "rejects_metric_horizon_predictions_jsonl": True,
             "required_rerun_when_missing": (
@@ -495,6 +508,7 @@ def _trajectory_metadata(
     frame_count: int,
 ) -> dict[str, Any]:
     source_frame_indices = [int(value) for value in trajectory.get("source_frame_indices") or []]
+    source_frame_range = _covered_source_frame_range(source_frame_indices, frame_count)
     return {
         "review_mode": NATIVE_FPS_REVIEW_MODE,
         "clip_index": _json_value(trajectory.get("clip_index")),
@@ -505,7 +519,7 @@ def _trajectory_metadata(
         "target_fps": float(target_fps),
         "fps": float(target_fps),
         "frame_count": int(frame_count),
-        "source_frame_range": _source_frame_range(source_frame_indices[:frame_count]),
+        "source_frame_range": source_frame_range,
         "duration_sec": float(duration_sec),
         "target_frame_count": int(frame_count),
         "physical_time_aligned": bool(trajectory.get("physical_time_aligned", False)),
@@ -527,14 +541,30 @@ def native_fps_review_evidence(trajectory: Mapping[str, Any]) -> dict[str, Any]:
     if fps <= 0:
         raise RuntimeError(f"native-fps review requires positive fps, got {fps}")
     source_frame_indices = [int(value) for value in trajectory.get("source_frame_indices") or []]
+    covered_frame_count = min(frame_count, len(source_frame_indices))
+    source_frame_range = _covered_source_frame_range(source_frame_indices, frame_count)
+    physical_time_aligned = bool(trajectory.get("physical_time_aligned", False))
+    blocked_reasons: list[str] = []
+    if covered_frame_count != frame_count:
+        blocked_reasons.append(
+            f"source_frame_indices cover {covered_frame_count} of {frame_count} rendered frames"
+        )
+    if source_frame_range is None:
+        blocked_reasons.append("source_frame_range is required for final native-fps review")
+    if not physical_time_aligned:
+        blocked_reasons.append("physical_time_aligned must be true for final native-fps review")
+    final_review_eligible = len(blocked_reasons) == 0
     return {
         "mode": NATIVE_FPS_REVIEW_MODE,
         "fps": fps,
         "frame_count": int(frame_count),
-        "source_frame_range": _source_frame_range(source_frame_indices[:frame_count]),
+        "source_frame_range": source_frame_range,
         "duration_sec": float(frame_count / fps),
-        "physical_time_aligned": bool(trajectory.get("physical_time_aligned", False)),
-        "final_review_eligible": True,
+        "source_frame_indices_count": int(len(source_frame_indices)),
+        "source_frame_indices_covered": int(covered_frame_count),
+        "physical_time_aligned": physical_time_aligned,
+        "final_review_eligible": final_review_eligible,
+        "blocked_reason": "; ".join(blocked_reasons) if blocked_reasons else None,
     }
 
 
@@ -543,6 +573,13 @@ def _source_frame_range(indices: Sequence[int]) -> list[int] | None:
     if not values:
         return None
     return [values[0], values[-1]]
+
+
+def _covered_source_frame_range(indices: Sequence[int], frame_count: int) -> list[int] | None:
+    values = [int(value) for value in indices]
+    if frame_count <= 0 or len(values) < frame_count:
+        return None
+    return _source_frame_range(values[:frame_count])
 
 
 def _optional_root_pose_arrays(

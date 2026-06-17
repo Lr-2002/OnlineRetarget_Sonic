@@ -154,6 +154,11 @@ class SonicValidationCallbackTests(unittest.TestCase):
         self.assertEqual(evidence["fps"], 50.0)
         self.assertEqual(evidence["frame_count"], 3)
         self.assertEqual(evidence["source_frame_range"], [10, 12])
+        self.assertEqual(evidence["source_frame_indices_count"], 3)
+        self.assertEqual(evidence["source_frame_indices_covered"], 3)
+        self.assertTrue(evidence["physical_time_aligned"])
+        self.assertTrue(evidence["final_review_eligible"])
+        self.assertIsNone(evidence["blocked_reason"])
         self.assertEqual(
             tuple(loaded["g1_body_names"][:3]),
             ("pelvis", "left_hip_roll_link", "left_knee_link"),
@@ -280,6 +285,116 @@ class SonicValidationCallbackTests(unittest.TestCase):
         self.assertEqual(manifest["review_contract"]["evidence"][0]["frame_count"], 3)
         self.assertEqual(manifest["review_contract"]["evidence"][0]["source_frame_range"], [10, 12])
         self.assertEqual(manifest["results"][0]["review_contract"]["mode"], "native_fps_contiguous_rollout")
+        self.assertIsNone(manifest["results"][0]["review_contract"]["blocked_reason"])
+
+    @unittest.skipUnless(RAW_DEPS_AVAILABLE, "numpy is required")
+    def test_native_fps_review_evidence_requires_source_frame_provenance(self):
+        trajectory = _dummy_trajectory(frames=3, joints=14)
+        trajectory["source_frame_indices"] = []
+
+        evidence = native_fps_review_evidence(trajectory)
+
+        self.assertFalse(evidence["final_review_eligible"])
+        self.assertIsNone(evidence["source_frame_range"])
+        self.assertEqual(evidence["source_frame_indices_count"], 0)
+        self.assertEqual(evidence["source_frame_indices_covered"], 0)
+        self.assertIn("source_frame_indices cover 0 of 3 rendered frames", evidence["blocked_reason"])
+        self.assertIn("source_frame_range is required", evidence["blocked_reason"])
+
+    @unittest.skipUnless(RAW_DEPS_AVAILABLE, "numpy is required")
+    def test_native_fps_review_evidence_requires_physical_time_alignment(self):
+        trajectory = _dummy_trajectory(frames=3, joints=14)
+        trajectory["physical_time_aligned"] = False
+
+        evidence = native_fps_review_evidence(trajectory)
+
+        self.assertFalse(evidence["final_review_eligible"])
+        self.assertEqual(evidence["source_frame_range"], [10, 12])
+        self.assertFalse(evidence["physical_time_aligned"])
+        self.assertIn("physical_time_aligned must be true", evidence["blocked_reason"])
+
+    @unittest.skipUnless(RAW_DEPS_AVAILABLE, "numpy is required")
+    def test_export_readable_validation_pack_fails_without_source_frame_provenance(self):
+        trajectory = _dummy_trajectory(frames=3, joints=14)
+        trajectory["source_frame_indices"] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw_dir = (
+                root
+                / "sonic_bones_seed_A1_concat_group"
+                / "online_retarget_visual_validation"
+                / "step_00005000"
+                / "rank_000"
+            )
+            save_raw_validation_trajectory(
+                trajectory=trajectory,
+                output_path=raw_dir / "clip_00_fixture_trajectory.npz",
+                target_fps=50,
+                duration_sec=3 / 50,
+            )
+            with mock.patch(
+                "online_retarget.sonic_validation_export.render_readable_validation_video"
+            ) as render_mock:
+                result = export_readable_validation_pack(
+                    search_root=root,
+                    run_group="group",
+                    output_dir=root / "pack",
+                    clips=(0,),
+                    variants=("A1_concat",),
+                    width=960,
+                    height=384,
+                )
+            manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+
+        render_mock.assert_not_called()
+        self.assertEqual(result.status, "failed")
+        self.assertFalse(manifest["review_contract"]["final_review_eligible"])
+        self.assertEqual(manifest["results"][0]["status"], "failed")
+        self.assertIn("source_frame_indices cover 0 of 3 rendered frames", manifest["results"][0]["render"]["message"])
+        self.assertFalse(manifest["results"][0]["review_contract"]["final_review_eligible"])
+        self.assertIsNone(manifest["results"][0]["review_contract"]["source_frame_range"])
+
+    @unittest.skipUnless(RAW_DEPS_AVAILABLE, "numpy is required")
+    def test_export_readable_validation_pack_fails_without_physical_time_alignment(self):
+        trajectory = _dummy_trajectory(frames=3, joints=14)
+        trajectory["physical_time_aligned"] = False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw_dir = (
+                root
+                / "sonic_bones_seed_A1_concat_group"
+                / "online_retarget_visual_validation"
+                / "step_00005000"
+                / "rank_000"
+            )
+            save_raw_validation_trajectory(
+                trajectory=trajectory,
+                output_path=raw_dir / "clip_00_fixture_trajectory.npz",
+                target_fps=50,
+                duration_sec=3 / 50,
+            )
+            with mock.patch(
+                "online_retarget.sonic_validation_export.render_readable_validation_video"
+            ) as render_mock:
+                result = export_readable_validation_pack(
+                    search_root=root,
+                    run_group="group",
+                    output_dir=root / "pack",
+                    clips=(0,),
+                    variants=("A1_concat",),
+                    width=960,
+                    height=384,
+                )
+            manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+
+        render_mock.assert_not_called()
+        self.assertEqual(result.status, "failed")
+        self.assertFalse(manifest["review_contract"]["final_review_eligible"])
+        self.assertEqual(manifest["results"][0]["status"], "failed")
+        self.assertIn("physical_time_aligned must be true", manifest["results"][0]["render"]["message"])
+        self.assertFalse(manifest["results"][0]["review_contract"]["final_review_eligible"])
 
     @unittest.skipUnless(RENDER_DEPS_AVAILABLE, "render dependencies are required")
     def test_render_triplet_video_writes_mp4_with_current_matplotlib(self):
