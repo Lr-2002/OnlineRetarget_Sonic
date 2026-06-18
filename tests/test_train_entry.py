@@ -801,6 +801,8 @@ class TrainEntryTests(unittest.TestCase):
         config_text = Path("configs/bones_sonic_diffusion_policy_debug.yaml").read_text(
             encoding="utf-8"
         )
+        self.assertIn("visual_validation:\n  enabled: true", config_text)
+        self.assertIn("output_dir: online_retarget_visual_validation", config_text)
         self.assertIn("primary_backend: accepted_vertical_v2", config_text)
         self.assertIn("capsule:\n    enabled: false", config_text)
         self.assertIn("accepted_vertical_v2:\n    enabled: true", config_text)
@@ -815,8 +817,13 @@ class TrainEntryTests(unittest.TestCase):
             return
         config = train_entry._load_config(Path("configs/bones_sonic_diffusion_policy_debug.yaml"))
 
+        native_visual_cfg = config["visual_validation"]
         visual_cfg = config["visualization"]["accepted_vertical_v2"]
 
+        self.assertTrue(native_visual_cfg["enabled"])
+        self.assertEqual(native_visual_cfg["num_videos"], 2)
+        self.assertEqual(native_visual_cfg["output_dir"], "online_retarget_visual_validation")
+        self.assertEqual(native_visual_cfg["readable_clip_indices"], [0])
         self.assertEqual(config["visualization"]["primary_backend"], "accepted_vertical_v2")
         self.assertFalse(config["visualization"]["capsule"]["enabled"])
         self.assertTrue(visual_cfg["enabled"])
@@ -875,6 +882,8 @@ class TrainEntryTests(unittest.TestCase):
     def test_route_b_visual_smoke_config_enables_single_clip_accepted_vertical_v2_export(self):
         config_path = Path("configs/bones_sonic_temporal_diffusion_policy_vis_smoke.yaml")
         config_text = config_path.read_text(encoding="utf-8")
+        self.assertIn("visual_validation:\n  enabled: true", config_text)
+        self.assertIn("output_dir: online_retarget_visual_validation", config_text)
         self.assertIn("primary_backend: accepted_vertical_v2", config_text)
         self.assertIn("artifact_name: route_b_walk_visual_smoke", config_text)
         self.assertIn("wandb_upload: true", config_text)
@@ -888,12 +897,17 @@ class TrainEntryTests(unittest.TestCase):
             return
 
         config = train_entry._load_config(config_path)
+        native_visual_cfg = config["visual_validation"]
         visual_cfg = config["visualization"]
         accepted_cfg = visual_cfg["accepted_vertical_v2"]
 
         self.assertEqual(config["experiment"]["name"], "bones_sonic_temporal_diffusion_policy_vis_smoke")
         self.assertEqual(config["tracking"]["wandb_mode"], "online")
         self.assertTrue(config["data"]["allow_debug_data"])
+        self.assertTrue(native_visual_cfg["enabled"])
+        self.assertEqual(native_visual_cfg["num_videos"], 1)
+        self.assertEqual(native_visual_cfg["output_dir"], "online_retarget_visual_validation")
+        self.assertEqual(native_visual_cfg["readable_clip_indices"], [0])
         self.assertEqual(visual_cfg["primary_backend"], "accepted_vertical_v2")
         self.assertEqual(visual_cfg["artifact_name"], "route_b_walk_visual_smoke")
         self.assertEqual(visual_cfg["output_dir"], "visualization/route_b_walk_visual_smoke")
@@ -1044,6 +1058,105 @@ class TrainEntryTests(unittest.TestCase):
             },
         )
 
+    def test_run_periodic_eval_if_due_invokes_native_fps_backend_for_temporal_dp(self):
+        class FakeTensor:
+            def __getitem__(self, _item):
+                return self
+
+            def detach(self):
+                return self
+
+            def cpu(self):
+                return self
+
+            def tolist(self):
+                return [[0.25, 1.25]]
+
+        class FakeNoGrad:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        class FakeTorch:
+            @staticmethod
+            def no_grad():
+                return FakeNoGrad()
+
+        class FakeModel:
+            training = True
+
+            def train(self):
+                self.training = True
+
+        native_calls = []
+
+        def fake_native(**kwargs):
+            native_calls.append(
+                {
+                    "step": kwargs["step"],
+                    "model_family": kwargs["model_family"],
+                    "sample_count": len(kwargs["samples"]),
+                }
+            )
+            return {
+                "enabled": True,
+                "status": "ok",
+                "summary_json": "/tmp/out/online_retarget_visual_validation/step_00005000/summary.json",
+                "videos_ok": 1,
+                "videos_failed": 0,
+            }
+
+        def fake_write(**kwargs):
+            return {
+                "step": kwargs["step"],
+                "native_fps_visual_validation": kwargs["native_fps_visual_validation"],
+            }
+
+        periodic_eval = train_entry._periodic_eval_config(
+            {"evaluation": {"every_steps": 5000, "periodic_max_samples": 1}}
+        )
+        samples = [
+            {"sample_id": "s1", "target_joints": [0.0, 1.0]},
+            {"sample_id": "s2", "target_joints": [2.0, 3.0]},
+        ]
+        with mock.patch.object(train_entry, "_predict_tensor", return_value=FakeTensor()):
+            with mock.patch.object(
+                train_entry,
+                "_run_temporal_native_fps_visual_validation",
+                side_effect=fake_native,
+            ):
+                with mock.patch.object(
+                    train_entry,
+                    "_write_periodic_eval_artifacts",
+                    side_effect=fake_write,
+                ):
+                    summary = train_entry._run_periodic_eval_if_due(
+                        torch=FakeTorch,
+                        config={"visual_validation": {"enabled": True}},
+                        output_dir=Path("/tmp/out"),
+                        step=5000,
+                        samples=samples,
+                        model=FakeModel(),
+                        model_family="temporal_diffusion_policy",
+                        prediction_inputs=FakeTensor(),
+                        batch_size=64,
+                        device="cpu",
+                        periodic_eval=periodic_eval,
+                        wandb_run=None,
+                        sample_loader={"sharded": False, "materialized_count": len(samples)},
+                        rank=0,
+                        world_size=1,
+                    )
+
+        self.assertEqual(
+            native_calls,
+            [{"step": 5000, "model_family": "temporal_diffusion_policy", "sample_count": 1}],
+        )
+        self.assertTrue(summary["native_fps_visual_validation"]["enabled"])
+        self.assertEqual(summary["native_fps_visual_validation"]["status"], "ok")
+
     def test_periodic_eval_artifacts_are_step_scoped_and_use_eval_path(self):
         class FakeEvalResult:
             def __init__(self, output_root: Path, run_name: str):
@@ -1132,6 +1245,101 @@ class TrainEntryTests(unittest.TestCase):
                 visual_mock.call_args.kwargs["run_name"],
                 "periodic_step_00005000_visualization",
             )
+
+    def test_periodic_eval_artifacts_persist_native_fps_visual_validation_summary(self):
+        class FakeEvalResult:
+            def __init__(self, output_root: Path, run_name: str):
+                self.output_dir = output_root / "eval" / run_name
+                self.summary_json = self.output_dir / "eval_summary.json"
+                self.per_sample_csv = self.output_dir / "per_sample_metrics.csv"
+                self.failure_manifest_csv = self.output_dir / "failure_manifest.csv"
+                self.sample_count = 1
+                self.overall = {"joint_rmse": 0.25}
+                self.git_sha = "fake"
+                self.git_dirty = False
+                self.output_dir.mkdir(parents=True, exist_ok=True)
+                self.summary_json.write_text("{}\n", encoding="utf-8")
+
+            def to_dict(self):
+                return {
+                    "output_dir": str(self.output_dir),
+                    "summary_json": str(self.summary_json),
+                    "per_sample_csv": str(self.per_sample_csv),
+                    "failure_manifest_csv": str(self.failure_manifest_csv),
+                    "sample_count": self.sample_count,
+                    "overall": self.overall,
+                    "git_sha": self.git_sha,
+                    "git_dirty": self.git_dirty,
+                }
+
+        native_summary = {
+            "enabled": True,
+            "status": "ok",
+            "summary_json": "/tmp/out/online_retarget_visual_validation/step_00005000/summary.json",
+            "videos_ok": 1,
+            "videos_failed": 0,
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "train"
+            periodic_eval = train_entry._periodic_eval_config(
+                {"evaluation": {"every_steps": 5000}}
+            )
+            with mock.patch.object(
+                train_entry,
+                "evaluate_jsonl",
+                side_effect=lambda **kwargs: FakeEvalResult(kwargs["output_root"], kwargs["config"].run_name),
+            ):
+                with mock.patch.object(
+                    train_entry,
+                    "_write_visualization_artifacts",
+                    return_value={"enabled": False},
+                ):
+                    summary = train_entry._write_periodic_eval_artifacts(
+                        config={"evaluation": {"every_steps": 5000}},
+                        output_dir=output_dir,
+                        step=5000,
+                        samples=[
+                            {
+                                "sample_id": "s1",
+                                "target_joints": [0.0, 1.0],
+                            }
+                        ],
+                        predictions=[[0.25, 1.25]],
+                        periodic_eval=periodic_eval,
+                        wandb_run=None,
+                        sample_scope=train_entry._periodic_eval_sample_scope(
+                            rank=0,
+                            world_size=1,
+                            sample_loader={"sharded": False, "materialized_count": 1},
+                            loaded_sample_count=1,
+                            evaluated_sample_count=1,
+                        ),
+                        native_fps_visual_validation=native_summary,
+                    )
+
+            payload = train_entry._wandb_periodic_eval_payload(
+                step=5000,
+                summary=summary,
+                eval_result=types.SimpleNamespace(overall={"joint_rmse": 0.25}, summary_json="eval.json"),
+                visualization={"enabled": False},
+            )
+            persisted = json.loads(
+                (output_dir / "periodic_eval" / "step_00005000" / "periodic_eval_summary.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(persisted["native_fps_visual_validation"]["status"], "ok")
+        self.assertEqual(
+            payload["periodic_eval/native_fps_visual_validation_status"],
+            "ok",
+        )
+        self.assertEqual(
+            payload["periodic_eval/native_fps_visual_validation_summary_json"],
+            native_summary["summary_json"],
+        )
+        self.assertEqual(payload["periodic_eval/native_fps_visual_validation_videos_ok"], 1)
 
     def test_periodic_eval_summary_log_and_wandb_payload_mark_shard_scope(self):
         class FakeEvalResult:

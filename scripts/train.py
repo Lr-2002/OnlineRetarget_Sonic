@@ -958,6 +958,37 @@ def _periodic_eval_config(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _native_fps_visual_validation_config(config: dict[str, Any]) -> dict[str, Any]:
+    visual_cfg = config.get("visual_validation", {})
+    visual_cfg = dict(visual_cfg) if isinstance(visual_cfg, dict) else {}
+    data_cfg = config.get("data", {})
+    data_cfg = dict(data_cfg) if isinstance(data_cfg, dict) else {}
+    enabled = _bool_value(visual_cfg.get("enabled", False), default=False)
+    visualization_cfg = config.get("visualization", {})
+    visualization_cfg = dict(visualization_cfg) if isinstance(visualization_cfg, dict) else {}
+    capsule_cfg = visualization_cfg.get("capsule", {})
+    capsule_cfg = dict(capsule_cfg) if isinstance(capsule_cfg, dict) else {}
+    model_xml = visual_cfg.get("model_xml") or capsule_cfg.get("model_xml")
+    return {
+        "enabled": enabled,
+        "num_videos": max(0, int(visual_cfg.get("num_videos", visual_cfg.get("count", 1)) or 0)),
+        "duration_sec": float(visual_cfg.get("duration_sec", 4.0) or 4.0),
+        "output_dir": str(visual_cfg.get("output_dir", "online_retarget_visual_validation")),
+        "wandb_upload": _bool_value(visual_cfg.get("wandb_upload", True), default=True),
+        "readable_render": _bool_value(visual_cfg.get("readable_render", True), default=True),
+        "readable_clip_indices": visual_cfg.get("readable_clip_indices", [0]),
+        "model_xml": str(model_xml or ""),
+        "source_bvh_tar": str(visual_cfg.get("source_bvh_tar", data_cfg.get("source_bvh_tar", "")) or ""),
+        "source_bvh_cache": str(visual_cfg.get("source_bvh_cache", "") or ""),
+        "source_bvh_roots": [
+            str(path)
+            for path in _visual_validation_path_list(
+                visual_cfg.get("source_bvh_roots", visual_cfg.get("source_bvh_root", []))
+            )
+        ],
+    }
+
+
 def _should_run_periodic_eval(step: int, periodic_eval: dict[str, Any]) -> bool:
     if not bool(periodic_eval.get("enabled", False)):
         return False
@@ -1029,6 +1060,68 @@ def _slice_prediction_inputs(value: Any, count: int) -> Any:
     return value[:count]
 
 
+def _run_temporal_native_fps_visual_validation(
+    *,
+    torch,
+    model: Any,
+    config: dict[str, Any],
+    output_dir: Path,
+    step: int,
+    samples: list[dict[str, Any]],
+    model_family: str,
+    device: Any,
+    wandb_run: Any,
+) -> dict[str, Any]:
+    visual_cfg = _native_fps_visual_validation_config(config)
+    if not bool(visual_cfg.get("enabled", False)):
+        return {"enabled": False}
+    if str(model_family) != "temporal_diffusion_policy":
+        return {
+            "enabled": True,
+            "status": "skipped",
+            "message": (
+                "native-fps visual validation is currently implemented for "
+                "temporal_diffusion_policy only"
+            ),
+            "step": int(step),
+            "clips": [],
+            "videos_ok": 0,
+            "videos_failed": 0,
+            "config": visual_cfg,
+        }
+
+    from online_retarget.sonic_validation_export import parse_clip_indices
+    from online_retarget.temporal_visual_validation import (
+        TemporalVisualValidationConfig,
+        run_temporal_native_fps_visual_validation,
+    )
+
+    helper_cfg = TemporalVisualValidationConfig(
+        enabled=True,
+        num_videos=max(0, int(visual_cfg.get("num_videos", 1) or 0)),
+        duration_sec=float(visual_cfg.get("duration_sec", 4.0) or 4.0),
+        output_dir=str(visual_cfg.get("output_dir", "online_retarget_visual_validation")),
+        wandb_upload=bool(visual_cfg.get("wandb_upload", True)),
+        readable_render=bool(visual_cfg.get("readable_render", True)),
+        readable_clip_indices=parse_clip_indices(visual_cfg.get("readable_clip_indices")),
+        model_xml=str(visual_cfg.get("model_xml", "") or "") or None,
+        source_bvh_tar=str(visual_cfg.get("source_bvh_tar", "") or "") or None,
+        source_bvh_cache=str(visual_cfg.get("source_bvh_cache", "") or "") or None,
+        source_bvh_roots=tuple(str(path) for path in visual_cfg.get("source_bvh_roots", [])),
+    )
+    return run_temporal_native_fps_visual_validation(
+        torch=torch,
+        model=model,
+        config=config,
+        visual_validation=helper_cfg,
+        samples=samples,
+        output_dir=output_dir,
+        step=step,
+        device=device,
+        wandb_run=wandb_run,
+    )
+
+
 def _run_periodic_eval_if_due(
     *,
     torch,
@@ -1084,6 +1177,17 @@ def _run_periodic_eval_if_due(
             device=device,
             prev_y=_slice_prediction_inputs(prev_y, eval_count) if prev_y is not None else None,
         )
+    native_fps_visual_validation = _run_temporal_native_fps_visual_validation(
+        torch=torch,
+        model=model,
+        config=config,
+        output_dir=output_dir,
+        step=step,
+        samples=samples[:eval_count],
+        model_family=model_family,
+        device=device,
+        wandb_run=wandb_run,
+    )
     summary = _write_periodic_eval_artifacts(
         config=config,
         output_dir=output_dir,
@@ -1094,6 +1198,7 @@ def _run_periodic_eval_if_due(
         wandb_run=wandb_run,
         sample_scope=sample_scope,
         checkpoint=checkpoint,
+        native_fps_visual_validation=native_fps_visual_validation,
     )
     if was_training:
         model.train()
@@ -3814,6 +3919,24 @@ def _wandb_periodic_eval_payload(
             payload["periodic_eval/accepted_vertical_v2_ok_count"] = int(
                 accepted_vertical.get("accepted_vertical_v2_ok_count", 0) or 0
             )
+    native_fps = summary.get("native_fps_visual_validation", {})
+    if isinstance(native_fps, dict):
+        payload["periodic_eval/native_fps_visual_validation_enabled"] = bool(
+            native_fps.get("enabled", False)
+        )
+        if native_fps.get("enabled"):
+            payload["periodic_eval/native_fps_visual_validation_status"] = native_fps.get(
+                "status", ""
+            )
+            payload["periodic_eval/native_fps_visual_validation_summary_json"] = native_fps.get(
+                "summary_json", ""
+            )
+            payload["periodic_eval/native_fps_visual_validation_videos_ok"] = int(
+                native_fps.get("videos_ok", 0) or 0
+            )
+            payload["periodic_eval/native_fps_visual_validation_videos_failed"] = int(
+                native_fps.get("videos_failed", 0) or 0
+            )
     return payload
 
 
@@ -3828,6 +3951,7 @@ def _write_periodic_eval_artifacts(
     wandb_run,
     sample_scope: dict[str, Any],
     checkpoint: Path | None = None,
+    native_fps_visual_validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     artifact_dir = _periodic_eval_output_dir(output_dir, step=step, periodic_eval=periodic_eval)
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -3858,6 +3982,11 @@ def _write_periodic_eval_artifacts(
         checkpoint=checkpoint,
         checkpoint_step=step,
     )
+    native_fps_visual_validation = (
+        dict(native_fps_visual_validation)
+        if isinstance(native_fps_visual_validation, dict)
+        else {"enabled": False}
+    )
     summary_path = artifact_dir / "periodic_eval_summary.json"
     summary = {
         "enabled": True,
@@ -3869,6 +3998,7 @@ def _write_periodic_eval_artifacts(
         "summary_json": str(summary_path),
         "offline_eval": eval_result.to_dict(),
         "visualization": visualization,
+        "native_fps_visual_validation": native_fps_visual_validation,
         "sample_scope": sample_scope,
         "sample_count": len(eval_samples),
         "input_sample_count": len(samples),
@@ -3885,6 +4015,9 @@ def _write_periodic_eval_artifacts(
         "summary_json": str(summary_path),
         "eval_summary_json": str(eval_result.summary_json),
         "visualization_summary_json": str(visualization.get("summary_json", "")),
+        "native_fps_visual_validation_summary_json": str(
+            native_fps_visual_validation.get("summary_json", "")
+        ),
         "sample_count": len(eval_samples),
         "sample_scope": sample_scope,
     }
@@ -3902,6 +4035,9 @@ def _write_periodic_eval_artifacts(
     _wandb_save(wandb_run, predictions_jsonl)
     _wandb_save(wandb_run, summary_path)
     _wandb_save(wandb_run, eval_result.summary_json)
+    native_summary_path = str(native_fps_visual_validation.get("summary_json", "") or "")
+    if native_summary_path:
+        _wandb_save(wandb_run, Path(native_summary_path))
     _wandb_log_visualization(
         wandb_run,
         visualization,
