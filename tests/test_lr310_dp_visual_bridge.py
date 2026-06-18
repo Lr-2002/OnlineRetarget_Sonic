@@ -169,14 +169,80 @@ class LR310DPVisualBridgeTests(unittest.TestCase):
             metadata = json.loads(Path(result["metadata"]).read_text(encoding="utf-8"))
             bridge_meta = metadata["lr310_dp_prediction_bridge"]
             self.assertEqual(bridge_meta["target_frame_indices"], [4, 1, 5])
+            self.assertEqual(bridge_meta["target_frame_range"], [4, 5])
             self.assertEqual(bridge_meta["root_pose"]["root_pose_source"], "target_npz_root")
             self.assertEqual(
                 bridge_meta["prediction_root_pose"]["prediction_root_pose_source"],
                 "target_root_pose_reused",
             )
+            self.assertEqual(metadata["time_alignment"]["frame_indices"], [4, 1, 5])
+            self.assertEqual(metadata["time_alignment"]["frame_range"], [4, 5])
             self.assertEqual(bridge_meta["review_contract"]["source_frame_range"], [4, 5])
             self.assertFalse(bridge_meta["review_contract"]["final_review_eligible"])
             self.assertIn("metric-horizon sparse/windows", bridge_meta["review_contract"]["blocked_reason"])
+            raw_metadata = json.loads(Path(result["raw_trajectory_metadata_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(raw_metadata["review_mode"], "metric_horizon_bridge_only")
+            self.assertEqual(raw_metadata["source_frame_range"], [4, 5])
+
+    def test_prediction_root_pose_from_predictions_jsonl_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_bvh = root / "clip.bvh"
+            source_bvh.write_text(_minimal_bvh(frames=3), encoding="utf-8")
+            target_npz = root / "target.npz"
+            body_pos = np.zeros((3, 30, 3), dtype=np.float32)
+            body_pos[:, 0, :] = np.asarray(
+                [[0.0, 0.0, 0.8], [0.1, 0.0, 0.8], [0.2, 0.0, 0.8]],
+                dtype=np.float32,
+            )
+            body_quat = np.zeros((3, 30, 4), dtype=np.float32)
+            body_quat[:, :, 0] = 1.0
+            target_joints = np.asarray([[1.0, 2.0], [1.1, 2.1], [1.2, 2.2]], dtype=np.float32)
+            np.savez(
+                target_npz,
+                body_pos_w=body_pos,
+                body_quat_w=body_quat,
+                joint_pos=target_joints,
+                fps=np.asarray([50.0], dtype=np.float32),
+            )
+            row = {
+                "sample_id": "walk/probe",
+                "source_motion_path": "soma_proportional/bvh/clip.bvh",
+                "target_g1_path": str(target_npz),
+                "target_joint_names": ["left", "right"],
+                "predicted_joints": [[3.0, 4.0], [3.1, 4.1], [3.2, 4.2]],
+                "pred_root_pos_w": [[1.0, 0.0, 0.9], [1.1, 0.0, 0.9], [1.2, 0.0, 0.9]],
+                "pred_root_quat_w": [[1.0, 0.0, 0.0, 0.0]] * 3,
+            }
+
+            result = bridge.rerender_prediction_row(
+                row=row,
+                index=0,
+                predictions_jsonl=root / "predictions.jsonl",
+                output_dir=root / "visual_validation",
+                config={},
+                target_g1_roots=[],
+                step=123,
+                execute_renderers=False,
+                root_source="body_root",
+                root_body_index=0,
+                root_body_name="pelvis",
+                root_quat_format="wxyz",
+                allow_root_fixed_fallback=False,
+                source_bvh_resolver=lambda _row, _config, _output_dir: source_bvh,
+            )
+
+            with np.load(Path(result["prediction_motion_npz"])) as loaded:
+                np.testing.assert_allclose(
+                    loaded["root_pos"],
+                    np.asarray(row["pred_root_pos_w"], dtype=np.float32),
+                )
+            metadata = json.loads(Path(result["metadata"]).read_text(encoding="utf-8"))
+            bridge_meta = metadata["lr310_dp_prediction_bridge"]
+            self.assertEqual(
+                bridge_meta["prediction_root_pose"]["prediction_root_pose_source"],
+                "predictions_jsonl",
+            )
 
     def test_target_frame_indices_validate_npz_range(self) -> None:
         arrays = {

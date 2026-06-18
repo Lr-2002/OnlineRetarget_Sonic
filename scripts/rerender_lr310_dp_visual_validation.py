@@ -362,6 +362,7 @@ def write_dp_motion_assets(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     predicted_joints = prediction_joint_sequence(row, "predicted_joints")
     frame_indices = target_frame_indices(row, horizon=predicted_joints.shape[0])
+    frame_indices_list = [int(index) for index in frame_indices.tolist()]
     target_joints = target_joint_sequence(row, target_arrays, frame_indices=frame_indices)
     frame_count = min(predicted_joints.shape[0], target_joints.shape[0], len(frame_indices))
     if frame_count <= 0:
@@ -404,6 +405,7 @@ def write_dp_motion_assets(
             "prediction_root_fixed_fallback": False,
             "prediction_root_semantics": "world-space prediction root pose supplied by predictions.jsonl row",
         }
+    target_frame_range = [frame_indices_list[0], frame_indices_list[frame_count - 1]] if frame_count > 0 else None
 
     joint_names = joint_names_from_row(row, predicted_joints.shape[1])
     target_report = renderer.write_g1_motion_npz(
@@ -418,6 +420,12 @@ def write_dp_motion_assets(
         {
             "data_source": ACCEPTANCE_ROW2_DATA_SOURCE,
             "row_role": ACCEPTANCE_ROW2_ROLE,
+            "target_frame_indices": frame_indices_list[:frame_count],
+            "target_frame_range": target_frame_range,
+            "frame_index_semantics": (
+                "metric-horizon target/source frame indices selected for the DP bridge; "
+                "indices may be sparse and are not native-fps contiguous rollout frames"
+            ),
             **root_semantics,
         }
     )
@@ -433,6 +441,12 @@ def write_dp_motion_assets(
         {
             "data_source": ACCEPTANCE_ROW3_DATA_SOURCE,
             "row_role": ACCEPTANCE_ROW3_ROLE,
+            "target_frame_indices": frame_indices_list[:frame_count],
+            "target_frame_range": target_frame_range,
+            "frame_index_semantics": (
+                "metric-horizon target/source frame indices selected for the DP bridge; "
+                "indices may be sparse and are not native-fps contiguous rollout frames"
+            ),
             **root_semantics,
             **prediction_root_semantics,
         }
@@ -440,7 +454,12 @@ def write_dp_motion_assets(
     bridge_metadata = {
         "schema": "lr310_dp_predictions_jsonl_to_accepted_vertical_v2",
         "target_frames": int(frame_count),
-        "target_frame_indices": [int(index) for index in frame_indices[:frame_count].tolist()],
+        "target_frame_indices": frame_indices_list[:frame_count],
+        "target_frame_range": target_frame_range,
+        "frame_index_semantics": (
+            "metric-horizon target/source frame indices selected for the DP bridge; "
+            "indices may be sparse and are not native-fps contiguous rollout frames"
+        ),
         "predicted_joint_dim": int(predicted_joints.shape[1]),
         "target_joint_dim": int(target_joints.shape[1]),
         "root_pose": dict(root_semantics),
@@ -729,6 +748,7 @@ def rerender_prediction_row(
                 "pred_root_pos_w": pred_root_pos_asset,
                 "pred_root_rot_w": pred_root_quat_asset,
                 "source_frame_indices": list(frame_indices[:frame_count]),
+                "review_mode": "metric_horizon_bridge_only",
                 "encoder_routes": [],
                 "source_fps": float(fps),
                 "target_fps": float(fps),
@@ -788,6 +808,16 @@ def rerender_prediction_row(
         "raw_trajectory": raw_trajectory_report,
         "review_contract": review_contract,
     }
+    time_alignment = metadata.get("time_alignment", {})
+    if isinstance(time_alignment, dict):
+        time_alignment.update(
+            {
+                "frame_indices": bridge_metadata["target_frame_indices"],
+                "frame_range": bridge_metadata["target_frame_range"] or time_alignment.get("frame_range"),
+                "frame_index_space": "bridge_target_frame_indices",
+                "frame_index_semantics": bridge_metadata["frame_index_semantics"],
+            }
+        )
     paths["manifest_json"].write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return {
         "index": int(index),

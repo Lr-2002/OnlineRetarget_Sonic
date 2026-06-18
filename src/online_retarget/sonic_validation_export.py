@@ -564,7 +564,7 @@ def _trajectory_metadata(
     source_frame_indices = [int(value) for value in trajectory.get("source_frame_indices") or []]
     source_frame_range = _covered_source_frame_range(source_frame_indices, frame_count)
     return {
-        "review_mode": NATIVE_FPS_REVIEW_MODE,
+        "review_mode": str(trajectory.get("review_mode", NATIVE_FPS_REVIEW_MODE)),
         "clip_index": _json_value(trajectory.get("clip_index")),
         "local_env_index": _json_value(trajectory.get("local_env_index")),
         "motion_id": _json_value(trajectory.get("motion_id")),

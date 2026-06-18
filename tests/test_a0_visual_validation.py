@@ -759,6 +759,82 @@ class A0VisualValidationRendererTests(unittest.TestCase):
                 self.assertEqual(metadata["combine"]["status"], "failed")
                 self.assertIn(expected_reason, metadata["visual_backend"]["acceptance_failure_reasons"])
 
+    def test_accepted_vertical_v2_metadata_fails_when_row3_reuses_target_root_pose(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            renderer = A0VisualValidationRenderer({})
+            paths = accepted_vertical_v2_artifact_paths(
+                root / "visual_validation" / "step_00002000",
+                sample_id="target-root-reuse",
+                step=2000,
+            )
+            paths["artifact_dir"].mkdir(parents=True)
+            for key in ("row1_video", "row2_video", "row3_video", "combined_video"):
+                paths[key].write_bytes(f"{key}.mp4".encode("utf-8"))
+            row2_report = renderer.write_g1_motion_npz(
+                path=paths["row2_motion_npz"],
+                joint_pos=np.full((2, 2), 1.0, dtype=np.float32),
+                root_pos=np.asarray([[0.0, 0.0, 0.8], [0.1, 0.0, 0.8]], dtype=np.float32),
+                root_quat=np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (2, 1)),
+                fps=50.0,
+                joint_names=["left", "right"],
+            )
+            row2_report.update(
+                {
+                    "data_source": ACCEPTANCE_ROW2_DATA_SOURCE,
+                    "row_role": ACCEPTANCE_ROW2_ROLE,
+                    "target_frame_indices": [7, 12],
+                    "frame_index_semantics": "metric-horizon sparse DP bridge frames",
+                }
+            )
+            row3_report = renderer.write_g1_motion_npz(
+                path=paths["row3_motion_npz"],
+                joint_pos=np.full((2, 2), 11.0, dtype=np.float32),
+                root_pos=np.asarray([[0.0, 0.0, 0.8], [0.1, 0.0, 0.8]], dtype=np.float32),
+                root_quat=np.tile(np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (2, 1)),
+                fps=50.0,
+                joint_names=["left", "right"],
+            )
+            row3_report.update(
+                {
+                    "data_source": ACCEPTANCE_ROW3_DATA_SOURCE,
+                    "row_role": ACCEPTANCE_ROW3_ROLE,
+                    "prediction_root_pose_source": "target_root_pose_reused",
+                    "prediction_root_fixed_fallback": False,
+                    "target_frame_indices": [7, 12],
+                    "frame_index_semantics": "metric-horizon sparse DP bridge frames",
+                }
+            )
+
+            metadata, accepted, failure_reasons = build_accepted_vertical_v2_metadata(
+                visual_renderer=renderer,
+                step=2000,
+                index=0,
+                row={"filename": "target-root-reuse", "relative_path": "target-root-reuse.npz"},
+                sample_id="target-root-reuse",
+                source_bvh=root / "source.bvh",
+                fps=50.0,
+                frame_count=2,
+                clip_dir=paths["artifact_dir"],
+                source_video=paths["row1_video"],
+                target_video=paths["row2_video"],
+                inference_video=paths["row3_video"],
+                combined_video=paths["combined_video"],
+                source_report=_fake_somamesh_report(),
+                target_report={"status": "ok", "backend": "IsaacLab", "data_source": ACCEPTANCE_ROW2_DATA_SOURCE},
+                inference_report={"status": "ok", "backend": "IsaacLab", "data_source": ACCEPTANCE_ROW3_DATA_SOURCE},
+                target_motion_asset_report=row2_report,
+                motion_asset_report=row3_report,
+                combine_report={"status": "ok", "video_path": str(paths["combined_video"])},
+            )
+
+            self.assertFalse(accepted)
+            self.assertIn("row3_prediction_root_pose_reused_from_target", failure_reasons)
+            self.assertEqual(metadata["visual_backend"]["accepted_vertical_v2_status"], "failed")
+            self.assertEqual(metadata["time_alignment"]["frame_indices"], [7, 12])
+            self.assertEqual(metadata["time_alignment"]["frame_range"], [7, 12])
+            self.assertEqual(metadata["time_alignment"]["frame_index_space"], "bridge_target_frame_indices")
+
     def test_fake_isaaclab_returncode_zero_without_mp4_is_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

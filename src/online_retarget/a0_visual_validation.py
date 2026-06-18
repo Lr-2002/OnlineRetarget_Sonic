@@ -132,6 +132,27 @@ def build_accepted_vertical_v2_metadata(
     inference_data_source = str(motion_asset.get("data_source", ""))
     target_row_role = str(target_motion_asset.get("row_role", ""))
     inference_row_role = str(motion_asset.get("row_role", ""))
+    time_alignment = {
+        "sample_id": sample_id,
+        "fps": float(fps),
+        "frames": int(frame_count),
+        "frame_range": [0, max(0, int(frame_count) - 1)],
+        "all_rows_share_sample_frame_fps": True,
+    }
+    target_frame_indices = _report_frame_indices(target_motion_asset, frame_count)
+    inference_frame_indices = _report_frame_indices(motion_asset, frame_count)
+    if target_frame_indices:
+        time_alignment["frame_indices"] = target_frame_indices
+        time_alignment["frame_range"] = [target_frame_indices[0], target_frame_indices[-1]]
+        time_alignment["frame_index_space"] = "bridge_target_frame_indices"
+        semantics = str(
+            target_motion_asset.get("frame_index_semantics", "")
+            or motion_asset.get("frame_index_semantics", "")
+        )
+        if semantics:
+            time_alignment["frame_index_semantics"] = semantics
+    if target_frame_indices and inference_frame_indices:
+        time_alignment["frame_indices_consistent"] = target_frame_indices == inference_frame_indices
     metadata = {
         "step": int(step),
         "index": int(index),
@@ -142,13 +163,7 @@ def build_accepted_vertical_v2_metadata(
         "fps": float(fps),
         "frames": int(frame_count),
         "duration_sec": float(frame_count) / float(fps) if float(fps) > 0 else 0.0,
-        "time_alignment": {
-            "sample_id": sample_id,
-            "fps": float(fps),
-            "frames": int(frame_count),
-            "frame_range": [0, max(0, int(frame_count) - 1)],
-            "all_rows_share_sample_frame_fps": True,
-        },
+        "time_alignment": time_alignment,
         "accepted_visual_contract": {
             "layout": "vertical",
             "artifact_version": "accepted_vertical_v2",
@@ -343,10 +358,34 @@ def accepted_vertical_v2_failure_reasons(
         reasons.append("row2_motion_role_not_target")
     if str(motion_asset_report.get("row_role", "")) != ACCEPTANCE_ROW3_ROLE:
         reasons.append("row3_motion_role_not_prediction")
+    prediction_root_pose_source = str(motion_asset_report.get("prediction_root_pose_source", ""))
+    if prediction_root_pose_source == "target_root_pose_reused":
+        reasons.append("row3_prediction_root_pose_reused_from_target")
+    elif prediction_root_pose_source and prediction_root_pose_source != "predictions_jsonl":
+        reasons.append("row3_prediction_root_pose_not_model_predicted")
+    if bool(motion_asset_report.get("prediction_root_fixed_fallback", False)):
+        reasons.append("row3_prediction_root_pose_fixed_fallback")
+    target_frame_indices = _report_frame_indices(target_motion_asset_report, 0)
+    inference_frame_indices = _report_frame_indices(motion_asset_report, 0)
+    if target_frame_indices and inference_frame_indices and target_frame_indices != inference_frame_indices:
+        reasons.append("row2_row3_target_frame_indices_mismatch")
 
     if combine_report.get("status") != "ok":
         reasons.append(f"combined_status={combine_report.get('status', 'missing')}")
     return reasons
+
+
+def _report_frame_indices(report: Mapping[str, Any], frame_count: int) -> list[int]:
+    values = report.get("target_frame_indices", [])
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        return []
+    try:
+        indices = [int(value) for value in values]
+    except (TypeError, ValueError):
+        return []
+    if frame_count > 0:
+        return indices[:frame_count]
+    return indices
 
 
 def resolve_g1_usd_path(
