@@ -133,6 +133,7 @@ class SonicValidationCallbackTests(unittest.TestCase):
     @unittest.skipUnless(RAW_DEPS_AVAILABLE, "numpy is required")
     def test_raw_validation_trajectory_roundtrip(self):
         trajectory = _dummy_trajectory(frames=3, joints=14)
+        trajectory["prediction_root_pose_source"] = "predictions_jsonl"
 
         with tempfile.TemporaryDirectory() as tmp:
             raw_path = Path(tmp) / "clip_00_fixture_trajectory.npz"
@@ -158,6 +159,8 @@ class SonicValidationCallbackTests(unittest.TestCase):
         self.assertEqual(evidence["source_frame_indices_count"], 3)
         self.assertEqual(evidence["source_frame_indices_covered"], 3)
         self.assertTrue(evidence["physical_time_aligned"])
+        self.assertEqual(loaded["prediction_root_pose_source"], "predictions_jsonl")
+        self.assertEqual(evidence["prediction_root_pose_source"], "predictions_jsonl")
         self.assertTrue(evidence["final_review_eligible"])
         self.assertIsNone(evidence["blocked_reason"])
         self.assertEqual(
@@ -433,6 +436,20 @@ class SonicValidationCallbackTests(unittest.TestCase):
         self.assertIn("physical_time_aligned must be true", evidence["blocked_reason"])
 
     @unittest.skipUnless(RAW_DEPS_AVAILABLE, "numpy is required")
+    def test_native_fps_review_evidence_blocks_target_root_reuse(self):
+        trajectory = _dummy_trajectory(frames=3, joints=14)
+        trajectory["prediction_root_pose_source"] = "target_root_pose_reused"
+
+        evidence = native_fps_review_evidence(trajectory)
+
+        self.assertFalse(evidence["final_review_eligible"])
+        self.assertEqual(evidence["source_frame_range"], [10, 12])
+        self.assertTrue(evidence["physical_time_aligned"])
+        self.assertEqual(evidence["prediction_root_pose_source"], "target_root_pose_reused")
+        self.assertIn("target_root_pose_reused", evidence["blocked_reason"])
+        self.assertIn("final locomotion evidence", evidence["blocked_reason"])
+
+    @unittest.skipUnless(RAW_DEPS_AVAILABLE, "numpy is required")
     def test_export_readable_validation_pack_fails_without_source_frame_provenance(self):
         trajectory = _dummy_trajectory(frames=3, joints=14)
         trajectory["source_frame_indices"] = []
@@ -513,6 +530,52 @@ class SonicValidationCallbackTests(unittest.TestCase):
         self.assertFalse(manifest["review_contract"]["final_review_eligible"])
         self.assertEqual(manifest["results"][0]["status"], "failed")
         self.assertIn("physical_time_aligned must be true", manifest["results"][0]["render"]["message"])
+        self.assertFalse(manifest["results"][0]["review_contract"]["final_review_eligible"])
+
+    @unittest.skipUnless(RAW_DEPS_AVAILABLE, "numpy is required")
+    def test_export_readable_validation_pack_fails_when_prediction_root_reuses_target_pose(self):
+        trajectory = _dummy_trajectory(frames=3, joints=14)
+        trajectory["prediction_root_pose_source"] = "target_root_pose_reused"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw_dir = (
+                root
+                / "sonic_bones_seed_A1_concat_group"
+                / "online_retarget_visual_validation"
+                / "step_00005000"
+                / "rank_000"
+            )
+            save_raw_validation_trajectory(
+                trajectory=trajectory,
+                output_path=raw_dir / "clip_00_fixture_trajectory.npz",
+                target_fps=50,
+                duration_sec=3 / 50,
+            )
+            with mock.patch(
+                "online_retarget.sonic_validation_export.render_readable_validation_video"
+            ) as render_mock:
+                result = export_readable_validation_pack(
+                    search_root=root,
+                    run_group="group",
+                    output_dir=root / "pack",
+                    clips=(0,),
+                    variants=("A1_concat",),
+                    width=960,
+                    height=384,
+                )
+            manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+
+        render_mock.assert_not_called()
+        self.assertEqual(result.status, "failed")
+        self.assertFalse(manifest["review_contract"]["final_review_eligible"])
+        self.assertEqual(manifest["results"][0]["status"], "failed")
+        self.assertEqual(
+            manifest["results"][0]["review_contract"]["prediction_root_pose_source"],
+            "target_root_pose_reused",
+        )
+        self.assertIn("target_root_pose_reused", manifest["results"][0]["render"]["message"])
+        self.assertIn("target_root_pose_reused", manifest["review_contract"]["evidence"][0]["blocked_reason"])
         self.assertFalse(manifest["results"][0]["review_contract"]["final_review_eligible"])
 
     @unittest.skipUnless(RENDER_DEPS_AVAILABLE, "render dependencies are required")

@@ -577,6 +577,7 @@ def _trajectory_metadata(
         "duration_sec": float(duration_sec),
         "target_frame_count": int(frame_count),
         "physical_time_aligned": bool(trajectory.get("physical_time_aligned", False)),
+        "prediction_root_pose_source": str(trajectory.get("prediction_root_pose_source", "")),
         "root_rot_format": str(trajectory.get("root_rot_format", "wxyz")),
         "initial_root_xy_zeroed": bool(trajectory.get("initial_root_xy_zeroed", False)),
     }
@@ -598,6 +599,7 @@ def native_fps_review_evidence(trajectory: Mapping[str, Any]) -> dict[str, Any]:
     covered_frame_count = min(frame_count, len(source_frame_indices))
     source_frame_range = _covered_source_frame_range(source_frame_indices, frame_count)
     physical_time_aligned = bool(trajectory.get("physical_time_aligned", False))
+    prediction_root_pose_source = str(trajectory.get("prediction_root_pose_source", ""))
     blocked_reasons: list[str] = []
     if covered_frame_count != frame_count:
         blocked_reasons.append(
@@ -607,6 +609,10 @@ def native_fps_review_evidence(trajectory: Mapping[str, Any]) -> dict[str, Any]:
         blocked_reasons.append("source_frame_range is required for final native-fps review")
     if not physical_time_aligned:
         blocked_reasons.append("physical_time_aligned must be true for final native-fps review")
+    if prediction_root_pose_source == "target_root_pose_reused":
+        blocked_reasons.append(
+            "prediction_root_pose_source=target_root_pose_reused cannot qualify as final locomotion evidence"
+        )
     final_review_eligible = len(blocked_reasons) == 0
     return {
         "mode": NATIVE_FPS_REVIEW_MODE,
@@ -617,6 +623,7 @@ def native_fps_review_evidence(trajectory: Mapping[str, Any]) -> dict[str, Any]:
         "source_frame_indices_count": int(len(source_frame_indices)),
         "source_frame_indices_covered": int(covered_frame_count),
         "physical_time_aligned": physical_time_aligned,
+        "prediction_root_pose_source": prediction_root_pose_source or None,
         "final_review_eligible": final_review_eligible,
         "blocked_reason": "; ".join(blocked_reasons) if blocked_reasons else None,
     }
