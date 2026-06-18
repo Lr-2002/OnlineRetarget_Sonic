@@ -895,10 +895,19 @@ def _route_counts(routes: Sequence[int]) -> dict[str, int]:
 
 
 def _stack_or_none(values: Any) -> Any:
-    if not values:
-        return None
     import numpy as np
 
+    if values is None:
+        return None
+    if isinstance(values, np.ndarray):
+        if values.size == 0:
+            return None
+        return values.astype(float, copy=False)
+    try:
+        if len(values) == 0:
+            return None
+    except TypeError:
+        pass
     return np.asarray(values, dtype=float)
 
 

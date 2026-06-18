@@ -11,6 +11,7 @@ from online_retarget.sonic_validation_callback import (
     _current_soma_routes,
     _render_triplet_video,
     _reset_policy_rollout_buffer,
+    _stack_or_none,
     rank_video_indices,
     should_run_visual_validation,
     validation_frame_count,
@@ -546,6 +547,15 @@ class SonicValidationCallbackTests(unittest.TestCase):
 
             self.assertTrue(video_path.exists())
             self.assertGreater(video_path.stat().st_size, 0)
+
+    @unittest.skipUnless(RAW_DEPS_AVAILABLE, "numpy is required")
+    def test_stack_or_none_accepts_ndarray_trajectory_panels(self):
+        values = np.zeros((3, 14, 3), dtype=np.float32)
+
+        stacked = _stack_or_none(values)
+
+        self.assertEqual(stacked.shape, (3, 14, 3))
+        self.assertEqual(stacked.dtype, np.float64)
 
 
 class _PolicyWithRoutes:
