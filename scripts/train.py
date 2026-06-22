@@ -3910,7 +3910,9 @@ def _select_periodic_visualization_primary(
         return selected
 
     primary_clip = _native_fps_primary_clip(native_fps)
-    primary_video = str(primary_clip.get("triplet_video_path", "") or "")
+    primary_readable_video = str(primary_clip.get("readable_video_path", "") or "")
+    primary_triplet_video = str(primary_clip.get("triplet_video_path", "") or "")
+    primary_video = primary_readable_video or primary_triplet_video
     if not primary_video:
         return selected
 
@@ -3920,15 +3922,47 @@ def _select_periodic_visualization_primary(
         if isinstance(review_contract, dict)
         else ""
     ) or "native_fps_contiguous_rollout"
+    frame_count = primary_clip.get("frame_count")
+    if frame_count is None and isinstance(review_contract, dict):
+        frame_count = review_contract.get("frame_count")
+    physical_time_aligned = primary_clip.get("physical_time_aligned")
+    if physical_time_aligned is None and isinstance(review_contract, dict):
+        physical_time_aligned = review_contract.get("physical_time_aligned")
+    prediction_root_pose_source = str(
+        primary_clip.get("prediction_root_pose_source")
+        or (review_contract.get("prediction_root_pose_source") if isinstance(review_contract, dict) else "")
+        or ""
+    )
     selected["primary_backend"] = review_mode
     selected["status"] = str(native_fps.get("status", "") or selected.get("status", ""))
     selected["primary_video"] = primary_video
-    selected["primary_readable_video"] = str(
-        primary_clip.get("readable_video_path", "") or ""
-    )
+    selected["primary_readable_video"] = primary_readable_video
+    selected["primary_triplet_video"] = primary_triplet_video
     selected["primary_summary_json"] = str(native_fps.get("summary_json", "") or "")
     selected["primary_clip_status"] = str(primary_clip.get("status", "") or "")
     selected["primary_review_mode"] = review_mode
+    selected["primary_frame_count"] = int(frame_count or 0)
+    selected["primary_physical_time_aligned"] = bool(physical_time_aligned)
+    selected["primary_prediction_root_pose_source"] = prediction_root_pose_source
+    if isinstance(accepted_vertical, dict) and accepted_vertical:
+        bridge_primary_video = str(accepted_vertical.get("primary_video", "") or "")
+        bridge_primary_metadata = str(accepted_vertical.get("primary_metadata", "") or "")
+        accepted_vertical["bridge_primary_video"] = bridge_primary_video
+        accepted_vertical["bridge_primary_metadata"] = bridge_primary_metadata
+        accepted_vertical["primary_video"] = primary_video
+        accepted_vertical["primary_metadata"] = str(
+            primary_clip.get("raw_trajectory_metadata_path", "")
+            or native_fps.get("summary_json", "")
+            or bridge_primary_metadata
+        )
+        accepted_vertical["primary_source"] = "native_fps_visualization_core"
+        accepted_vertical["primary_review_mode"] = review_mode
+        accepted_vertical["primary_frame_count"] = int(frame_count or 0)
+        accepted_vertical["primary_physical_time_aligned"] = bool(physical_time_aligned)
+        accepted_vertical["primary_prediction_root_pose_source"] = prediction_root_pose_source
+        accepted_vertical["primary_readable_video"] = primary_readable_video
+        accepted_vertical["primary_triplet_video"] = primary_triplet_video
+        selected["accepted_vertical_v2"] = accepted_vertical
     return selected
 
 
@@ -4002,6 +4036,15 @@ def _wandb_periodic_eval_payload(
             payload["periodic_eval/accepted_vertical_v2_export_status"] = accepted_vertical.get("export_status", "")
             payload["periodic_eval/accepted_vertical_v2/primary_video"] = accepted_vertical.get(
                 "primary_video", ""
+            )
+            payload["periodic_eval/accepted_vertical_v2/primary_frame_count"] = int(
+                accepted_vertical.get("primary_frame_count", 0) or 0
+            )
+            payload["periodic_eval/accepted_vertical_v2/primary_physical_time_aligned"] = bool(
+                accepted_vertical.get("primary_physical_time_aligned", False)
+            )
+            payload["periodic_eval/accepted_vertical_v2/primary_prediction_root_pose_source"] = (
+                accepted_vertical.get("primary_prediction_root_pose_source", "")
             )
             payload["periodic_eval/accepted_vertical_v2_ok_count"] = int(
                 accepted_vertical.get("accepted_vertical_v2_ok_count", 0) or 0
@@ -5408,6 +5451,15 @@ def _wandb_log_visualization(
         f"{key_prefix}/accepted_vertical_v2/primary_metadata": accepted_vertical.get(
             "primary_metadata", ""
         ),
+        f"{key_prefix}/accepted_vertical_v2/primary_frame_count": int(
+            accepted_vertical.get("primary_frame_count", 0) or 0
+        ),
+        f"{key_prefix}/accepted_vertical_v2/primary_physical_time_aligned": bool(
+            accepted_vertical.get("primary_physical_time_aligned", False)
+        ),
+        f"{key_prefix}/accepted_vertical_v2/primary_prediction_root_pose_source": accepted_vertical.get(
+            "primary_prediction_root_pose_source", ""
+        ),
         f"{key_prefix}/capsule_status": capsule.get("status", ""),
         f"{key_prefix}/capsule_manifest": capsule.get("manifest_json", ""),
     }
@@ -5440,8 +5492,12 @@ def _wandb_log_visualization(
             payload[f"{key_prefix}/primary"] = wandb.Video(str(primary_video_path))
         if primary_readable_path.exists():
             payload[f"{key_prefix}/primary_readable"] = wandb.Video(str(primary_readable_path))
+        accepted_primary_path = Path(str(accepted_vertical.get("primary_video", "")))
+        if accepted_primary_path.exists():
+            payload[f"{key_prefix}/accepted_vertical_v2/primary"] = wandb.Video(
+                str(accepted_primary_path)
+            )
         for key, field in (
-            ("accepted_vertical_v2/primary", "primary_video"),
             ("accepted_vertical_v2/row1_soma_somamesh", "primary_row1_soma_somamesh_video"),
             ("accepted_vertical_v2/row2_g1_target", "primary_row2_g1_target_isaaclab_video"),
             ("accepted_vertical_v2/row3_g1_kinematics", "primary_row3_g1_kinematics_isaaclab_video"),

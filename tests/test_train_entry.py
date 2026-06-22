@@ -1633,8 +1633,11 @@ class TrainEntryTests(unittest.TestCase):
             "clips": [
                 {
                     "status": "ok",
-                    "triplet_video_path": "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00.mp4",
                     "readable_video_path": "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
+                    "triplet_video_path": "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00.mp4",
+                    "frame_count": 200,
+                    "physical_time_aligned": True,
+                    "prediction_root_pose_source": "predictions_jsonl",
                     "review_contract": {"mode": "native_fps_contiguous_rollout"},
                 }
             ],
@@ -1648,6 +1651,7 @@ class TrainEntryTests(unittest.TestCase):
                 "accepted_vertical_v2": {
                     "enabled": True,
                     "primary_video": "bridge.mp4",
+                    "primary_metadata": "bridge.json",
                 },
             },
             native_fps_visual_validation=native,
@@ -1657,11 +1661,26 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(selected["status"], "ok")
         self.assertEqual(
             selected["primary_video"],
-            "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00.mp4",
+            "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
         )
         self.assertEqual(
             selected["primary_readable_video"],
             "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
+        )
+        self.assertEqual(selected["primary_triplet_video"], "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00.mp4")
+        self.assertEqual(selected["primary_frame_count"], 200)
+        self.assertTrue(selected["primary_physical_time_aligned"])
+        self.assertEqual(selected["primary_prediction_root_pose_source"], "predictions_jsonl")
+        self.assertEqual(
+            selected["accepted_vertical_v2"]["primary_video"],
+            "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
+        )
+        self.assertEqual(selected["accepted_vertical_v2"]["bridge_primary_video"], "bridge.mp4")
+        self.assertEqual(selected["accepted_vertical_v2"]["primary_frame_count"], 200)
+        self.assertTrue(selected["accepted_vertical_v2"]["primary_physical_time_aligned"])
+        self.assertEqual(
+            selected["accepted_vertical_v2"]["primary_prediction_root_pose_source"],
+            "predictions_jsonl",
         )
 
     def test_periodic_visualization_wandb_logs_native_fps_primary_without_bridge_primary_alias(self):
@@ -1698,7 +1717,11 @@ class TrainEntryTests(unittest.TestCase):
                 "accepted_vertical_v2": {
                     "enabled": True,
                     "status": "failed",
-                    "primary_video": str(bridge_video),
+                    "primary_video": str(primary_readable),
+                    "bridge_primary_video": str(bridge_video),
+                    "primary_frame_count": 200,
+                    "primary_physical_time_aligned": True,
+                    "primary_prediction_root_pose_source": "predictions_jsonl",
                 },
                 "capsule_visualization": {"status": "disabled", "manifest_json": ""},
             }
@@ -1720,7 +1743,14 @@ class TrainEntryTests(unittest.TestCase):
         )
         self.assertIsInstance(payload["periodic_eval/visualization/primary"], FakeVideo)
         self.assertIsInstance(payload["periodic_eval/visualization/primary_readable"], FakeVideo)
-        self.assertNotIn("periodic_eval/visualization/accepted_vertical_v2/primary", payload)
+        self.assertIsInstance(payload["periodic_eval/visualization/accepted_vertical_v2/primary"], FakeVideo)
+        self.assertEqual(payload["periodic_eval/visualization/accepted_vertical_v2/primary_video"], str(primary_readable))
+        self.assertEqual(payload["periodic_eval/visualization/accepted_vertical_v2/primary_frame_count"], 200)
+        self.assertTrue(payload["periodic_eval/visualization/accepted_vertical_v2/primary_physical_time_aligned"])
+        self.assertEqual(
+            payload["periodic_eval/visualization/accepted_vertical_v2/primary_prediction_root_pose_source"],
+            "predictions_jsonl",
+        )
         self.assertTrue(any(str(primary_video) == path for path in saved_paths))
         self.assertTrue(any(str(primary_readable) == path for path in saved_paths))
 
@@ -1785,7 +1815,10 @@ class TrainEntryTests(unittest.TestCase):
                     "enabled": True,
                     "status": "failed",
                     "export_status": "failed",
-                    "primary_video": "bridge.mp4",
+                    "primary_video": "online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
+                    "primary_frame_count": 200,
+                    "primary_physical_time_aligned": True,
+                    "primary_prediction_root_pose_source": "predictions_jsonl",
                     "accepted_vertical_v2_ok_count": 0,
                 },
             },
@@ -1802,6 +1835,16 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(
             payload["periodic_eval/visualization/primary_readable_video"],
             "online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
+        )
+        self.assertEqual(
+            payload["periodic_eval/accepted_vertical_v2/primary_video"],
+            "online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
+        )
+        self.assertEqual(payload["periodic_eval/accepted_vertical_v2/primary_frame_count"], 200)
+        self.assertTrue(payload["periodic_eval/accepted_vertical_v2/primary_physical_time_aligned"])
+        self.assertEqual(
+            payload["periodic_eval/accepted_vertical_v2/primary_prediction_root_pose_source"],
+            "predictions_jsonl",
         )
 
     def test_quality_gate_blocks_formal_training_without_policy(self):
