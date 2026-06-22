@@ -3949,22 +3949,6 @@ def _select_periodic_visualization_primary(
         bridge_primary_metadata = str(accepted_vertical.get("primary_metadata", "") or "")
         accepted_vertical["bridge_primary_video"] = bridge_primary_video
         accepted_vertical["bridge_primary_metadata"] = bridge_primary_metadata
-        accepted_vertical["primary_video"] = primary_video
-        accepted_vertical["primary_metadata"] = str(
-            primary_clip.get("raw_trajectory_metadata_path", "")
-            or native_fps.get("summary_json", "")
-            or bridge_primary_metadata
-        )
-        accepted_vertical["primary_source"] = "native_fps_visualization_core"
-        accepted_vertical["primary_review_mode"] = review_mode
-        accepted_vertical["primary_frame_count"] = int(frame_count or 0)
-        accepted_vertical["primary_physical_time_aligned"] = bool(physical_time_aligned)
-        accepted_vertical["primary_prediction_root_pose_source"] = prediction_root_pose_source
-        accepted_vertical["primary_readable_video"] = primary_readable_video
-        accepted_vertical["primary_triplet_video"] = primary_triplet_video
-        accepted_vertical["primary_row1_soma_somamesh_video"] = primary_video
-        accepted_vertical["primary_row2_g1_target_isaaclab_video"] = primary_video
-        accepted_vertical["primary_row3_g1_kinematics_isaaclab_video"] = primary_video
         selected["accepted_vertical_v2"] = accepted_vertical
     return selected
 
@@ -4766,14 +4750,9 @@ def _accepted_vertical_v2_has_native_fps_primary(accepted_vertical: dict[str, An
 
 
 def _accepted_vertical_v2_user_facing_primary_video(accepted_vertical: dict[str, Any]) -> str:
-    if not _accepted_vertical_v2_has_native_fps_primary(accepted_vertical):
+    if not isinstance(accepted_vertical, dict):
         return ""
-    return str(
-        accepted_vertical.get("primary_readable_video")
-        or accepted_vertical.get("primary_video")
-        or accepted_vertical.get("primary_triplet_video")
-        or ""
-    )
+    return str(accepted_vertical.get("primary_video", "") or "")
 
 
 def _visualization_user_facing_primary_media(
@@ -4783,19 +4762,11 @@ def _visualization_user_facing_primary_media(
     backend = str(visualization.get("primary_backend", "") or "").strip()
     if backend == "trajectory_preview":
         return "", ""
-    if backend == "accepted_vertical_v2" and not _accepted_vertical_v2_has_native_fps_primary(
-        accepted_vertical
-    ):
-        return "", ""
     primary_video = str(visualization.get("primary_video", "") or "")
     primary_readable_video = str(visualization.get("primary_readable_video", "") or "")
-    if backend == "accepted_vertical_v2" and _accepted_vertical_v2_has_native_fps_primary(
-        accepted_vertical
-    ):
+    if backend == "accepted_vertical_v2":
         primary_video = _accepted_vertical_v2_user_facing_primary_video(accepted_vertical)
-        primary_readable_video = str(
-            accepted_vertical.get("primary_readable_video") or primary_video or ""
-        )
+        primary_readable_video = primary_video
     return primary_video, primary_readable_video
 
 
