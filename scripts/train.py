@@ -37,6 +37,7 @@ TEMPORAL_MODEL_CONDITION_SAMPLE_FIELDS = (
     "source_body_tokens",
     "source_skeleton",
     "morphology",
+    "prev_target_action",
     "prev_target_joints",
     "previous_target_joints",
     "prev_g1_joints",
@@ -45,6 +46,10 @@ TEMPORAL_ROBOT_STATE_SAMPLE_FIELDS = ("robot_state",)
 TEMPORAL_FORBIDDEN_CONDITION_SAMPLE_FIELDS = (
     "target_joints",
     "future_target_joints",
+    "target_root_pos_w",
+    "target_root_quat_w",
+    "future_target_root_pos_w",
+    "future_target_root_quat_w",
     "target_frame",
     "target_frame_indices",
     "target_g1_path",
@@ -2763,16 +2768,22 @@ def _unwrap_model(model):
 
 
 def _target_vector(sample: dict[str, Any]) -> list[float]:
+    future_action = sample.get("future_target_action")
+    if isinstance(future_action, list) and future_action and all(isinstance(row, list) for row in future_action):
+        return [float(value) for row in future_action for value in row]
     future = sample.get("future_target_joints")
     if isinstance(future, list) and future and all(isinstance(row, list) for row in future):
-        return [float(value) for row in future for value in row]
+        return [float(value) for row in _compose_future_action(sample) for value in row]
     target = sample.get("target_joints")
     if isinstance(target, list):
-        return [float(value) for value in target]
+        return [float(value) for value in _compose_single_action(sample, target)]
     raise ValueError("sample lacks target_joints or future_target_joints")
 
 
 def _previous_target_vector(sample: dict[str, Any], output_dim: int) -> list[float]:
+    value = sample.get("prev_target_action")
+    if isinstance(value, list) and len(value) == output_dim:
+        return [float(item) for item in value]
     for key in ("prev_target_joints", "previous_target_joints", "prev_g1_joints"):
         value = sample.get(key)
         if isinstance(value, list) and len(value) == output_dim:
@@ -2788,12 +2799,15 @@ def _previous_target_joints(sample: dict[str, Any], output_dim: int) -> list[flo
 
 
 def _target_action_sequence(sample: dict[str, Any]) -> list[list[float]]:
+    future_action = sample.get("future_target_action")
+    if isinstance(future_action, list) and future_action and all(isinstance(row, list) for row in future_action):
+        return [[float(value) for value in row] for row in future_action]
     future = sample.get("future_target_joints")
     if isinstance(future, list) and future and all(isinstance(row, list) for row in future):
-        return [[float(value) for value in row] for row in future]
+        return _compose_future_action(sample)
     target = sample.get("target_joints")
     if isinstance(target, list):
-        return [[float(value) for value in target]]
+        return [[float(value) for value in _compose_single_action(sample, target)]]
     raise ValueError("sample lacks target_joints or future_target_joints")
 
 
@@ -2989,7 +3003,7 @@ def _temporal_feature_contract_report(
         violations.append("evaluation.metrics missing: " + ", ".join(missing_metrics))
     output_contract = {
         "model_output_mode": str(model_cfg.get("output_mode", "absolute")),
-        "prediction_export": "absolute_g1_joint_position_future_window",
+        "prediction_export": "absolute_g1_joint_root_position_future_window",
         "target_format": str(_nested_get(config, ("data", "target_format"), "")),
         "model_output": str(model_cfg.get("output", "")),
     }
@@ -3082,6 +3096,9 @@ def _robot_state_vector(sample: dict[str, Any]) -> list[float]:
 
 
 def _prev_action_vector(sample: dict[str, Any]) -> list[float]:
+    value = sample.get("prev_target_action")
+    if isinstance(value, list):
+        return [float(item) for item in value]
     for key in ("prev_target_joints", "previous_target_joints", "prev_g1_joints"):
         value = sample.get(key)
         if isinstance(value, list):
@@ -3408,9 +3425,9 @@ def _filter_finite_supervised_tensors(
         if not bool(finite_x[index]):
             reasons.append("observation_nonfinite")
         if not bool(finite_y[index]):
-            reasons.append("target_joints_nonfinite")
+            reasons.append("target_action_nonfinite")
         if not bool(finite_prev_y[index]):
-            reasons.append("prev_target_joints_nonfinite")
+            reasons.append("prev_target_action_nonfinite")
         sample = samples[index]
         report["dropped_examples"].append(
             {
@@ -3804,6 +3821,17 @@ def _write_prediction_jsonl(
                 "predicted_joints": _prediction_sequence(sample, prediction),
                 "target_joints": _target_sequence(sample),
             }
+            pred_root_pos = _prediction_root_sequence(sample, prediction, key="pos")
+            pred_root_quat = _prediction_root_sequence(sample, prediction, key="quat")
+            if pred_root_pos is not None and pred_root_quat is not None:
+                payload["pred_root_pos_w"] = pred_root_pos
+                payload["pred_root_quat_w"] = pred_root_quat
+                payload["prediction_root_pose_source"] = "predictions_jsonl"
+            target_root_pos = _target_root_sequence(sample, key="pos")
+            target_root_quat = _target_root_sequence(sample, key="quat")
+            if target_root_pos is not None and target_root_quat is not None:
+                payload["target_root_pos_w"] = target_root_pos
+                payload["target_root_quat_w"] = target_root_quat
             for key in (
                 "fps",
                 "target_frame",
@@ -4063,6 +4091,9 @@ def _annotate_periodic_eval_summary(summary_json: Path, *, sample_scope: dict[st
 
 
 def _target_sequence(sample: dict[str, Any]) -> list[list[float]]:
+    future_action = sample.get("future_target_action")
+    if isinstance(future_action, list) and future_action and all(isinstance(row, list) for row in future_action):
+        return [[float(value) for value in _split_temporal_action_row(row)["joints"]] for row in future_action]
     future = sample.get("future_target_joints")
     if isinstance(future, list) and future and all(isinstance(row, list) for row in future):
         return [[float(value) for value in row] for row in future]
@@ -4070,21 +4101,128 @@ def _target_sequence(sample: dict[str, Any]) -> list[list[float]]:
 
 
 def _prediction_sequence(sample: dict[str, Any], prediction: Any) -> list[list[float]]:
-    if (
-        isinstance(prediction, list)
-        and prediction
-        and all(isinstance(row, list) for row in prediction)
-    ):
-        return [[float(value) for value in row] for row in prediction]
+    if isinstance(prediction, list) and prediction and all(isinstance(row, list) for row in prediction):
+        return [[float(value) for value in _split_temporal_action_row(row)["joints"]] for row in prediction]
     target = _target_sequence(sample)
     horizon = len(target)
-    joint_dim = len(target[0]) if target else len(prediction)
-    if horizon > 0 and joint_dim > 0 and len(prediction) == horizon * joint_dim:
+    action_dim = _temporal_action_dim_from_sample(sample) or (len(prediction) // max(1, horizon))
+    joint_dim = len(target[0]) if target else action_dim
+    if horizon > 0 and action_dim > 0 and len(prediction) == horizon * action_dim:
         return [
-            [float(value) for value in prediction[index * joint_dim : (index + 1) * joint_dim]]
+            [
+                float(value)
+                for value in _split_temporal_action_row(
+                    prediction[index * action_dim : (index + 1) * action_dim]
+                )["joints"]
+            ]
             for index in range(horizon)
         ]
-    return [[float(value) for value in prediction]]
+    return [[float(value) for value in _split_temporal_action_row(prediction)["joints"]]]
+
+
+def _target_root_sequence(sample: dict[str, Any], *, key: str) -> list[list[float]] | None:
+    field = "future_target_root_pos_w" if key == "pos" else "future_target_root_quat_w"
+    future = sample.get(field)
+    if isinstance(future, list) and future and all(isinstance(row, list) for row in future):
+        return [[float(value) for value in row] for row in future]
+    single_field = "target_root_pos_w" if key == "pos" else "target_root_quat_w"
+    target = sample.get(single_field)
+    if isinstance(target, list):
+        return [[float(value) for value in target]]
+    return None
+
+
+def _prediction_root_sequence(sample: dict[str, Any], prediction: Any, *, key: str) -> list[list[float]] | None:
+    action_dim = _temporal_action_dim_from_sample(sample)
+    if action_dim is None or action_dim <= len(_target_sequence(sample)[0]):
+        return None
+    component_key = "root_pos" if key == "pos" else "root_quat"
+    if isinstance(prediction, list) and prediction and all(isinstance(row, list) for row in prediction):
+        return [[float(value) for value in _split_temporal_action_row(row)[component_key]] for row in prediction]
+    target = _target_sequence(sample)
+    horizon = len(target)
+    if horizon > 0 and len(prediction) == horizon * action_dim:
+        return [
+            [
+                float(value)
+                for value in _split_temporal_action_row(
+                    prediction[index * action_dim : (index + 1) * action_dim]
+                )[component_key]
+            ]
+            for index in range(horizon)
+        ]
+    return [[float(value) for value in _split_temporal_action_row(prediction)[component_key]]]
+
+
+def _compose_future_action(sample: dict[str, Any]) -> list[list[float]]:
+    future_joints = sample.get("future_target_joints")
+    if not isinstance(future_joints, list) or not future_joints or not all(isinstance(row, list) for row in future_joints):
+        raise ValueError("sample lacks future_target_joints")
+    future_root_pos = sample.get("future_target_root_pos_w")
+    future_root_quat = sample.get("future_target_root_quat_w")
+    if isinstance(future_root_pos, list) and isinstance(future_root_quat, list):
+        return [
+            _compose_single_action(
+                sample,
+                future_joints[index],
+                root_pos=future_root_pos[index],
+                root_quat=future_root_quat[index],
+            )
+            for index in range(len(future_joints))
+        ]
+    return [[float(value) for value in row] for row in future_joints]
+
+
+def _compose_single_action(
+    sample: dict[str, Any],
+    joints: list[Any],
+    *,
+    root_pos: list[Any] | None = None,
+    root_quat: list[Any] | None = None,
+) -> list[float]:
+    action = [float(value) for value in joints]
+    resolved_root_pos = root_pos if root_pos is not None else sample.get("target_root_pos_w")
+    resolved_root_quat = root_quat if root_quat is not None else sample.get("target_root_quat_w")
+    if isinstance(resolved_root_pos, list) and isinstance(resolved_root_quat, list):
+        action.extend(float(value) for value in resolved_root_pos)
+        action.extend(float(value) for value in resolved_root_quat)
+    return action
+
+
+def _temporal_action_dim_from_sample(sample: dict[str, Any]) -> int | None:
+    future_action = sample.get("future_target_action")
+    if isinstance(future_action, list) and future_action and isinstance(future_action[0], list):
+        return len(future_action[0])
+    future_joints = sample.get("future_target_joints")
+    if isinstance(future_joints, list) and future_joints and isinstance(future_joints[0], list):
+        base = len(future_joints[0])
+    else:
+        target = sample.get("target_joints")
+        base = len(target) if isinstance(target, list) else 0
+    future_root_pos = sample.get("future_target_root_pos_w")
+    future_root_quat = sample.get("future_target_root_quat_w")
+    if isinstance(future_root_pos, list) and future_root_pos and isinstance(future_root_pos[0], list) and isinstance(future_root_quat, list) and future_root_quat and isinstance(future_root_quat[0], list):
+        return base + len(future_root_pos[0]) + len(future_root_quat[0])
+    target_root_pos = sample.get("target_root_pos_w")
+    target_root_quat = sample.get("target_root_quat_w")
+    if isinstance(target_root_pos, list) and isinstance(target_root_quat, list):
+        return base + len(target_root_pos) + len(target_root_quat)
+    return base or None
+
+
+def _split_temporal_action_row(row: Any) -> dict[str, list[float]]:
+    values = [float(value) for value in row]
+    if len(values) >= 36:
+        joints = values[:29]
+        root_pos = values[29:32]
+        root_quat = values[32:36]
+        return {"joints": joints, "root_pos": root_pos, "root_quat": root_quat}
+    if len(values) >= 9:
+        joints = values[:-7]
+        root_pos = values[-7:-4]
+        root_quat = values[-4:]
+        return {"joints": joints, "root_pos": root_pos, "root_quat": root_quat}
+    return {"joints": values, "root_pos": [], "root_quat": []}
 
 
 def _write_visualization_artifacts(

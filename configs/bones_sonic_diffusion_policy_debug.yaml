@@ -48,15 +48,16 @@ policy_presets:
       diffusion_policy: 1.0
   route_b_temporal_diffusion:
     data:
-      samples_jsonl: runs/supervised/somabvh_walk_train_h8_fh10_fs5_stride10_limit128/samples.jsonl
-      target_format: bones_sonic_joint_pos_future_window
+      samples_jsonl: runs/supervised/somabvh_walk_train_h8_fh10_fs5_rootpose_stride10_limit128/samples.jsonl
+      target_format: bones_sonic_joint_root_pos_future_window
       history_frames: 8
       target_horizon_frames: 10
       target_future_step: 5
+      include_target_root_pose: true
       source_body_count: 30
       source_body_token_dim: 15
       source_rotation: rot6d
-      action_dim: 29
+      action_dim: 36
       build:
         split: train
         source_mode: soma_bvh
@@ -67,6 +68,7 @@ policy_presets:
         target_frame_offset: 0
         target_horizon_frames: 10
         target_future_step: 5
+        include_target_root_pose: true
         source_rotation: rot6d
         include_source_angular_velocity: true
         window_stride: 10
@@ -85,14 +87,14 @@ policy_presets:
       diffusion_steps: 32
       inference_steps: 8
       inference_start: zeros
-      action_dim: 29
+      action_dim: 36
       source_body_count: 30
       source_body_token_dim: 15
       source_skeleton_dim: 120
       morphology_dim: 13
       robot_state_dim: 0
       output_mode: residual_prev_action
-      output: g1_joint_position_future_window
+      output: g1_joint_root_position_future_window
     loss:
       temporal_diffusion_policy: 1.0
       denoise: 1.0
@@ -114,12 +116,17 @@ feature_contract:
     - source_body_tokens
     - source_skeleton
     - morphology
+    - prev_target_action
     - prev_target_joints
     - previous_target_joints
     - prev_g1_joints
   forbid_condition_sample_keys:
     - target_joints
     - future_target_joints
+    - target_root_pos_w
+    - target_root_quat_w
+    - future_target_root_pos_w
+    - future_target_root_quat_w
     - target_frame
     - target_frame_indices
     - target_g1_path
@@ -132,7 +139,7 @@ feature_contract:
     source_skeleton_dim: 120
     morphology_dim: 13
     robot_state_dim: 0
-    action_dim: 29
+    action_dim: 36
   required_eval_metrics:
     - joint_rmse
     - joint_velocity_rmse

@@ -31,6 +31,9 @@ from .sonic_validation_export import (
 )
 
 
+TARGET_JOINT_DIM = 29
+
+
 @dataclass(frozen=True)
 class TemporalVisualValidationConfig:
     enabled: bool = False
@@ -117,6 +120,7 @@ def run_temporal_native_fps_visual_validation(
         history_frames=int(data_cfg.get("history_frames", target_horizon_frames) or target_horizon_frames),
         target_horizon_frames=target_horizon_frames,
         target_future_step=target_future_step,
+        include_target_root_pose=bool(data_cfg.get("include_target_root_pose", False)),
         include_source_angular_velocity=bool(
             data_cfg.get("include_source_angular_velocity", data_cfg.get("build", {}).get("include_source_angular_velocity", True))
             if isinstance(data_cfg.get("build"), Mapping)
@@ -260,13 +264,17 @@ def _rollout_one_clip(
     robot_state_width = int(config.get("model", {}).get("robot_state_dim", 0) or 0) if isinstance(config.get("model"), Mapping) else 0
     robot_state = _float_vector(sample.get("robot_state"), width=robot_state_width) if robot_state_width > 0 else []
     action_dim = int(config.get("model", {}).get("action_dim", target_joint_pos.shape[1]) or target_joint_pos.shape[1]) if isinstance(config.get("model"), Mapping) else target_joint_pos.shape[1]
-    prev_action = _float_vector(sample.get("prev_target_joints"), width=action_dim)
+    prev_action = _float_vector(sample.get("prev_target_action"), width=action_dim)
+    if not prev_action:
+        prev_action = _float_vector(sample.get("prev_target_joints"), width=action_dim)
     if not prev_action:
         prev_action = [0.0] * action_dim
 
     target_indices: list[int] = []
     source_indices: list[int] = []
     predicted_joint_frames: list[np.ndarray] = []
+    predicted_root_pos_frames: list[np.ndarray] = []
+    predicted_root_quat_frames: list[np.ndarray] = []
     target_joint_frames: list[np.ndarray] = []
     source_soma_frames: list[np.ndarray] = []
     target_root_pos_frames: list[np.ndarray] = []
@@ -316,11 +324,14 @@ def _rollout_one_clip(
             )
             current_prediction = np.asarray(predicted[0, 0].detach().cpu().numpy(), dtype=np.float32)
             prev_action = [float(value) for value in current_prediction[:action_dim]]
+            decoded = _decode_temporal_action(current_prediction[:action_dim])
 
             target_indices.append(int(target_index))
             source_indices.append(int(current_source_index))
-            predicted_joint_frames.append(current_prediction[:action_dim])
-            target_joint_frames.append(target_joint_pos[target_index, :action_dim].astype(np.float32, copy=False))
+            predicted_joint_frames.append(decoded["joints"])
+            predicted_root_pos_frames.append(decoded["root_pos"])
+            predicted_root_quat_frames.append(decoded["root_quat"])
+            target_joint_frames.append(target_joint_pos[target_index, :TARGET_JOINT_DIM].astype(np.float32, copy=False))
             source_frame_map = source_global_maps[current_source_index]
             source_soma_frames.append(
                 np.asarray(
@@ -342,8 +353,14 @@ def _rollout_one_clip(
     source_soma = np.asarray(source_soma_frames, dtype=np.float32)
     target_root_pos = np.asarray(target_root_pos_frames, dtype=np.float32)
     target_root_quat = np.asarray(target_root_quat_frames, dtype=np.float32)
-    pred_root_pos = target_root_pos.copy()
-    pred_root_quat = target_root_quat.copy()
+    pred_root_pos = np.asarray(predicted_root_pos_frames, dtype=np.float32)
+    pred_root_quat = np.asarray(predicted_root_quat_frames, dtype=np.float32)
+    if pred_root_pos.shape[0] != pred_joint_pos.shape[0] or pred_root_quat.shape[0] != pred_joint_pos.shape[0]:
+        pred_root_pos = target_root_pos.copy()
+        pred_root_quat = target_root_quat.copy()
+        prediction_root_pose_source = "target_root_pose_reused"
+    else:
+        prediction_root_pose_source = "predictions_jsonl"
 
     target_g1 = target_body_pos[np.asarray(target_indices, dtype=np.int64), :, :].astype(np.float32, copy=False)
     inferred_g1 = np.asarray(
@@ -373,7 +390,7 @@ def _rollout_one_clip(
         "source_fps": float(source_fps),
         "target_fps": float(target_fps),
         "physical_time_aligned": True,
-        "prediction_root_pose_source": "target_root_pose_reused",
+        "prediction_root_pose_source": prediction_root_pose_source,
         "root_rot_format": "wxyz",
         "initial_root_xy_zeroed": False,
         "source_soma_names": tuple(str(name) for name in source_cfg.source_body_names),
@@ -426,6 +443,18 @@ def _rollout_one_clip(
         "source_frame_range": review_contract["source_frame_range"],
         "physical_time_aligned": review_contract["physical_time_aligned"],
     }
+
+
+def _decode_temporal_action(values: Sequence[float]) -> dict[str, np.ndarray]:
+    vector = np.asarray(values, dtype=np.float32).reshape(-1)
+    joints = vector[:TARGET_JOINT_DIM].astype(np.float32, copy=False)
+    if vector.size >= TARGET_JOINT_DIM + 7:
+        root_pos = vector[TARGET_JOINT_DIM : TARGET_JOINT_DIM + 3].astype(np.float32, copy=False)
+        root_quat = vector[TARGET_JOINT_DIM + 3 : TARGET_JOINT_DIM + 7].astype(np.float32, copy=False)
+    else:
+        root_pos = np.zeros((3,), dtype=np.float32)
+        root_quat = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    return {"joints": joints, "root_pos": root_pos, "root_quat": root_quat}
 
 
 def _future_source_indices(

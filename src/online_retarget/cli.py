@@ -1064,7 +1064,7 @@ def _sonic_windowed_build_config_from_args(
     defaults = SonicWindowedBuildConfig()
 
     def pick(name: str, default: object) -> object:
-        cli_value = getattr(args, name)
+        cli_value = getattr(args, name, None)
         if cli_value is not None:
             return cli_value
         if name in build_cfg and build_cfg[name] is not None:
@@ -1095,6 +1095,9 @@ def _sonic_windowed_build_config_from_args(
         target_frame_offset=int(pick("target_frame_offset", defaults.target_frame_offset)),
         target_horizon_frames=int(pick("target_horizon_frames", defaults.target_horizon_frames)),
         target_future_step=int(pick("target_future_step", defaults.target_future_step)),
+        include_target_root_pose=bool(
+            pick("include_target_root_pose", defaults.include_target_root_pose)
+        ),
         source_rotation=str(pick("source_rotation", defaults.source_rotation)),
         include_source_angular_velocity=include_source_angular_velocity,
         source_bvh_tar=_optional_str(pick("source_bvh_tar", defaults.source_bvh_tar)),

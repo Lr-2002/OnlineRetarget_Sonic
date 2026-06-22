@@ -164,20 +164,22 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(route_b["data"]["samples_jsonl"], "runs/supervised/route_b/samples.jsonl")
         self.assertEqual(route_b["data"]["target_horizon_frames"], 10)
         self.assertEqual(route_b["data"]["target_future_step"], 5)
+        self.assertTrue(route_b["data"]["include_target_root_pose"])
         self.assertEqual(route_b["data"]["source_body_token_dim"], 15)
         self.assertEqual(route_b["data"]["source_rotation"], "rot6d")
-        self.assertEqual(route_b["data"]["action_dim"], 29)
+        self.assertEqual(route_b["data"]["action_dim"], 36)
         self.assertEqual(route_b["data"]["build"]["target_future_step"], 5)
+        self.assertTrue(route_b["data"]["build"]["include_target_root_pose"])
         self.assertEqual(route_b["data"]["build"]["source_rotation"], "rot6d")
         self.assertEqual(route_b["model"]["family"], "temporal_diffusion_policy")
-        self.assertEqual(route_b["model"]["action_dim"], 29)
+        self.assertEqual(route_b["model"]["action_dim"], 36)
         self.assertEqual(route_b["model"]["d_model"], 128)
         self.assertEqual(route_b["model"]["nhead"], 4)
         self.assertEqual(route_b["model"]["num_layers"], 2)
         self.assertEqual(route_b["model"]["dim_feedforward"], 256)
         self.assertEqual(route_b["model"]["robot_state_dim"], 0)
         self.assertEqual(route_b["model"]["output_mode"], "residual_prev_action")
-        self.assertEqual(route_b["model"]["output"], "g1_joint_position_future_window")
+        self.assertEqual(route_b["model"]["output"], "g1_joint_root_position_future_window")
         self.assertEqual(
             route_b["loss"],
             {
@@ -1939,13 +1941,21 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(train_entry._target_vector(sample), [1.0, 2.0, 3.0, 4.0])
 
     def test_temporal_diffusion_policy_keeps_future_targets_nonflat(self):
-        sample = {"future_target_joints": [[1, 2], [3, 4]], "target_joints": [1, 2]}
+        sample = {
+            "future_target_joints": [[1, 2], [3, 4]],
+            "future_target_root_pos_w": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+            "future_target_root_quat_w": [[1.0, 0.0, 0.0, 0.0], [0.9, 0.1, 0.0, 0.0]],
+            "target_joints": [1, 2],
+        }
 
         self.assertEqual(train_entry._configured_model_family({"model": {"family": "dp-temporal"}}), "temporal_diffusion_policy")
-        self.assertEqual(train_entry._target_action_shape(sample), (2, 2))
+        self.assertEqual(train_entry._target_action_shape(sample), (2, 9))
         self.assertEqual(
             train_entry._target_action_sequence(sample),
-            [[1.0, 2.0], [3.0, 4.0]],
+            [
+                [1.0, 2.0, 0.1, 0.2, 0.3, 1.0, 0.0, 0.0, 0.0],
+                [3.0, 4.0, 0.4, 0.5, 0.6, 0.9, 0.1, 0.0, 0.0],
+            ],
         )
 
     def test_previous_target_vector_repeats_single_frame_for_horizon(self):
@@ -1964,16 +1974,20 @@ class TrainEntryTests(unittest.TestCase):
                         "sample_id": "s1",
                         "target_joints": [0.0, 1.0],
                         "future_target_joints": [[0.0, 1.0], [2.0, 3.0]],
+                        "future_target_root_pos_w": [[10.0, 11.0, 12.0], [13.0, 14.0, 15.0]],
+                        "future_target_root_quat_w": [[1.0, 0.0, 0.0, 0.0], [0.9, 0.1, 0.0, 0.0]],
                         "target_frame_indices": [10, 11],
                     }
                 ],
-                predictions=[[0.5, 1.5, 2.5, 3.5]],
+                predictions=[[0.5, 1.5, 20.0, 21.0, 22.0, 1.0, 0.0, 0.0, 0.0, 2.5, 3.5, 23.0, 24.0, 25.0, 0.9, 0.1, 0.0, 0.0]],
             )
 
             payload = json.loads(output.read_text(encoding="utf-8").strip())
 
         self.assertEqual(payload["predicted_joints"], [[0.5, 1.5], [2.5, 3.5]])
         self.assertEqual(payload["target_joints"], [[0.0, 1.0], [2.0, 3.0]])
+        self.assertEqual(payload["pred_root_pos_w"], [[20.0, 21.0, 22.0], [23.0, 24.0, 25.0]])
+        self.assertEqual(payload["prediction_root_pose_source"], "predictions_jsonl")
         self.assertEqual(payload["target_frame_indices"], [10, 11])
 
     def test_write_prediction_jsonl_preserves_nested_temporal_predictions(self):
@@ -1987,16 +2001,19 @@ class TrainEntryTests(unittest.TestCase):
                         "sample_id": "s1",
                         "target_joints": [0.0, 1.0],
                         "future_target_joints": [[0.0, 1.0], [2.0, 3.0]],
+                        "future_target_root_pos_w": [[10.0, 11.0, 12.0], [13.0, 14.0, 15.0]],
+                        "future_target_root_quat_w": [[1.0, 0.0, 0.0, 0.0], [0.9, 0.1, 0.0, 0.0]],
                         "target_frame_indices": [10, 15],
                     }
                 ],
-                predictions=[[[0.5, 1.5], [2.5, 3.5]]],
+                predictions=[[[0.5, 1.5, 20.0, 21.0, 22.0, 1.0, 0.0, 0.0, 0.0], [2.5, 3.5, 23.0, 24.0, 25.0, 0.9, 0.1, 0.0, 0.0]]],
             )
 
             payload = json.loads(output.read_text(encoding="utf-8").strip())
 
         self.assertEqual(payload["predicted_joints"], [[0.5, 1.5], [2.5, 3.5]])
         self.assertEqual(payload["target_joints"], [[0.0, 1.0], [2.0, 3.0]])
+        self.assertEqual(payload["pred_root_pos_w"], [[20.0, 21.0, 22.0], [23.0, 24.0, 25.0]])
         self.assertEqual(payload["target_frame_indices"], [10, 15])
 
     def test_previous_target_joints_falls_back_to_zeros(self):
@@ -2049,12 +2066,14 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(report["dimensions"]["model_robot_state_dim"], 0)
         self.assertEqual(report["dimensions"]["robot_state_tensor_dim"], 5)
         self.assertEqual(report["output_contract"]["model_output_mode"], "residual_prev_action")
+        self.assertEqual(report["output_contract"]["prediction_export"], "absolute_g1_joint_root_position_future_window")
         self.assertEqual(
             report["actual_condition_sample_fields"],
             [
                 "source_body_tokens",
                 "source_skeleton",
                 "morphology",
+                "prev_target_action",
                 "prev_target_joints",
                 "previous_target_joints",
                 "prev_g1_joints",
@@ -2733,14 +2752,15 @@ def _preset_switch_config(policy_preset: str) -> dict:
             "route_b_temporal_diffusion": {
                 "data": {
                     "samples_jsonl": "runs/supervised/route_b/samples.jsonl",
-                    "target_format": "bones_sonic_joint_pos_future_window",
+                    "target_format": "bones_sonic_joint_root_pos_future_window",
                     "history_frames": 8,
                     "target_horizon_frames": 10,
                     "target_future_step": 5,
+                    "include_target_root_pose": True,
                     "source_body_count": 30,
                     "source_body_token_dim": 15,
                     "source_rotation": "rot6d",
-                    "action_dim": 29,
+                    "action_dim": 36,
                 },
                 "model": {
                     "family": "temporal_diffusion_policy",
@@ -2752,14 +2772,14 @@ def _preset_switch_config(policy_preset: str) -> dict:
                     "time_embed_dim": 32,
                     "diffusion_steps": 32,
                     "inference_steps": 8,
-                    "action_dim": 29,
+                    "action_dim": 36,
                     "source_body_count": 30,
                     "source_body_token_dim": 15,
                     "source_skeleton_dim": 120,
                     "morphology_dim": 13,
                     "robot_state_dim": 0,
                     "output_mode": "residual_prev_action",
-                    "output": "g1_joint_position_future_window",
+                    "output": "g1_joint_root_position_future_window",
                 },
                 "loss": {
                     "temporal_diffusion_policy": 1.0,
@@ -2791,19 +2811,24 @@ def _temporal_sample() -> dict:
         "source_skeleton": [1.0, 2.0, 3.0, 4.0],
         "morphology": [1.7, 70.0],
         "robot_state": [0.0, 0.0, 0.0, 0.0, 0.0],
+        "prev_target_action": [0.0, 0.1, 0.2, 0.3, 0.4, 1.0, 0.0, 0.0, 0.0],
         "prev_target_joints": [0.0, 0.1],
         "fps": 50.0,
         "target_joints": [0.1, 0.2],
+        "target_root_pos_w": [0.2, 0.3, 0.4],
+        "target_root_quat_w": [1.0, 0.0, 0.0, 0.0],
         "future_target_joints": [[0.1, 0.2], [0.2, 0.4]],
+        "future_target_root_pos_w": [[0.2, 0.3, 0.4], [0.5, 0.6, 0.7]],
+        "future_target_root_quat_w": [[1.0, 0.0, 0.0, 0.0], [0.9, 0.1, 0.0, 0.0]],
         "target_frame_indices": [10, 15],
     }
 
 
 def _temporal_feature_contract_config() -> dict:
     return {
-        "data": {"target_format": "bones_sonic_joint_pos_future_window"},
+        "data": {"target_format": "bones_sonic_joint_root_pos_future_window"},
         "model": {
-            "output": "g1_joint_position_future_window",
+            "output": "g1_joint_root_position_future_window",
             "output_mode": "residual_prev_action",
             "robot_state_dim": 0,
         },
@@ -2822,6 +2847,7 @@ def _temporal_feature_contract_config() -> dict:
                 "source_body_tokens",
                 "source_skeleton",
                 "morphology",
+                "prev_target_action",
                 "prev_target_joints",
                 "previous_target_joints",
                 "prev_g1_joints",
@@ -2829,6 +2855,10 @@ def _temporal_feature_contract_config() -> dict:
             "forbid_condition_sample_keys": [
                 "target_joints",
                 "future_target_joints",
+                "target_root_pos_w",
+                "target_root_quat_w",
+                "future_target_root_pos_w",
+                "future_target_root_quat_w",
                 "target_frame",
                 "target_frame_indices",
                 "target_g1_path",
@@ -2842,7 +2872,7 @@ def _temporal_feature_contract_config() -> dict:
                 "source_skeleton_dim": 4,
                 "morphology_dim": 2,
                 "robot_state_dim": 0,
-                "action_dim": 2,
+                "action_dim": 9,
             },
             "required_eval_metrics": [
                 "joint_rmse",
@@ -2860,9 +2890,9 @@ def _temporal_tensors() -> dict:
         "source_skeleton": _FakeTemporalTensor((1, 4)),
         "morphology": _FakeTemporalTensor((1, 2)),
         "robot_state": _FakeTemporalTensor((1, 5)),
-        "prev_action": _FakeTemporalTensor((1, 2)),
+        "prev_action": _FakeTemporalTensor((1, 9)),
         "fps": _FakeTemporalTensor((1,)),
-        "target_action": _FakeTemporalTensor((1, 2, 2)),
+        "target_action": _FakeTemporalTensor((1, 2, 9)),
     }
 
 

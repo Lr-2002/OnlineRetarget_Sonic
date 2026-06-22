@@ -73,6 +73,19 @@ class SonicWindowedBuilderValueTests(unittest.TestCase):
 
         self.assertIn("_fh10_fs5_", run_name)
 
+    def test_run_name_marks_root_pose_contract(self) -> None:
+        run_name = _run_name(
+            SonicWindowedBuildConfig(
+                task_query="walk",
+                target_horizon_frames=10,
+                target_future_step=5,
+                include_target_root_pose=True,
+                limit=128,
+            )
+        )
+
+        self.assertIn("_rootpose_", run_name)
+
 
 @unittest.skipUnless(np is not None, "numpy required for SONIC windowed builder tests")
 class SonicWindowedBuilderTests(unittest.TestCase):
@@ -148,6 +161,54 @@ class SonicWindowedBuilderTests(unittest.TestCase):
         self.assertEqual(manifest["target_future_step"], 1)
         self.assertEqual(manifest["candidate_clip_count"], 1)
         self.assertEqual(manifest["target_horizon_frames"], 2)
+
+    def test_build_sonic_windowed_jsonl_emits_root_pose_temporal_targets(self) -> None:
+        assert np is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "data"
+            output = Path(tmp) / "runs"
+            sonic_root = root / "bones_sonic" / "230101"
+            root.mkdir()
+            sonic_root.mkdir(parents=True)
+            _write_source_tar(root / "soma_proportional.tar")
+            walk_npz = sonic_root / "walk_forward__A001.npz"
+            jump_npz = sonic_root / "jump__A001.npz"
+            _write_sonic_npz(walk_npz)
+            _write_sonic_npz(jump_npz)
+            index_csv = Path(tmp) / "sonic_index.csv"
+            _write_index(index_csv, walk_npz=walk_npz, jump_npz=jump_npz)
+
+            result = build_sonic_windowed_jsonl(
+                data_root=root,
+                index_csv=index_csv,
+                output_root=output,
+                config=SonicWindowedBuildConfig(
+                    split="train",
+                    task_query="walk",
+                    source_mode="soma_bvh",
+                    train_ratio=1.0,
+                    val_ratio=0.0,
+                    limit=1,
+                    history_frames=2,
+                    target_horizon_frames=2,
+                    include_target_root_pose=True,
+                    window_stride=1,
+                    max_windows_per_clip=1,
+                    source_body_names=("Hips", "LeftFoot"),
+                ),
+            )
+            sample = json.loads(result.samples_jsonl.read_text(encoding="utf-8").splitlines()[0])
+            manifest = json.loads(result.manifest_json.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.output_dim, (len(SONIC_JOINT_NAMES) + 7) * 2)
+        self.assertEqual(len(sample["prev_target_action"]), len(SONIC_JOINT_NAMES) + 7)
+        self.assertEqual(len(sample["future_target_action"][0]), len(SONIC_JOINT_NAMES) + 7)
+        self.assertEqual(len(sample["prev_target_root_pos_w"]), 3)
+        self.assertEqual(len(sample["prev_target_root_quat_w"]), 4)
+        self.assertEqual(manifest["target_format"], "bones_sonic_joint_root_pos_future_window")
+        self.assertEqual(manifest["action_dim"], len(SONIC_JOINT_NAMES) + 7)
+        self.assertEqual(manifest["target_root_pose_dim"], 7)
+        self.assertIn("_rootpose_", str(result.samples_jsonl))
 
     def test_build_sonic_windowed_jsonl_emits_rot6d_body_tokens(self) -> None:
         assert np is not None
@@ -301,7 +362,7 @@ class SonicWindowedBuilderTests(unittest.TestCase):
             (
                 "route_b_temporal_diffusion",
                 5,
-                Path("runs/supervised/somabvh_walk_train_h8_fh10_fs5_stride10_limit128/samples.jsonl"),
+                Path("runs/supervised/somabvh_walk_train_h8_fh10_fs5_rootpose_stride10_limit128/samples.jsonl"),
             ),
         )
         for preset, future_step, expected_samples in cases:
@@ -523,15 +584,16 @@ def _builder_preset_switch_config(policy_preset: str) -> dict:
             },
             "route_b_temporal_diffusion": {
                 "data": {
-                    "samples_jsonl": "runs/supervised/somabvh_walk_train_h8_fh10_fs5_stride10_limit128/samples.jsonl",
-                    "target_format": "bones_sonic_joint_pos_future_window",
+                    "samples_jsonl": "runs/supervised/somabvh_walk_train_h8_fh10_fs5_rootpose_stride10_limit128/samples.jsonl",
+                    "target_format": "bones_sonic_joint_root_pos_future_window",
                     "history_frames": 8,
                     "target_horizon_frames": 10,
                     "target_future_step": 5,
+                    "include_target_root_pose": True,
                     "source_body_count": 30,
                     "source_body_token_dim": 15,
                     "source_rotation": "rot6d",
-                    "action_dim": 29,
+                    "action_dim": 36,
                 },
                 "model": {
                     "family": "temporal_diffusion_policy",
@@ -539,14 +601,14 @@ def _builder_preset_switch_config(policy_preset: str) -> dict:
                     "nhead": 4,
                     "num_layers": 2,
                     "dim_feedforward": 256,
-                    "action_dim": 29,
+                    "action_dim": 36,
                     "source_body_count": 30,
                     "source_body_token_dim": 15,
                     "source_skeleton_dim": 120,
                     "morphology_dim": 13,
                     "robot_state_dim": 0,
                     "output_mode": "residual_prev_action",
-                    "output": "g1_joint_position_future_window",
+                    "output": "g1_joint_root_position_future_window",
                 },
                 "loss": {
                     "temporal_diffusion_policy": 1.0,

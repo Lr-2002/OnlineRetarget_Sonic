@@ -10,6 +10,7 @@ BUILD_SYNC_KEYS = (
     "history_frames",
     "target_horizon_frames",
     "target_future_step",
+    "include_target_root_pose",
     "source_rotation",
 )
 
@@ -131,10 +132,12 @@ def validate_resolved_config_preset(name: str, config: dict[str, Any]) -> None:
         if key in data and key in build and build[key] != data[key]:
             errors.append(f"data.build.{key} must match data.{key}")
     if family == "temporal_diffusion_policy":
-        if data.get("target_format") != "bones_sonic_joint_pos_future_window":
-            errors.append("data.target_format must be bones_sonic_joint_pos_future_window")
-        if model.get("output") != "g1_joint_position_future_window":
-            errors.append("model.output must be g1_joint_position_future_window")
+        if data.get("target_format") != "bones_sonic_joint_root_pos_future_window":
+            errors.append("data.target_format must be bones_sonic_joint_root_pos_future_window")
+        if model.get("output") != "g1_joint_root_position_future_window":
+            errors.append("model.output must be g1_joint_root_position_future_window")
+        if not bool(data.get("include_target_root_pose", False)):
+            errors.append("data.include_target_root_pose must be true")
         for key in (
             "history_frames",
             "target_horizon_frames",

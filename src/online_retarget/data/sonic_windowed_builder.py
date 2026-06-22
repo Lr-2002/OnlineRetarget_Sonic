@@ -43,6 +43,7 @@ class SonicWindowedBuildConfig:
     target_frame_offset: int = 0
     target_horizon_frames: int = 1
     target_future_step: int = 1
+    include_target_root_pose: bool = False
     source_rotation: str = "rot6d"
     include_source_angular_velocity: bool = True
     window_stride: int = 10
@@ -128,7 +129,7 @@ def build_sonic_windowed_jsonl(
     sample_count = 0
     selected_clip_count = 0
     skipped_clip_count = 0
-    output_dim = len(SONIC_JOINT_NAMES) * config.target_horizon_frames
+    output_dim = _target_action_dim(config) * config.target_horizon_frames
     input_dim = spec.flattened_dim()
     source_tar = None
     source_bvh_tar_path = _source_bvh_tar_path(data_root, config)
@@ -208,10 +209,11 @@ def build_sonic_windowed_jsonl(
             "ang_vel_z",
         ],
         "target_joint_dim": len(SONIC_JOINT_NAMES),
+        "target_root_pose_dim": 7 if config.include_target_root_pose else 0,
         "target_horizon_frames": config.target_horizon_frames,
         "target_future_step": config.target_future_step,
         "action_horizon": config.target_horizon_frames,
-        "action_dim": len(SONIC_JOINT_NAMES),
+        "action_dim": _target_action_dim(config),
         "split_policy": {
             "group_by": "actor_uid",
             "seed": config.split_seed,
@@ -247,7 +249,8 @@ def _samples_for_row(
     *,
     np: Any,
 ) -> list[dict[str, object]]:
-    target_joints, fps, sonic_source, sonic_path = _read_sonic_motion(row, config, np=np)
+    target_motion, fps, sonic_source, sonic_path = _read_sonic_motion(row, config, np=np)
+    target_joints = target_motion["joint_pos"] if target_motion is not None else None
     if target_joints is None:
         return []
     if config.source_mode == "soma_bvh":
@@ -290,8 +293,19 @@ def _samples_for_row(
             for offset in range(config.target_horizon_frames)
         ]
         future_targets = [target_joints[index] for index in frame_indices]
+        future_root_pos = (
+            [target_motion["root_pos_w"][index] for index in frame_indices]
+            if config.include_target_root_pose and target_motion is not None
+            else []
+        )
+        future_root_quat = (
+            [target_motion["root_quat_w"][index] for index in frame_indices]
+            if config.include_target_root_pose and target_motion is not None
+            else []
+        )
         history = source_motion.positions[start : start + config.history_frames]
         observation = _observation_from_history(history, row, spec)
+        prev_target_index = max(0, target_index - 1)
         sample = {
             "sample_id": _sample_id(row, config.split, start),
             "actor_uid": row.get("actor_uid", ""),
@@ -315,17 +329,45 @@ def _samples_for_row(
             "target_frame_indices": frame_indices,
             "target_horizon_frames": config.target_horizon_frames,
             "target_future_step": config.target_future_step,
-            "prev_target_frame": max(0, target_index - 1),
+            "prev_target_frame": prev_target_index,
             "fps": fps,
             "observation": observation,
-            "prev_target_joints": [
-                float(value) for value in target_joints[max(0, target_index - 1)]
-            ],
+            "prev_target_joints": [float(value) for value in target_joints[prev_target_index]],
             "target_joints": [float(value) for value in target_joints[target_index]],
             "future_target_joints": [
                 [float(value) for value in frame] for frame in future_targets
             ],
         }
+        if config.include_target_root_pose and target_motion is not None:
+            sample["prev_target_root_pos_w"] = [
+                float(value) for value in target_motion["root_pos_w"][prev_target_index]
+            ]
+            sample["prev_target_root_quat_w"] = [
+                float(value) for value in target_motion["root_quat_w"][prev_target_index]
+            ]
+            sample["target_root_pos_w"] = [
+                float(value) for value in target_motion["root_pos_w"][target_index]
+            ]
+            sample["target_root_quat_w"] = [
+                float(value) for value in target_motion["root_quat_w"][target_index]
+            ]
+            sample["future_target_root_pos_w"] = [
+                [float(value) for value in frame] for frame in future_root_pos
+            ]
+            sample["future_target_root_quat_w"] = [
+                [float(value) for value in frame] for frame in future_root_quat
+            ]
+            sample["prev_target_action"] = (
+                [float(value) for value in sample["prev_target_joints"]]
+                + [float(value) for value in sample["prev_target_root_pos_w"]]
+                + [float(value) for value in sample["prev_target_root_quat_w"]]
+            )
+            sample["future_target_action"] = [
+                [float(value) for value in sample["future_target_joints"][index]]
+                + [float(value) for value in sample["future_target_root_pos_w"][index]]
+                + [float(value) for value in sample["future_target_root_quat_w"][index]]
+                for index in range(len(sample["future_target_joints"]))
+            ]
         if sonic_path is not None:
             sample["target_g1_path"] = str(sonic_path)
         samples.append(sample)
@@ -383,7 +425,7 @@ def _read_sonic_motion(
     config: SonicWindowedBuildConfig,
     *,
     np: Any,
-) -> tuple[list[list[float]] | None, float, SourceMotionFeatures | None, Path | None]:
+) -> tuple[dict[str, list[list[float]]] | None, float, SourceMotionFeatures | None, Path | None]:
     path = _resolve_sonic_npz_path(row, config)
     if path is None:
         return None, 0.0, None, None
@@ -415,7 +457,11 @@ def _read_sonic_motion(
     ):
         return None, fps, None, path
     return (
-        joint_pos.tolist(),
+        {
+            "joint_pos": joint_pos.tolist(),
+            "root_pos_w": body_pos[:, 0, :].tolist(),
+            "root_quat_w": body_quat[:, 0, :].tolist(),
+        },
         fps,
         _source_features_from_sonic(body_pos, body_quat, body_ang_vel, config=config, np=np),
         path,
@@ -709,9 +755,15 @@ def _rot6d(matrix: Sequence[Sequence[float]]) -> list[float]:
 
 
 def _target_format(config: SonicWindowedBuildConfig) -> str:
+    if config.include_target_root_pose:
+        return "bones_sonic_joint_root_pos_future_window"
     if config.target_horizon_frames > 1:
         return "bones_sonic_joint_pos_future_window"
     return "bones_sonic_joint_pos"
+
+
+def _target_action_dim(config: SonicWindowedBuildConfig) -> int:
+    return len(SONIC_JOINT_NAMES) + (7 if config.include_target_root_pose else 0)
 
 
 def _observation_from_history(
@@ -815,6 +867,7 @@ def _run_name(config: SonicWindowedBuildConfig) -> str:
         f"{source}_{task}_{config.split}_h{config.history_frames}"
         f"{f'_fh{config.target_horizon_frames}' if config.target_horizon_frames > 1 else ''}"
         f"{f'_fs{config.target_future_step}' if config.target_future_step != 1 else ''}"
+        f"{'_rootpose' if config.include_target_root_pose else ''}"
         f"_stride{config.window_stride}_limit{config.limit}"
     )
 
@@ -830,6 +883,8 @@ def _validate_config(config: SonicWindowedBuildConfig) -> None:
         raise ValueError("target_horizon_frames must be positive")
     if config.target_future_step <= 0:
         raise ValueError("target_future_step must be positive")
+    if config.include_target_root_pose and config.target_horizon_frames <= 1:
+        raise ValueError("include_target_root_pose requires target_horizon_frames > 1")
     if config.source_rotation != "rot6d":
         raise ValueError("source_rotation must be rot6d")
     if config.window_stride <= 0:
