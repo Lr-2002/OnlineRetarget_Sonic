@@ -1691,8 +1691,8 @@ class TrainEntryTests(unittest.TestCase):
             def log(self, payload, step=None):
                 logged_payloads.append((payload, step))
 
-            def save(self, path):
-                saved_paths.append(path)
+            def save(self, path, base_path=None):
+                saved_paths.append((path, base_path))
 
         class FakeVideo:
             def __init__(self, path):
@@ -1751,8 +1751,45 @@ class TrainEntryTests(unittest.TestCase):
             payload["periodic_eval/visualization/accepted_vertical_v2/primary_prediction_root_pose_source"],
             "predictions_jsonl",
         )
-        self.assertTrue(any(str(primary_video) == path for path in saved_paths))
-        self.assertTrue(any(str(primary_readable) == path for path in saved_paths))
+        self.assertTrue(
+            any(
+                path == "clip_00.mp4"
+                and base_path is not None
+                and base_path.endswith(
+                    "online_retarget_visual_validation/step_00005000/rank_000"
+                )
+                for path, base_path in saved_paths
+            )
+        )
+        self.assertTrue(
+            any(
+                path == "clip_00_readable.mp4"
+                and base_path is not None
+                and base_path.endswith(
+                    "online_retarget_visual_validation/step_00005000/rank_000"
+                )
+                for path, base_path in saved_paths
+            )
+        )
+
+    def test_wandb_save_uses_parent_base_path_for_external_single_file(self):
+        saved_calls = []
+
+        class FakeRun:
+            def save(self, path, base_path=None):
+                saved_calls.append((path, base_path))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact = Path(tmp) / "online_retarget_visual_validation" / "step_00000020" / "rank_000" / "clip_00_readable.mp4"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_bytes(b"artifact")
+
+            train_entry._wandb_save(FakeRun(), artifact)
+
+        self.assertEqual(
+            saved_calls,
+            [("clip_00_readable.mp4", str(artifact.parent.resolve()))],
+        )
 
     def test_periodic_eval_wandb_payload_records_visualization_primary_backend(self):
         payload = train_entry._wandb_periodic_eval_payload(

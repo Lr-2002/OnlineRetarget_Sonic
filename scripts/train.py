@@ -5389,7 +5389,25 @@ def _wandb_log(run, payload: dict[str, Any], step: int | None = None) -> None:
 
 
 def _wandb_save(run, path: Path) -> None:
-    if run is not None and path.exists():
+    if run is None or not path.exists():
+        return
+    resolved = path.resolve()
+    base_path = resolved.parent
+    try:
+        cwd = Path.cwd().resolve()
+        resolved.relative_to(cwd)
+    except ValueError:
+        cwd = None
+    if cwd is not None:
+        base_path = cwd
+    try:
+        glob_path = resolved.relative_to(base_path)
+    except ValueError:
+        base_path = resolved.parent
+        glob_path = Path(resolved.name)
+    try:
+        run.save(str(glob_path), base_path=str(base_path))
+    except TypeError:
         run.save(str(path))
 
 
