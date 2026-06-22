@@ -5411,6 +5411,15 @@ def _wandb_save(run, path: Path) -> None:
         run.save(str(path))
 
 
+def _path_from_text(value: Any) -> Path | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return Path(text)
+
+
 def _wandb_log_visualization(
     run,
     visualization: dict[str, Any],
@@ -5431,8 +5440,8 @@ def _wandb_log_visualization(
     accepted_vertical = visualization.get("accepted_vertical_v2", {})
     if not isinstance(accepted_vertical, dict):
         accepted_vertical = {}
-    primary_video_path = Path(str(visualization.get("primary_video", "")))
-    primary_readable_path = Path(str(visualization.get("primary_readable_video", "")))
+    primary_video_path = _path_from_text(visualization.get("primary_video"))
+    primary_readable_path = _path_from_text(visualization.get("primary_readable_video"))
     for key in (
         "summary_json",
         "trajectory_csv",
@@ -5442,14 +5451,14 @@ def _wandb_log_visualization(
         "html",
     ):
         source = capsule if key in {"manifest_json", "html"} else visualization
-        path_text = source.get(key)
-        if path_text:
-            _wandb_save(run, Path(str(path_text)))
+        path = _path_from_text(source.get(key))
+        if path is not None:
+            _wandb_save(run, path)
     for video_path in _capsule_video_paths(capsule):
         _wandb_save(run, video_path)
-    if primary_video_path.exists():
+    if primary_video_path is not None and primary_video_path.exists():
         _wandb_save(run, primary_video_path)
-    if primary_readable_path.exists():
+    if primary_readable_path is not None and primary_readable_path.exists():
         _wandb_save(run, primary_readable_path)
     for path in _accepted_vertical_v2_media_paths(accepted_vertical):
         _wandb_save(run, path)
@@ -5481,8 +5490,8 @@ def _wandb_log_visualization(
         f"{key_prefix}/capsule_status": capsule.get("status", ""),
         f"{key_prefix}/capsule_manifest": capsule.get("manifest_json", ""),
     }
-    html_path = Path(str(visualization.get("trajectory_html", "")))
-    if html_path.exists():
+    html_path = _path_from_text(visualization.get("trajectory_html"))
+    if html_path is not None and html_path.exists():
         try:
             import wandb
 
@@ -5491,8 +5500,8 @@ def _wandb_log_visualization(
             )
         except Exception:
             pass
-    capsule_html = Path(str(capsule.get("html", "")))
-    if capsule_html.exists():
+    capsule_html = _path_from_text(capsule.get("html"))
+    if capsule_html is not None and capsule_html.exists():
         try:
             import wandb
 
@@ -5506,12 +5515,12 @@ def _wandb_log_visualization(
     try:
         import wandb
 
-        if primary_video_path.exists():
+        if primary_video_path is not None and primary_video_path.exists():
             payload[f"{key_prefix}/primary"] = wandb.Video(str(primary_video_path))
-        if primary_readable_path.exists():
+        if primary_readable_path is not None and primary_readable_path.exists():
             payload[f"{key_prefix}/primary_readable"] = wandb.Video(str(primary_readable_path))
-        accepted_primary_path = Path(str(accepted_vertical.get("primary_video", "")))
-        if accepted_primary_path.exists():
+        accepted_primary_path = _path_from_text(accepted_vertical.get("primary_video"))
+        if accepted_primary_path is not None and accepted_primary_path.exists():
             payload[f"{key_prefix}/accepted_vertical_v2/primary"] = wandb.Video(
                 str(accepted_primary_path)
             )

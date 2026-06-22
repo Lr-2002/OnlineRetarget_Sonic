@@ -1795,6 +1795,51 @@ class TrainEntryTests(unittest.TestCase):
             [("clip_00_readable.mp4", str(artifact.parent.resolve()))],
         )
 
+    def test_periodic_visualization_wandb_skips_empty_media_paths_instead_of_saving_cwd(self):
+        logged_payloads = []
+        saved_paths = []
+
+        class FakeRun:
+            def log(self, payload, step=None):
+                logged_payloads.append((payload, step))
+
+            def save(self, path, base_path=None):
+                if base_path is None:
+                    raise AssertionError("expected base_path for save call")
+                if Path(path) == Path(base_path):
+                    raise ValueError("Glob cannot be the same as the base path")
+                saved_paths.append((path, base_path))
+
+        visualization = {
+            "enabled": True,
+            "status": "ok",
+            "primary_backend": "native_fps_contiguous_rollout",
+            "route_visualization_status": "ok",
+            "summary_json": "",
+            "primary_video": "",
+            "primary_readable_video": "",
+            "trajectory_html": "",
+            "capsule_visualization": {"status": "disabled", "manifest_json": "", "html": ""},
+            "accepted_vertical_v2": {
+                "enabled": True,
+                "status": "failed",
+                "primary_video": "",
+            },
+        }
+
+        train_entry._wandb_log_visualization(
+            FakeRun(),
+            visualization,
+            {"visualization": {"wandb_upload": True}},
+            key_prefix="periodic_eval/visualization",
+        )
+
+        self.assertEqual(saved_paths, [])
+        payload, step = logged_payloads[0]
+        self.assertIsNone(step)
+        self.assertEqual(payload["periodic_eval/visualization/primary_video"], "")
+        self.assertEqual(payload["periodic_eval/visualization/primary_readable_video"], "")
+
     def test_periodic_eval_wandb_payload_records_visualization_primary_backend(self):
         payload = train_entry._wandb_periodic_eval_payload(
             step=5000,
