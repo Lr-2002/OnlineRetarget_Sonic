@@ -1772,11 +1772,15 @@ class TrainEntryTests(unittest.TestCase):
             )
         )
 
-    def test_wandb_save_uses_parent_base_path_for_external_single_file(self):
+    def test_wandb_save_avoids_same_base_path_glob_for_external_single_file(self):
         saved_calls = []
 
         class FakeRun:
             def save(self, path, base_path=None):
+                if base_path is None:
+                    raise AssertionError("expected base_path for single-file artifact save")
+                if Path(path) == Path(base_path):
+                    raise ValueError("Glob cannot be the same as the base path")
                 saved_calls.append((path, base_path))
 
         with tempfile.TemporaryDirectory() as tmp:
