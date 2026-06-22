@@ -3898,6 +3898,7 @@ def _select_periodic_visualization_primary(
     native_fps_visual_validation: dict[str, Any],
 ) -> dict[str, Any]:
     selected = dict(visualization)
+    configured_primary_backend = str(selected.get("primary_backend", "") or "").strip()
     accepted_vertical = visualization.get("accepted_vertical_v2", {})
     if isinstance(accepted_vertical, dict):
         selected["accepted_vertical_v2"] = dict(accepted_vertical)
@@ -3950,6 +3951,31 @@ def _select_periodic_visualization_primary(
         accepted_vertical["bridge_primary_video"] = bridge_primary_video
         accepted_vertical["bridge_primary_metadata"] = bridge_primary_metadata
         selected["accepted_vertical_v2"] = accepted_vertical
+        accepted_primary_video = _accepted_vertical_v2_user_facing_primary_video(accepted_vertical)
+        if (
+            configured_primary_backend == "accepted_vertical_v2"
+            and _accepted_vertical_v2_completion_ok(accepted_vertical)
+            and accepted_primary_video
+        ):
+            selected["primary_backend"] = "accepted_vertical_v2"
+            selected["status"] = str(accepted_vertical.get("status", "") or selected.get("status", ""))
+            selected["primary_video"] = accepted_primary_video
+            selected["primary_readable_video"] = accepted_primary_video
+            selected["primary_triplet_video"] = ""
+            selected["primary_summary_json"] = str(
+                accepted_vertical.get("summary_json", "") or selected.get("primary_summary_json", "")
+            )
+            selected["primary_clip_status"] = str(
+                accepted_vertical.get("export_status", "") or accepted_vertical.get("status", "") or ""
+            )
+            selected["primary_review_mode"] = "accepted_vertical_v2_core"
+            selected["primary_frame_count"] = int(accepted_vertical.get("primary_frame_count", 0) or 0)
+            selected["primary_physical_time_aligned"] = bool(
+                accepted_vertical.get("primary_physical_time_aligned", False)
+            )
+            selected["primary_prediction_root_pose_source"] = str(
+                accepted_vertical.get("primary_prediction_root_pose_source", "") or ""
+            )
     return selected
 
 

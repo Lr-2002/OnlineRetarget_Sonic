@@ -1644,7 +1644,7 @@ class TrainEntryTests(unittest.TestCase):
         self.assertTrue(any(str(paths["row2_g1_target_isaaclab_video"]) == path for path in saved_paths))
         self.assertTrue(any(str(paths["row3_g1_kinematics_isaaclab_video"]) == path for path in saved_paths))
 
-    def test_periodic_visualization_prefers_native_fps_primary_when_available(self):
+    def test_periodic_visualization_keeps_accepted_vertical_core_as_top_level_primary(self):
         native = {
             "enabled": True,
             "status": "ok",
@@ -1669,38 +1669,46 @@ class TrainEntryTests(unittest.TestCase):
                 "route_visualization_status": "ok",
                 "accepted_vertical_v2": {
                     "enabled": True,
-                    "primary_video": "bridge.mp4",
-                    "primary_metadata": "bridge.json",
+                    "status": "ok",
+                    "export_status": "ok",
+                    "summary_json": "accepted_vertical_v2_summary.json",
+                    "execute_renderers": True,
+                    "accepted_vertical_v2_ok_count": 1,
+                    "primary_video": "accepted_vertical_v2_core.mp4",
+                    "primary_metadata": "accepted_vertical_v2_core.json",
+                    "primary_frame_count": 200,
+                    "primary_physical_time_aligned": True,
+                    "primary_prediction_root_pose_source": "predictions_jsonl",
                 },
             },
             native_fps_visual_validation=native,
         )
 
-        self.assertEqual(selected["primary_backend"], "native_fps_contiguous_rollout")
+        self.assertEqual(selected["primary_backend"], "accepted_vertical_v2")
         self.assertEqual(selected["status"], "ok")
         self.assertEqual(
             selected["primary_video"],
-            "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
+            "accepted_vertical_v2_core.mp4",
         )
         self.assertEqual(
             selected["primary_readable_video"],
-            "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
+            "accepted_vertical_v2_core.mp4",
         )
-        self.assertEqual(selected["primary_triplet_video"], "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00.mp4")
+        self.assertEqual(selected["primary_triplet_video"], "")
+        self.assertEqual(selected["primary_summary_json"], "accepted_vertical_v2_summary.json")
+        self.assertEqual(selected["primary_clip_status"], "ok")
+        self.assertEqual(selected["primary_review_mode"], "accepted_vertical_v2_core")
         self.assertEqual(selected["primary_frame_count"], 200)
         self.assertTrue(selected["primary_physical_time_aligned"])
         self.assertEqual(selected["primary_prediction_root_pose_source"], "predictions_jsonl")
         self.assertEqual(
             selected["accepted_vertical_v2"]["primary_video"],
-            "bridge.mp4",
+            "accepted_vertical_v2_core.mp4",
         )
-        self.assertEqual(selected["accepted_vertical_v2"]["bridge_primary_video"], "bridge.mp4")
+        self.assertEqual(selected["accepted_vertical_v2"]["bridge_primary_video"], "accepted_vertical_v2_core.mp4")
         self.assertNotIn("primary_source", selected["accepted_vertical_v2"])
-        self.assertNotIn("primary_frame_count", selected["accepted_vertical_v2"])
-        self.assertNotIn("primary_physical_time_aligned", selected["accepted_vertical_v2"])
-        self.assertNotIn("primary_prediction_root_pose_source", selected["accepted_vertical_v2"])
 
-    def test_periodic_visualization_wandb_logs_native_fps_primary_and_row_aliases(self):
+    def test_periodic_visualization_wandb_logs_accepted_vertical_core_primary_and_row_aliases(self):
         logged_payloads = []
         saved_paths = []
 
@@ -1760,6 +1768,7 @@ class TrainEntryTests(unittest.TestCase):
 
         payload, step = logged_payloads[0]
         self.assertIsNone(step)
+        self.assertEqual(payload["periodic_eval/visualization/primary_backend"], "accepted_vertical_v2")
         self.assertEqual(payload["periodic_eval/visualization/primary_video"], str(bridge_video))
         self.assertEqual(
             payload["periodic_eval/visualization/primary_readable_video"],
@@ -1993,7 +2002,7 @@ class TrainEntryTests(unittest.TestCase):
             "vertical_somamesh_g1target_g1kinematics.mp4",
         )
 
-    def test_periodic_eval_wandb_payload_exposes_selected_primary_video(self):
+    def test_periodic_eval_wandb_payload_exposes_selected_accepted_vertical_primary_video(self):
         payload = train_entry._wandb_periodic_eval_payload(
             step=5000,
             summary={
@@ -2006,45 +2015,45 @@ class TrainEntryTests(unittest.TestCase):
             visualization={
                 "enabled": True,
                 "status": "ok",
-                "primary_backend": "native_fps_contiguous_rollout",
+                "primary_backend": "accepted_vertical_v2",
                 "route_visualization_status": "ok",
                 "summary_json": "visual_manifest.json",
-                "primary_video": "online_retarget_visual_validation/step_00005000/rank_000/clip_00.mp4",
-                "primary_readable_video": "online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
+                "primary_video": "periodic_eval/visualization/accepted_vertical_v2/vertical_somamesh_g1target_g1kinematics.mp4",
+                "primary_readable_video": "periodic_eval/visualization/accepted_vertical_v2/vertical_somamesh_g1target_g1kinematics.mp4",
                 "accepted_vertical_v2": {
                     "enabled": True,
                     "status": "ok",
                     "export_status": "ok",
                     "primary_video": "periodic_eval/visualization/accepted_vertical_v2/vertical_somamesh_g1target_g1kinematics.mp4",
-                    "primary_frame_count": 10,
-                    "primary_physical_time_aligned": False,
-                    "primary_prediction_root_pose_source": "accepted_vertical_v2_core",
-                    "accepted_vertical_v2_ok_count": 0,
+                    "primary_frame_count": 200,
+                    "primary_physical_time_aligned": True,
+                    "primary_prediction_root_pose_source": "predictions_jsonl",
+                    "accepted_vertical_v2_ok_count": 1,
                 },
             },
         )
 
         self.assertEqual(
             payload["periodic_eval/visualization_primary_backend"],
-            "native_fps_contiguous_rollout",
+            "accepted_vertical_v2",
         )
         self.assertEqual(
             payload["periodic_eval/visualization/primary_video"],
-            "online_retarget_visual_validation/step_00005000/rank_000/clip_00.mp4",
+            "periodic_eval/visualization/accepted_vertical_v2/vertical_somamesh_g1target_g1kinematics.mp4",
         )
         self.assertEqual(
             payload["periodic_eval/visualization/primary_readable_video"],
-            "online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
+            "periodic_eval/visualization/accepted_vertical_v2/vertical_somamesh_g1target_g1kinematics.mp4",
         )
         self.assertEqual(
             payload["periodic_eval/accepted_vertical_v2/primary_video"],
             "periodic_eval/visualization/accepted_vertical_v2/vertical_somamesh_g1target_g1kinematics.mp4",
         )
-        self.assertEqual(payload["periodic_eval/accepted_vertical_v2/primary_frame_count"], 10)
-        self.assertFalse(payload["periodic_eval/accepted_vertical_v2/primary_physical_time_aligned"])
+        self.assertEqual(payload["periodic_eval/accepted_vertical_v2/primary_frame_count"], 200)
+        self.assertTrue(payload["periodic_eval/accepted_vertical_v2/primary_physical_time_aligned"])
         self.assertEqual(
             payload["periodic_eval/accepted_vertical_v2/primary_prediction_root_pose_source"],
-            "accepted_vertical_v2_core",
+            "predictions_jsonl",
         )
 
     def test_quality_gate_blocks_formal_training_without_policy(self):
