@@ -1625,6 +1625,105 @@ class TrainEntryTests(unittest.TestCase):
         self.assertTrue(any(str(paths["row2_g1_target_isaaclab_video"]) == path for path in saved_paths))
         self.assertTrue(any(str(paths["row3_g1_kinematics_isaaclab_video"]) == path for path in saved_paths))
 
+    def test_periodic_visualization_prefers_native_fps_primary_when_available(self):
+        native = {
+            "enabled": True,
+            "status": "ok",
+            "summary_json": "/tmp/out/online_retarget_visual_validation/step_00005000/summary.json",
+            "clips": [
+                {
+                    "status": "ok",
+                    "triplet_video_path": "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00.mp4",
+                    "readable_video_path": "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
+                    "review_contract": {"mode": "native_fps_contiguous_rollout"},
+                }
+            ],
+        }
+        selected = train_entry._select_periodic_visualization_primary(
+            visualization={
+                "enabled": True,
+                "status": "failed",
+                "primary_backend": "accepted_vertical_v2",
+                "route_visualization_status": "ok",
+                "accepted_vertical_v2": {
+                    "enabled": True,
+                    "primary_video": "bridge.mp4",
+                },
+            },
+            native_fps_visual_validation=native,
+        )
+
+        self.assertEqual(selected["primary_backend"], "native_fps_contiguous_rollout")
+        self.assertEqual(selected["status"], "ok")
+        self.assertEqual(
+            selected["primary_video"],
+            "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00.mp4",
+        )
+        self.assertEqual(
+            selected["primary_readable_video"],
+            "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
+        )
+
+    def test_periodic_visualization_wandb_logs_native_fps_primary_without_bridge_primary_alias(self):
+        logged_payloads = []
+        saved_paths = []
+
+        class FakeRun:
+            def log(self, payload, step=None):
+                logged_payloads.append((payload, step))
+
+            def save(self, path):
+                saved_paths.append(path)
+
+        class FakeVideo:
+            def __init__(self, path):
+                self.path = path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            primary_video = root / "online_retarget_visual_validation" / "step_00005000" / "rank_000" / "clip_00.mp4"
+            primary_readable = root / "online_retarget_visual_validation" / "step_00005000" / "rank_000" / "clip_00_readable.mp4"
+            bridge_video = root / "accepted_vertical_v2.mp4"
+            primary_video.parent.mkdir(parents=True, exist_ok=True)
+            for path in (primary_video, primary_readable, bridge_video):
+                path.write_bytes(b"artifact")
+            visualization = {
+                "enabled": True,
+                "status": "ok",
+                "primary_backend": "native_fps_contiguous_rollout",
+                "route_visualization_status": "ok",
+                "summary_json": str(root / "visual_manifest.json"),
+                "primary_video": str(primary_video),
+                "primary_readable_video": str(primary_readable),
+                "accepted_vertical_v2": {
+                    "enabled": True,
+                    "status": "failed",
+                    "primary_video": str(bridge_video),
+                },
+                "capsule_visualization": {"status": "disabled", "manifest_json": ""},
+            }
+            fake_wandb = types.SimpleNamespace(Video=FakeVideo)
+            with mock.patch.dict(sys.modules, {"wandb": fake_wandb}):
+                train_entry._wandb_log_visualization(
+                    FakeRun(),
+                    visualization,
+                    {"visualization": {"wandb_upload": True}},
+                    key_prefix="periodic_eval/visualization",
+                )
+
+        payload, step = logged_payloads[0]
+        self.assertIsNone(step)
+        self.assertEqual(payload["periodic_eval/visualization/primary_video"], str(primary_video))
+        self.assertEqual(
+            payload["periodic_eval/visualization/primary_readable_video"],
+            str(primary_readable),
+        )
+        self.assertIsInstance(payload["periodic_eval/visualization/primary"], FakeVideo)
+        self.assertIsInstance(payload["periodic_eval/visualization/primary_readable"], FakeVideo)
+        self.assertNotIn("periodic_eval/visualization/accepted_vertical_v2/primary", payload)
+        self.assertTrue(any(str(primary_video) == path for path in saved_paths))
+        self.assertTrue(any(str(primary_readable) == path for path in saved_paths))
+
     def test_periodic_eval_wandb_payload_records_visualization_primary_backend(self):
         payload = train_entry._wandb_periodic_eval_payload(
             step=5000,
@@ -1662,6 +1761,47 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(
             payload["periodic_eval/accepted_vertical_v2/primary_video"],
             "vertical_somamesh_g1target_g1kinematics.mp4",
+        )
+
+    def test_periodic_eval_wandb_payload_exposes_selected_primary_video(self):
+        payload = train_entry._wandb_periodic_eval_payload(
+            step=5000,
+            summary={
+                "predictions_jsonl": "predictions.jsonl",
+                "summary_json": "periodic_eval_summary.json",
+                "sample_count": 1,
+                "status": "ok",
+            },
+            eval_result=None,
+            visualization={
+                "enabled": True,
+                "status": "ok",
+                "primary_backend": "native_fps_contiguous_rollout",
+                "route_visualization_status": "ok",
+                "summary_json": "visual_manifest.json",
+                "primary_video": "online_retarget_visual_validation/step_00005000/rank_000/clip_00.mp4",
+                "primary_readable_video": "online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
+                "accepted_vertical_v2": {
+                    "enabled": True,
+                    "status": "failed",
+                    "export_status": "failed",
+                    "primary_video": "bridge.mp4",
+                    "accepted_vertical_v2_ok_count": 0,
+                },
+            },
+        )
+
+        self.assertEqual(
+            payload["periodic_eval/visualization_primary_backend"],
+            "native_fps_contiguous_rollout",
+        )
+        self.assertEqual(
+            payload["periodic_eval/visualization/primary_video"],
+            "online_retarget_visual_validation/step_00005000/rank_000/clip_00.mp4",
+        )
+        self.assertEqual(
+            payload["periodic_eval/visualization/primary_readable_video"],
+            "online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
         )
 
     def test_quality_gate_blocks_formal_training_without_policy(self):

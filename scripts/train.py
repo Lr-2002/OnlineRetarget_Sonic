@@ -3879,6 +3879,59 @@ def _periodic_visualization_config(config: dict[str, Any], *, artifact_dir: Path
     return updated
 
 
+def _native_fps_primary_clip(native_fps: dict[str, Any]) -> dict[str, Any]:
+    clips = native_fps.get("clips", [])
+    if not isinstance(clips, list):
+        return {}
+    for clip in clips:
+        if isinstance(clip, dict) and str(clip.get("status", "")) == "ok":
+            return dict(clip)
+    for clip in clips:
+        if isinstance(clip, dict):
+            return dict(clip)
+    return {}
+
+
+def _select_periodic_visualization_primary(
+    *,
+    visualization: dict[str, Any],
+    native_fps_visual_validation: dict[str, Any],
+) -> dict[str, Any]:
+    selected = dict(visualization)
+    accepted_vertical = visualization.get("accepted_vertical_v2", {})
+    if isinstance(accepted_vertical, dict):
+        selected["accepted_vertical_v2"] = dict(accepted_vertical)
+    native_fps = (
+        dict(native_fps_visual_validation)
+        if isinstance(native_fps_visual_validation, dict)
+        else {}
+    )
+    if not bool(native_fps.get("enabled", False)):
+        return selected
+
+    primary_clip = _native_fps_primary_clip(native_fps)
+    primary_video = str(primary_clip.get("triplet_video_path", "") or "")
+    if not primary_video:
+        return selected
+
+    review_contract = primary_clip.get("review_contract", {})
+    review_mode = (
+        str(review_contract.get("mode", "") or "")
+        if isinstance(review_contract, dict)
+        else ""
+    ) or "native_fps_contiguous_rollout"
+    selected["primary_backend"] = review_mode
+    selected["status"] = str(native_fps.get("status", "") or selected.get("status", ""))
+    selected["primary_video"] = primary_video
+    selected["primary_readable_video"] = str(
+        primary_clip.get("readable_video_path", "") or ""
+    )
+    selected["primary_summary_json"] = str(native_fps.get("summary_json", "") or "")
+    selected["primary_clip_status"] = str(primary_clip.get("status", "") or "")
+    selected["primary_review_mode"] = review_mode
+    return selected
+
+
 def _wandb_periodic_eval_payload(
     *,
     step: int,
@@ -3936,6 +3989,12 @@ def _wandb_periodic_eval_payload(
         )
         payload["periodic_eval/visualization_route_status"] = visualization.get(
             "route_visualization_status", ""
+        )
+        payload["periodic_eval/visualization/primary_video"] = visualization.get(
+            "primary_video", ""
+        )
+        payload["periodic_eval/visualization/primary_readable_video"] = visualization.get(
+            "primary_readable_video", ""
         )
         accepted_vertical = visualization.get("accepted_vertical_v2", {})
         if isinstance(accepted_vertical, dict) and accepted_vertical.get("enabled"):
@@ -4014,6 +4073,10 @@ def _write_periodic_eval_artifacts(
         dict(native_fps_visual_validation)
         if isinstance(native_fps_visual_validation, dict)
         else {"enabled": False}
+    )
+    visualization = _select_periodic_visualization_primary(
+        visualization=visualization,
+        native_fps_visual_validation=native_fps_visual_validation,
     )
     summary_path = artifact_dir / "periodic_eval_summary.json"
     summary = {
@@ -5307,6 +5370,8 @@ def _wandb_log_visualization(
     accepted_vertical = visualization.get("accepted_vertical_v2", {})
     if not isinstance(accepted_vertical, dict):
         accepted_vertical = {}
+    primary_video_path = Path(str(visualization.get("primary_video", "")))
+    primary_readable_path = Path(str(visualization.get("primary_readable_video", "")))
     for key in (
         "summary_json",
         "trajectory_csv",
@@ -5321,6 +5386,10 @@ def _wandb_log_visualization(
             _wandb_save(run, Path(str(path_text)))
     for video_path in _capsule_video_paths(capsule):
         _wandb_save(run, video_path)
+    if primary_video_path.exists():
+        _wandb_save(run, primary_video_path)
+    if primary_readable_path.exists():
+        _wandb_save(run, primary_readable_path)
     for path in _accepted_vertical_v2_media_paths(accepted_vertical):
         _wandb_save(run, path)
     payload = {
@@ -5328,6 +5397,8 @@ def _wandb_log_visualization(
         f"{key_prefix}/primary_backend": visualization.get("primary_backend", ""),
         f"{key_prefix}/route_status": visualization.get("route_visualization_status", ""),
         f"{key_prefix}/summary_json": visualization.get("summary_json", ""),
+        f"{key_prefix}/primary_video": visualization.get("primary_video", ""),
+        f"{key_prefix}/primary_readable_video": visualization.get("primary_readable_video", ""),
         f"{key_prefix}/sample_count": visualization.get("sample_count", 0),
         f"{key_prefix}/trajectory_row_count": visualization.get("trajectory_row_count", 0),
         f"{key_prefix}/accepted_vertical_v2/status": accepted_vertical.get("status", ""),
@@ -5365,12 +5436,18 @@ def _wandb_log_visualization(
     try:
         import wandb
 
+        if primary_video_path.exists():
+            payload[f"{key_prefix}/primary"] = wandb.Video(str(primary_video_path))
+        if primary_readable_path.exists():
+            payload[f"{key_prefix}/primary_readable"] = wandb.Video(str(primary_readable_path))
         for key, field in (
             ("accepted_vertical_v2/primary", "primary_video"),
             ("accepted_vertical_v2/row1_soma_somamesh", "primary_row1_soma_somamesh_video"),
             ("accepted_vertical_v2/row2_g1_target", "primary_row2_g1_target_isaaclab_video"),
             ("accepted_vertical_v2/row3_g1_kinematics", "primary_row3_g1_kinematics_isaaclab_video"),
         ):
+            if visualization.get("primary_backend") != "accepted_vertical_v2":
+                break
             path = Path(str(accepted_vertical.get(field, "")))
             if path.exists():
                 payload[f"{key_prefix}/{key}"] = wandb.Video(str(path))
