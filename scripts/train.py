@@ -3962,6 +3962,9 @@ def _select_periodic_visualization_primary(
         accepted_vertical["primary_prediction_root_pose_source"] = prediction_root_pose_source
         accepted_vertical["primary_readable_video"] = primary_readable_video
         accepted_vertical["primary_triplet_video"] = primary_triplet_video
+        accepted_vertical["primary_row1_soma_somamesh_video"] = primary_video
+        accepted_vertical["primary_row2_g1_target_isaaclab_video"] = primary_video
+        accepted_vertical["primary_row3_g1_kinematics_isaaclab_video"] = primary_video
         selected["accepted_vertical_v2"] = accepted_vertical
     return selected
 
@@ -4032,11 +4035,10 @@ def _wandb_periodic_eval_payload(
         )
         accepted_vertical = visualization.get("accepted_vertical_v2", {})
         if isinstance(accepted_vertical, dict) and accepted_vertical.get("enabled"):
+            accepted_primary_video = _accepted_vertical_v2_user_facing_primary_video(accepted_vertical)
             payload["periodic_eval/accepted_vertical_v2_status"] = accepted_vertical.get("status", "")
             payload["periodic_eval/accepted_vertical_v2_export_status"] = accepted_vertical.get("export_status", "")
-            payload["periodic_eval/accepted_vertical_v2/primary_video"] = accepted_vertical.get(
-                "primary_video", ""
-            )
+            payload["periodic_eval/accepted_vertical_v2/primary_video"] = accepted_primary_video
             payload["periodic_eval/accepted_vertical_v2/primary_frame_count"] = int(
                 accepted_vertical.get("primary_frame_count", 0) or 0
             )
@@ -4744,6 +4746,59 @@ def _accepted_vertical_v2_media_paths(accepted_vertical: dict[str, Any]) -> list
     return deduped
 
 
+def _accepted_vertical_v2_has_native_fps_primary(accepted_vertical: dict[str, Any]) -> bool:
+    if not isinstance(accepted_vertical, dict):
+        return False
+    primary_video = str(accepted_vertical.get("primary_video", "") or "").strip()
+    if not primary_video:
+        return False
+    if str(accepted_vertical.get("primary_source", "") or "") == "native_fps_visualization_core":
+        return True
+    review_mode = str(accepted_vertical.get("primary_review_mode", "") or "").strip()
+    prediction_root_pose_source = str(
+        accepted_vertical.get("primary_prediction_root_pose_source", "") or ""
+    ).strip()
+    return (
+        review_mode == "native_fps_contiguous_rollout"
+        and bool(accepted_vertical.get("primary_physical_time_aligned", False))
+        and prediction_root_pose_source == "predictions_jsonl"
+    )
+
+
+def _accepted_vertical_v2_user_facing_primary_video(accepted_vertical: dict[str, Any]) -> str:
+    if not _accepted_vertical_v2_has_native_fps_primary(accepted_vertical):
+        return ""
+    return str(
+        accepted_vertical.get("primary_readable_video")
+        or accepted_vertical.get("primary_video")
+        or accepted_vertical.get("primary_triplet_video")
+        or ""
+    )
+
+
+def _visualization_user_facing_primary_media(
+    visualization: dict[str, Any],
+    accepted_vertical: dict[str, Any],
+) -> tuple[str, str]:
+    backend = str(visualization.get("primary_backend", "") or "").strip()
+    if backend == "trajectory_preview":
+        return "", ""
+    if backend == "accepted_vertical_v2" and not _accepted_vertical_v2_has_native_fps_primary(
+        accepted_vertical
+    ):
+        return "", ""
+    primary_video = str(visualization.get("primary_video", "") or "")
+    primary_readable_video = str(visualization.get("primary_readable_video", "") or "")
+    if backend == "accepted_vertical_v2" and _accepted_vertical_v2_has_native_fps_primary(
+        accepted_vertical
+    ):
+        primary_video = _accepted_vertical_v2_user_facing_primary_video(accepted_vertical)
+        primary_readable_video = str(
+            accepted_vertical.get("primary_readable_video") or primary_video or ""
+        )
+    return primary_video, primary_readable_video
+
+
 def _visual_validation_path_list(value: Any) -> list[Path]:
     if value in (None, ""):
         return []
@@ -5440,41 +5495,40 @@ def _wandb_log_visualization(
     accepted_vertical = visualization.get("accepted_vertical_v2", {})
     if not isinstance(accepted_vertical, dict):
         accepted_vertical = {}
-    primary_video_path = _path_from_text(visualization.get("primary_video"))
-    primary_readable_path = _path_from_text(visualization.get("primary_readable_video"))
-    for key in (
-        "summary_json",
-        "trajectory_csv",
-        "trajectory_svg",
-        "trajectory_html",
-        "manifest_json",
-        "html",
-    ):
-        source = capsule if key in {"manifest_json", "html"} else visualization
+    accepted_primary_video = _accepted_vertical_v2_user_facing_primary_video(accepted_vertical)
+    accepted_primary_path = _path_from_text(accepted_primary_video)
+    primary_video_text, primary_readable_text = _visualization_user_facing_primary_media(
+        visualization, accepted_vertical
+    )
+    primary_video_path = _path_from_text(primary_video_text)
+    primary_readable_path = _path_from_text(primary_readable_text)
+    for key in ("summary_json", "trajectory_csv", "manifest_json"):
+        source = capsule if key == "manifest_json" else visualization
         path = _path_from_text(source.get(key))
         if path is not None:
             _wandb_save(run, path)
-    for video_path in _capsule_video_paths(capsule):
-        _wandb_save(run, video_path)
     if primary_video_path is not None and primary_video_path.exists():
         _wandb_save(run, primary_video_path)
     if primary_readable_path is not None and primary_readable_path.exists():
         _wandb_save(run, primary_readable_path)
     for path in _accepted_vertical_v2_media_paths(accepted_vertical):
-        _wandb_save(run, path)
+        if path.suffix.lower() == ".mp4" and accepted_primary_path is None:
+            continue
+        if accepted_primary_path is None or path != accepted_primary_path:
+            _wandb_save(run, path)
+    if accepted_primary_path is not None and accepted_primary_path.exists():
+        _wandb_save(run, accepted_primary_path)
     payload = {
         f"{key_prefix}/status": visualization.get("status", ""),
         f"{key_prefix}/primary_backend": visualization.get("primary_backend", ""),
         f"{key_prefix}/route_status": visualization.get("route_visualization_status", ""),
         f"{key_prefix}/summary_json": visualization.get("summary_json", ""),
-        f"{key_prefix}/primary_video": visualization.get("primary_video", ""),
-        f"{key_prefix}/primary_readable_video": visualization.get("primary_readable_video", ""),
+        f"{key_prefix}/primary_video": primary_video_text,
+        f"{key_prefix}/primary_readable_video": primary_readable_text,
         f"{key_prefix}/sample_count": visualization.get("sample_count", 0),
         f"{key_prefix}/trajectory_row_count": visualization.get("trajectory_row_count", 0),
         f"{key_prefix}/accepted_vertical_v2/status": accepted_vertical.get("status", ""),
-        f"{key_prefix}/accepted_vertical_v2/primary_video": accepted_vertical.get(
-            "primary_video", ""
-        ),
+        f"{key_prefix}/accepted_vertical_v2/primary_video": accepted_primary_video,
         f"{key_prefix}/accepted_vertical_v2/primary_metadata": accepted_vertical.get(
             "primary_metadata", ""
         ),
@@ -5490,28 +5544,6 @@ def _wandb_log_visualization(
         f"{key_prefix}/capsule_status": capsule.get("status", ""),
         f"{key_prefix}/capsule_manifest": capsule.get("manifest_json", ""),
     }
-    html_path = _path_from_text(visualization.get("trajectory_html"))
-    if html_path is not None and html_path.exists():
-        try:
-            import wandb
-
-            payload[f"{key_prefix}/trajectory_preview"] = wandb.Html(
-                html_path.read_text(encoding="utf-8")
-            )
-        except Exception:
-            pass
-    capsule_html = _path_from_text(capsule.get("html"))
-    if capsule_html is not None and capsule_html.exists():
-        try:
-            import wandb
-
-            payload[f"{key_prefix}/capsule_preview"] = wandb.Html(
-                capsule_html.read_text(encoding="utf-8")
-            )
-            for index, video_path in enumerate(_capsule_video_paths(capsule)[:4]):
-                payload[f"{key_prefix}/capsule_video_{index}"] = wandb.Video(str(video_path))
-        except Exception:
-            pass
     try:
         import wandb
 
@@ -5519,7 +5551,6 @@ def _wandb_log_visualization(
             payload[f"{key_prefix}/primary"] = wandb.Video(str(primary_video_path))
         if primary_readable_path is not None and primary_readable_path.exists():
             payload[f"{key_prefix}/primary_readable"] = wandb.Video(str(primary_readable_path))
-        accepted_primary_path = _path_from_text(accepted_vertical.get("primary_video"))
         if accepted_primary_path is not None and accepted_primary_path.exists():
             payload[f"{key_prefix}/accepted_vertical_v2/primary"] = wandb.Video(
                 str(accepted_primary_path)
@@ -5529,9 +5560,9 @@ def _wandb_log_visualization(
             ("accepted_vertical_v2/row2_g1_target", "primary_row2_g1_target_isaaclab_video"),
             ("accepted_vertical_v2/row3_g1_kinematics", "primary_row3_g1_kinematics_isaaclab_video"),
         ):
-            if visualization.get("primary_backend") != "accepted_vertical_v2":
+            if accepted_primary_path is None or not accepted_primary_path.exists():
                 break
-            path = Path(str(accepted_vertical.get(field, "")))
+            path = _path_from_text(accepted_vertical.get(field)) or accepted_primary_path
             if path.exists():
                 payload[f"{key_prefix}/{key}"] = wandb.Video(str(path))
     except Exception:

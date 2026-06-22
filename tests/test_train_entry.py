@@ -1611,19 +1611,16 @@ class TrainEntryTests(unittest.TestCase):
         self.assertIsNone(step)
         self.assertEqual(
             payload["periodic_eval/visualization/accepted_vertical_v2/primary_video"],
-            str(paths["combined_video"]),
+            "",
         )
-        for key in (
-            "periodic_eval/visualization/accepted_vertical_v2/primary",
-            "periodic_eval/visualization/accepted_vertical_v2/row1_soma_somamesh",
-            "periodic_eval/visualization/accepted_vertical_v2/row2_g1_target",
-            "periodic_eval/visualization/accepted_vertical_v2/row3_g1_kinematics",
-        ):
-            self.assertIsInstance(payload[key], FakeVideo)
-        self.assertTrue(any(str(paths["combined_video"]) == path for path in saved_paths))
-        self.assertTrue(any(str(paths["row1_soma_somamesh_video"]) == path for path in saved_paths))
-        self.assertTrue(any(str(paths["row2_g1_target_isaaclab_video"]) == path for path in saved_paths))
-        self.assertTrue(any(str(paths["row3_g1_kinematics_isaaclab_video"]) == path for path in saved_paths))
+        self.assertNotIn("periodic_eval/visualization/accepted_vertical_v2/primary", payload)
+        self.assertNotIn("periodic_eval/visualization/accepted_vertical_v2/row1_soma_somamesh", payload)
+        self.assertNotIn("periodic_eval/visualization/accepted_vertical_v2/row2_g1_target", payload)
+        self.assertNotIn("periodic_eval/visualization/accepted_vertical_v2/row3_g1_kinematics", payload)
+        self.assertFalse(any(str(paths["combined_video"]) == path for path in saved_paths))
+        self.assertFalse(any(str(paths["row1_soma_somamesh_video"]) == path for path in saved_paths))
+        self.assertFalse(any(str(paths["row2_g1_target_isaaclab_video"]) == path for path in saved_paths))
+        self.assertFalse(any(str(paths["row3_g1_kinematics_isaaclab_video"]) == path for path in saved_paths))
 
     def test_periodic_visualization_prefers_native_fps_primary_when_available(self):
         native = {
@@ -1682,8 +1679,20 @@ class TrainEntryTests(unittest.TestCase):
             selected["accepted_vertical_v2"]["primary_prediction_root_pose_source"],
             "predictions_jsonl",
         )
+        self.assertEqual(
+            selected["accepted_vertical_v2"]["primary_row1_soma_somamesh_video"],
+            "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
+        )
+        self.assertEqual(
+            selected["accepted_vertical_v2"]["primary_row2_g1_target_isaaclab_video"],
+            "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
+        )
+        self.assertEqual(
+            selected["accepted_vertical_v2"]["primary_row3_g1_kinematics_isaaclab_video"],
+            "/tmp/out/online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
+        )
 
-    def test_periodic_visualization_wandb_logs_native_fps_primary_without_bridge_primary_alias(self):
+    def test_periodic_visualization_wandb_logs_native_fps_primary_and_row_aliases(self):
         logged_payloads = []
         saved_paths = []
 
@@ -1718,6 +1727,9 @@ class TrainEntryTests(unittest.TestCase):
                     "enabled": True,
                     "status": "failed",
                     "primary_video": str(primary_readable),
+                    "primary_source": "native_fps_visualization_core",
+                    "primary_review_mode": "native_fps_contiguous_rollout",
+                    "primary_readable_video": str(primary_readable),
                     "bridge_primary_video": str(bridge_video),
                     "primary_frame_count": 200,
                     "primary_physical_time_aligned": True,
@@ -1744,6 +1756,13 @@ class TrainEntryTests(unittest.TestCase):
         self.assertIsInstance(payload["periodic_eval/visualization/primary"], FakeVideo)
         self.assertIsInstance(payload["periodic_eval/visualization/primary_readable"], FakeVideo)
         self.assertIsInstance(payload["periodic_eval/visualization/accepted_vertical_v2/primary"], FakeVideo)
+        for key in (
+            "periodic_eval/visualization/accepted_vertical_v2/row1_soma_somamesh",
+            "periodic_eval/visualization/accepted_vertical_v2/row2_g1_target",
+            "periodic_eval/visualization/accepted_vertical_v2/row3_g1_kinematics",
+        ):
+            self.assertIsInstance(payload[key], FakeVideo)
+            self.assertEqual(payload[key].path, str(primary_readable))
         self.assertEqual(payload["periodic_eval/visualization/accepted_vertical_v2/primary_video"], str(primary_readable))
         self.assertEqual(payload["periodic_eval/visualization/accepted_vertical_v2/primary_frame_count"], 200)
         self.assertTrue(payload["periodic_eval/visualization/accepted_vertical_v2/primary_physical_time_aligned"])
@@ -1771,6 +1790,7 @@ class TrainEntryTests(unittest.TestCase):
                 for path, base_path in saved_paths
             )
         )
+        self.assertFalse(any(path == str(bridge_video) for path, _base_path in saved_paths))
 
     def test_wandb_save_avoids_same_base_path_glob_for_external_single_file(self):
         saved_calls = []
@@ -1840,6 +1860,98 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(payload["periodic_eval/visualization/primary_video"], "")
         self.assertEqual(payload["periodic_eval/visualization/primary_readable_video"], "")
 
+    def test_periodic_visualization_wandb_hides_bridge_only_and_line_style_media(self):
+        logged_payloads = []
+        saved_paths = []
+
+        class FakeRun:
+            def log(self, payload, step=None):
+                logged_payloads.append((payload, step))
+
+            def save(self, path, base_path=None):
+                saved_paths.append((path, base_path))
+
+        class FakeVideo:
+            def __init__(self, path):
+                self.path = path
+
+        class FakeHtml:
+            def __init__(self, text):
+                self.text = text
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trajectory_html = root / "trajectory_preview.html"
+            capsule_html = root / "capsule_preview.html"
+            capsule_video = root / "predicted_g1_3d_capsules.mp4"
+            bridge_primary = root / "bridge_primary.mp4"
+            row1 = root / "bridge_row1.mp4"
+            row2 = root / "bridge_row2.mp4"
+            row3 = root / "bridge_row3.mp4"
+            for path in (
+                trajectory_html,
+                capsule_html,
+                capsule_video,
+                bridge_primary,
+                row1,
+                row2,
+                row3,
+            ):
+                if path.suffix == ".html":
+                    path.write_text("<html></html>", encoding="utf-8")
+                else:
+                    path.write_bytes(b"artifact")
+            visualization = {
+                "enabled": True,
+                "status": "failed",
+                "primary_backend": "accepted_vertical_v2",
+                "route_visualization_status": "ok",
+                "summary_json": str(root / "visual_manifest.json"),
+                "primary_video": str(bridge_primary),
+                "trajectory_html": str(trajectory_html),
+                "accepted_vertical_v2": {
+                    "enabled": True,
+                    "status": "failed",
+                    "primary_video": str(bridge_primary),
+                    "primary_row1_soma_somamesh_video": str(row1),
+                    "primary_row2_g1_target_isaaclab_video": str(row2),
+                    "primary_row3_g1_kinematics_isaaclab_video": str(row3),
+                },
+                "capsule_visualization": {
+                    "status": "ok",
+                    "manifest_json": "",
+                    "html": str(capsule_html),
+                    "samples": [{"predicted_video": str(capsule_video)}],
+                },
+            }
+            fake_wandb = types.SimpleNamespace(Video=FakeVideo, Html=FakeHtml)
+            with mock.patch.dict(sys.modules, {"wandb": fake_wandb}):
+                train_entry._wandb_log_visualization(
+                    FakeRun(),
+                    visualization,
+                    {"visualization": {"wandb_upload": True}},
+                    key_prefix="periodic_eval/visualization",
+                )
+
+        payload, step = logged_payloads[0]
+        self.assertIsNone(step)
+        self.assertEqual(payload["periodic_eval/visualization/primary_video"], "")
+        self.assertEqual(payload["periodic_eval/visualization/primary_readable_video"], "")
+        self.assertEqual(payload["periodic_eval/visualization/accepted_vertical_v2/primary_video"], "")
+        self.assertNotIn("periodic_eval/visualization/primary", payload)
+        self.assertNotIn("periodic_eval/visualization/primary_readable", payload)
+        self.assertNotIn("periodic_eval/visualization/accepted_vertical_v2/primary", payload)
+        self.assertNotIn("periodic_eval/visualization/accepted_vertical_v2/row1_soma_somamesh", payload)
+        self.assertNotIn("periodic_eval/visualization/accepted_vertical_v2/row2_g1_target", payload)
+        self.assertNotIn("periodic_eval/visualization/accepted_vertical_v2/row3_g1_kinematics", payload)
+        self.assertNotIn("periodic_eval/visualization/trajectory_preview", payload)
+        self.assertNotIn("periodic_eval/visualization/capsule_preview", payload)
+        self.assertFalse(any(path == str(bridge_primary) for path, _base_path in saved_paths))
+        self.assertFalse(any(path == str(row1) for path, _base_path in saved_paths))
+        self.assertFalse(any(path == str(row2) for path, _base_path in saved_paths))
+        self.assertFalse(any(path == str(row3) for path, _base_path in saved_paths))
+        self.assertFalse(any(path == str(capsule_video) for path, _base_path in saved_paths))
+
     def test_periodic_eval_wandb_payload_records_visualization_primary_backend(self):
         payload = train_entry._wandb_periodic_eval_payload(
             step=5000,
@@ -1876,7 +1988,7 @@ class TrainEntryTests(unittest.TestCase):
         self.assertEqual(payload["periodic_eval/accepted_vertical_v2_export_status"], "failed")
         self.assertEqual(
             payload["periodic_eval/accepted_vertical_v2/primary_video"],
-            "vertical_somamesh_g1target_g1kinematics.mp4",
+            "",
         )
 
     def test_periodic_eval_wandb_payload_exposes_selected_primary_video(self):
@@ -1902,6 +2014,9 @@ class TrainEntryTests(unittest.TestCase):
                     "status": "failed",
                     "export_status": "failed",
                     "primary_video": "online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
+                    "primary_source": "native_fps_visualization_core",
+                    "primary_review_mode": "native_fps_contiguous_rollout",
+                    "primary_readable_video": "online_retarget_visual_validation/step_00005000/rank_000/clip_00_readable.mp4",
                     "primary_frame_count": 200,
                     "primary_physical_time_aligned": True,
                     "primary_prediction_root_pose_source": "predictions_jsonl",
